@@ -4,7 +4,7 @@
 
 本文件记录 FeatherView 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。1.0 之前，次版本号的变化可能包含不兼容的改动。
 
-## [0.16.0] — 尚未发布
+## [0.16.0] — 2026-11-06
 
 ### 新增
 
@@ -54,5 +54,5 @@
 - 文件树多选与批量操作；SVG 与 TypeScript 文件识别；新图标与配色。
 - 原生 Markdown 渲染、HTML 预览、图片、PDF 与十六进制查看器、小地图、自动保存、会话恢复。
 
-[0.16.0]: https://github.com/BradZhone/feather/compare/v0.15.0...HEAD
+[0.16.0]: https://github.com/BradZhone/feather/releases/tag/v0.16.0
 [0.15.0]: https://github.com/BradZhone/feather/releases/tag/v0.15.0
