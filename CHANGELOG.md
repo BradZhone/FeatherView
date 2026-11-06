@@ -4,7 +4,7 @@
 
 All notable changes to FeatherView are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may contain incompatible changes.
 
-## [0.16.0] — Unreleased
+## [0.16.0] — 2026-11-06
 
 ### Added
 
@@ -54,5 +54,5 @@ First packaged release. The project was renamed **FeatherView**.
 - Multi-selection and batch operations in the file tree; SVG and TypeScript detection; new icon and colour scheme.
 - Native Markdown rendering, HTML preview, image, PDF and hex viewers, minimap, auto-save, session restore.
 
-[0.16.0]: https://github.com/BradZhone/feather/compare/v0.15.0...HEAD
+[0.16.0]: https://github.com/BradZhone/feather/releases/tag/v0.16.0
 [0.15.0]: https://github.com/BradZhone/feather/releases/tag/v0.15.0
