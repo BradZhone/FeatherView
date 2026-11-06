@@ -1,0 +1,34 @@
+app	scenario	run	memory_mb	processes	cpu_s
+FeatherView	idle	1	22.0	1	0.1
+VS Code	idle	1	560.9	7	3.7
+Zed	idle	1	106.2	2	0.7
+FeatherView	mixed	1	67.0	1	0.3
+VS Code	mixed	1	768.1	7	4.8
+Zed	mixed	1	121.2	2	1.0
+FeatherView	biglog	1	41.0	1	0.1
+VS Code	biglog	1	715.9	7	5.0
+Zed	biglog	1	255.1	2	1.2
+FeatherView	html	1	92.4	4	0.4
+Chrome	html	1	193.6	7	0.9
+FeatherView	idle	2	22.0	1	0.1
+VS Code	idle	2	512.9	7	3.7
+Zed	idle	2	126.1	2	0.7
+FeatherView	mixed	2	66.0	1	0.3
+VS Code	mixed	2	704.3	7	5.3
+Zed	mixed	2	121.1	2	0.9
+FeatherView	biglog	2	41.0	1	0.1
+VS Code	biglog	2	716.9	7	5.0
+Zed	biglog	2	236.0	2	1.2
+FeatherView	html	2	75.4	4	0.5
+Chrome	html	2	191.6	7	0.9
+FeatherView	idle	3	23.0	1	0.1
+VS Code	idle	3	535.0	7	3.7
+Zed	idle	3	109.2	2	0.7
+FeatherView	mixed	3	67.0	1	0.3
+VS Code	mixed	3	706.0	7	5.3
+Zed	mixed	3	138.1	2	0.8
+FeatherView	biglog	3	43.0	1	0.1
+VS Code	biglog	3	715.3	7	5.2
+Zed	biglog	3	256.1	2	1.2
+FeatherView	html	3	97.5	4	0.4
+Chrome	html	3	193.6	7	0.9

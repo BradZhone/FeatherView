@@ -1,9 +1,9 @@
 #!/bin/bash
-# Launches Feather with different files and reports phys_footprint (what Activity Monitor shows).
+# Launches FeatherView with different files and reports phys_footprint (what Activity Monitor shows).
 # Usage: scripts/measure.sh [root-dir]
 set -u
 cd "$(dirname "$0")/.."
-BIN=build/Feather.app/Contents/MacOS/Feather
+BIN=build/FeatherView.app/Contents/MacOS/FeatherView
 ROOT=${1:-$PWD}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

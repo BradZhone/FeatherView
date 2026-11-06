@@ -1,0 +1,117 @@
+#import "Notebook.h"
+
+static const NSUInteger kMaxOutputChars = 20000, kMaxImages = 200;
+
+static NSString *joined(id v) {                       // nbformat stores text as a string or a list of lines
+    if ([v isKindOfClass:NSString.class]) return v;
+    if ([v isKindOfClass:NSArray.class]) {
+        NSMutableString *s = [NSMutableString string];
+        for (id x in v) if ([x isKindOfClass:NSString.class]) [s appendString:x];
+        return s;
+    }
+    return @"";
+}
+
+static NSString *stripANSI(NSString *s) {
+    static NSRegularExpression *re;
+    if (!re) re = [NSRegularExpression regularExpressionWithPattern:@"\\x1B\\[[0-9;?]*[ -/]*[@-~]" options:0 error:nil];
+    return [re stringByReplacingMatchesInString:s options:0 range:NSMakeRange(0, s.length) withTemplate:@""];
+}
+
+// A fence longer than any run of backticks inside the text.
+static void fenced(NSMutableString *md, NSString *text, NSString *lang) {
+    NSUInteger longest = 0, run = 0;
+    for (NSUInteger i = 0; i < text.length; i++) {
+        if ([text characterAtIndex:i] == '`') longest = MAX(longest, ++run); else run = 0;
+    }
+    NSString *fence = [@"" stringByPaddingToLength:MAX(3, longest + 1) withString:@"`" startingAtIndex:0];
+    if (text.length > kMaxOutputChars) text = [[text substringToIndex:kMaxOutputChars] stringByAppendingString:@"\n… （输出太长，已截断）"];
+    while ([text hasSuffix:@"\n"]) text = [text substringToIndex:text.length - 1];
+    [md appendFormat:@"%@%@\n%@\n%@\n\n", fence, lang ?: @"", text, fence];
+}
+
+static NSString *writeImage(NSString *b64, NSString *ext, NSString *dir, NSUInteger *count) {
+    if (*count >= kMaxImages) return nil;
+    NSData *d = [[NSData alloc] initWithBase64EncodedString:joined(b64) options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    if (!d.length) return nil;
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *p = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"out-%lu.%@", (unsigned long)(*count)++, ext]];
+    return [d writeToFile:p atomically:NO] ? p : nil;
+}
+
+static NSString *encoded(NSString *path) {
+    return [path stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet] ?: path;
+}
+static NSString *imageLink(NSString *path) { return [NSString stringWithFormat:@"![](%@)\n\n", encoded(path)]; }
+
+static void outputs(NSMutableString *md, NSArray *outs, NSString *dir, NSUInteger *images) {
+    for (NSDictionary *o in outs) {
+        if (![o isKindOfClass:NSDictionary.class]) continue;
+        NSString *type = o[@"output_type"];
+        if ([type isEqual:@"stream"]) { fenced(md, stripANSI(joined(o[@"text"])), @"text"); continue; }
+        if ([type isEqual:@"error"]) {
+            NSString *tb = stripANSI(joined(o[@"traceback"]));
+            if (!tb.length) tb = [NSString stringWithFormat:@"%@: %@", o[@"ename"] ?: @"Error", o[@"evalue"] ?: @""];
+            fenced(md, tb, @"text");
+            continue;
+        }
+        NSDictionary *data = [o[@"data"] isKindOfClass:NSDictionary.class] ? o[@"data"] : nil;
+        if (!data) continue;
+        NSString *img = nil;
+        if (data[@"image/png"]) img = writeImage(data[@"image/png"], @"png", dir, images);
+        else if (data[@"image/jpeg"]) img = writeImage(data[@"image/jpeg"], @"jpg", dir, images);
+        else if (data[@"image/svg+xml"] && *images < kMaxImages) {
+            [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+            NSString *p = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"out-%lu.svg", (unsigned long)(*images)++]];
+            if ([joined(data[@"image/svg+xml"]) writeToFile:p atomically:NO encoding:NSUTF8StringEncoding error:nil]) img = p;
+        }
+        if (img) { [md appendString:imageLink(img)]; continue; }
+        if (data[@"text/markdown"]) { [md appendFormat:@"%@\n\n", joined(data[@"text/markdown"])]; continue; }
+        if (data[@"text/plain"]) { fenced(md, stripANSI(joined(data[@"text/plain"])), @"text"); continue; }
+        if (data[@"text/html"]) fenced(md, joined(data[@"text/html"]), @"html");
+    }
+}
+
+NSString *NotebookToMarkdown(NSData *json, NSString *imageDir, NSUInteger *cellCount) {
+    if (cellCount) *cellCount = 0;
+    NSError *e = nil;
+    id nb = json.length ? [NSJSONSerialization JSONObjectWithData:json options:0 error:&e] : nil;
+    NSArray *cells = [nb isKindOfClass:NSDictionary.class] ? nb[@"cells"] : nil;
+    if (![cells isKindOfClass:NSArray.class]) {
+        if (!json.length) return @"> 空的 notebook。";
+        return [NSString stringWithFormat:@"> 无法解析这个 notebook：%@\n>\n> 可以切换到源码视图查看。",
+                e.localizedDescription ?: @"不是 Jupyter 格式（没有 cells）"];
+    }
+    NSDictionary *meta = [nb[@"metadata"] isKindOfClass:NSDictionary.class] ? nb[@"metadata"] : @{};
+    NSString *lang = meta[@"language_info"][@"name"] ?: meta[@"kernelspec"][@"language"] ?: @"python";
+    if (![lang isKindOfClass:NSString.class]) lang = @"python";
+    NSMutableString *md = [NSMutableString string];
+    NSUInteger images = 0;
+    NSString *kernel = meta[@"kernelspec"][@"display_name"];
+    if ([kernel isKindOfClass:NSString.class]) [md appendFormat:@"<small>%@ · %lu 个单元格</small>\n\n", kernel, (unsigned long)cells.count];
+    for (NSDictionary *c in cells) {
+        if (![c isKindOfClass:NSDictionary.class]) continue;
+        if (cellCount) (*cellCount)++;
+        NSString *type = c[@"cell_type"], *src = joined(c[@"source"]);
+        if ([type isEqual:@"markdown"]) {
+            NSDictionary *att = [c[@"attachments"] isKindOfClass:NSDictionary.class] ? c[@"attachments"] : nil;
+            for (NSString *name in att) {                          // ![x](attachment:image.png)
+                NSDictionary *a = att[name];
+                NSString *key = [a isKindOfClass:NSDictionary.class] ? a.allKeys.firstObject : nil;
+                NSString *p = key ? writeImage(a[key], [key hasSuffix:@"png"] ? @"png" : @"jpg", imageDir, &images) : nil;
+                if (p) src = [src stringByReplacingOccurrencesOfString:[@"attachment:" stringByAppendingString:name]
+                                                            withString:encoded(p)];
+            }
+            [md appendFormat:@"%@\n\n", src];
+        } else if ([type isEqual:@"code"]) {
+            id n = c[@"execution_count"];
+            [md appendFormat:@"<small>In [%@]</small>\n\n", [n isKindOfClass:NSNumber.class] ? n : @" "];
+            fenced(md, src, lang);
+            NSArray *outs = [c[@"outputs"] isKindOfClass:NSArray.class] ? c[@"outputs"] : @[];
+            if (outs.count) outputs(md, outs, imageDir, &images);
+        } else {
+            fenced(md, src, @"text");
+        }
+    }
+    return md;
+}

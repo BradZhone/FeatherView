@@ -9,6 +9,16 @@
 #import "MarkdownRender.h"
 #import "TabBarView.h"
 #import "PDFViewer.h"
+#import "DefaultAppsPanel.h"
+#import "WorkspaceSearch.h"
+#import "TablePreview.h"
+#import "TableModel.h"
+#import "TreePreview.h"
+#import "BinaryPreviews.h"
+#import "JSONTree.h"
+#import "Settings.h"
+#import "SettingsWindow.h"
+#include <sqlite3.h>
 #import <PDFKit/PDFKit.h>
 #include <sys/stat.h>
 
@@ -188,6 +198,112 @@ static NSString *mkfile(NSString *dir, NSString *name, NSString *content) {
     return p;
 }
 
+// clickedRow is only set during a real mouse event; let the test say which row was right-clicked.
+@interface FakeClickOutline : FileOutlineView
+@property (nonatomic) NSInteger fakeClickedRow;
+@end
+@implementation FakeClickOutline
+- (NSInteger)clickedRow { return _fakeClickedRow; }
+@end
+
+static void treeMultiSelect(NSString *dir) {
+    NSString *root = [dir stringByAppendingPathComponent:@"multi"];
+    NSString *sub = [root stringByAppendingPathComponent:@"folder"];
+    [NSFileManager.defaultManager createDirectoryAtPath:sub withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *a = mkfile(root, @"a.txt", @"a"), *b = mkfile(root, @"b.txt", @"b"), *c = mkfile(root, @"c.txt", @"c");
+    NSString *x = mkfile(sub, @"x.txt", @"x");
+    FakeClickOutline *ov = [[FakeClickOutline alloc] initWithFrame:NSMakeRect(0, 0, 200, 400)];
+    NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:@"n"];
+    [ov addTableColumn:col];
+    ov.outlineTableColumn = col;
+    FileTree *t = [[FileTree alloc] initWithOutlineView:ov];
+    __block NSUInteger fired = 0;
+    t.onOpen = ^(NSString *p, BOOL pinned) { fired++; };
+    t.rootPath = root;
+    CHECK(ov.allowsMultipleSelection, "tree allows ⇧ / ⌘ multi-selection");
+
+    [t revealPaths:@[c, x, a]];
+    CHECK([t.selectedPaths isEqualToArray:(@[x, a, c])], "several items selected, in row order (folders first): %s",
+          [[t.selectedPaths valueForKey:@"lastPathComponent"] componentsJoinedByString:@","].UTF8String);
+    [t reload];
+    CHECK(t.selectedPaths.count == 3, "reload keeps the whole selection (%lu)", (unsigned long)t.selectedPaths.count);
+
+    ov.fakeClickedRow = [ov rowForItem:[ov itemAtRow:ov.selectedRowIndexes.lastIndex]];      // right-click inside the selection
+    CHECK(t.clickedPaths.count == 3, "right-click on a selected row acts on the whole selection");
+    NSInteger bRow = -1;
+    for (NSInteger r = 0; r < ov.numberOfRows; r++) if ([[(FileNode *)[ov itemAtRow:r] path] isEqual:b]) bRow = r;
+    ov.fakeClickedRow = bRow;
+    CHECK([t.clickedPaths isEqualToArray:@[b]], "right-click on an unselected row acts on just that row");
+    ov.fakeClickedRow = -1;
+    CHECK(t.clickedPaths.count == 0, "right-click on empty space: no rows");
+    CHECK(fired == 0, "changing the selection never opened a file (%lu)", (unsigned long)fired);
+
+    // the click action reads the modifier keys from the current event: make a real one current
+    void (^clickWith)(NSEventModifierFlags) = ^(NSEventModifierFlags flags) {
+        NSEvent *e = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:NSZeroPoint modifierFlags:flags
+                                       timestamp:0 windowNumber:0 context:nil eventNumber:0 clickCount:1 pressure:0];
+        [NSApp postEvent:e atStart:YES];
+        [NSApp nextEventMatchingMask:NSEventMaskLeftMouseUp untilDate:[NSDate distantFuture] inMode:NSDefaultRunLoopMode dequeue:YES];
+        ov.fakeClickedRow = bRow;
+        [ov sendAction:ov.action to:ov.target];
+    };
+    [t revealPath:b];
+    clickWith(NSEventModifierFlagShift);
+    clickWith(NSEventModifierFlagCommand);
+    CHECK(fired == 0, "⇧-click / ⌘-click only select, no preview opens (%lu)", (unsigned long)fired);
+    clickWith(0);
+    CHECK(fired == 1, "a plain click still opens the file");
+}
+
+static void multiSelectActions(NSString *dir) {
+    NSString *ws = [dir stringByAppendingPathComponent:@"ws_multi"];
+    NSString *sub = [ws stringByAppendingPathComponent:@"folder"];
+    [NSFileManager.defaultManager createDirectoryAtPath:sub withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *a = mkfile(ws, @"a.txt", @"a"), *b = mkfile(ws, @"b.txt", @"b"), *keep = mkfile(ws, @"keep.txt", @"k");
+    NSString *x = mkfile(sub, @"x.txt", @"x");
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    for (NSString *k in @[@"sessions", @"NSWindow Frame FeatherMain"]) [ud removeObjectForKey:k];
+    [ud setObject:ws forKey:@"lastRoot"];
+    AppDelegate *d = [AppDelegate new];
+    [d applicationWillFinishLaunching:[NSNotification notificationWithName:NSApplicationWillFinishLaunchingNotification object:NSApp]];
+    [d applicationDidFinishLaunching:[NSNotification notificationWithName:NSApplicationDidFinishLaunchingNotification object:NSApp]];
+    d->_content.alertHandler = ^NSModalResponse(NSAlert *al) { return NSAlertThirdButtonReturn; };
+    NSMutableArray *trashed = [NSMutableArray array];
+    d->_trashHandler = ^NSString *(NSString *p) {                 // never the real Trash
+        [trashed addObject:p];
+        return [NSFileManager.defaultManager removeItemAtPath:p error:nil] ? nil : @"失败";
+    };
+    NSPasteboard *pb = [NSPasteboard pasteboardWithUniqueName];
+    d->_pasteboard = pb;
+
+    [d->_content openPath:a preview:NO focus:NO];
+    [d->_content openPath:x preview:NO focus:NO];
+    [d->_tree revealPaths:@[a, b, sub, x]];
+    NSMenuItem *trash = [[NSMenuItem alloc] initWithTitle:@"移到废纸篓" action:@selector(trashItem:) keyEquivalent:@""];
+    NSMenuItem *rename = [[NSMenuItem alloc] initWithTitle:@"重命名…" action:@selector(renameItem:) keyEquivalent:@""];
+    NSMenuItem *copy = [[NSMenuItem alloc] initWithTitle:@"拷贝路径" action:@selector(copyItemPath:) keyEquivalent:@""];
+    BOOL trashOK = [d validateMenuItem:trash], renameOK = [d validateMenuItem:rename];
+    [d validateMenuItem:copy];
+    CHECK(trashOK && [trash.title isEqualToString:@"将 3 项移到废纸篓"], "menu counts 3 items (folder/x.txt goes with its folder): %s", trash.title.UTF8String);
+    CHECK(!renameOK, "rename is off with several items selected");
+    CHECK([copy.title isEqualToString:@"拷贝 4 个路径"], "copy path title: %s", copy.title.UTF8String);
+
+    [d copyItemPath:nil];
+    CHECK([[pb stringForType:NSPasteboardTypeString] componentsSeparatedByString:@"\n"].count == 4, "copy path puts one path per line");
+
+    [d trashItem:nil];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    CHECK(trashed.count == 3 && ![fm fileExistsAtPath:a] && ![fm fileExistsAtPath:b] && ![fm fileExistsAtPath:sub] && [fm fileExistsAtPath:keep],
+          "⌘⌫ trashes every selected item, once each (%lu calls)", (unsigned long)trashed.count);
+    CHECK(d->_content.tabCount == 0, "tabs of trashed files are closed (%lu left)", (unsigned long)d->_content.tabCount);
+
+    [d->_tree revealPaths:@[keep]];
+    CHECK([d validateMenuItem:rename] && [d validateMenuItem:trash] && [trash.title isEqualToString:@"移到废纸篓"], "one item: rename back on, plain title");
+    [pb releaseGlobally];
+    [d->_content closeAllWithoutAsking];
+    for (NSString *k in @[@"lastRoot", @"sessions", @"recentRoots", @"NSWindow Frame FeatherMain"]) [ud removeObjectForKey:k];
+}
+
 static void tabs(NSString *dir) {
     NSWindow *w2 = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 900, 600) styleMask:NSWindowStyleMaskTitled
                                                  backing:NSBackingStoreBuffered defer:YES];
@@ -319,7 +435,7 @@ static void markdownPreview(NSString *dir) {
     NSParagraphStyle *cps = code != NSNotFound ? [ts attribute:NSParagraphStyleAttributeName atIndex:code effectiveRange:NULL] : nil;
     CHECK(cps.textBlocks.count == 1 && cps.textBlocks[0].backgroundColor, "code block box");
     NSColor *kw = code != NSNotFound ? [ts attribute:NSForegroundColorAttributeName atIndex:code effectiveRange:NULL] : nil;
-    CHECK([kw isEqual:NSColor.systemPinkColor], "python keyword highlighted");
+    CHECK([kw isEqual:HLColor(TokKeyword)], "python keyword highlighted");
     // Layout, not just attributes: short headings / code lines must stay on one line (boxes used to collapse to 1 glyph wide).
     NSLayoutManager *lm = mv.textView.layoutManager;
     [lm ensureLayoutForTextContainer:mv.textView.textContainer];
@@ -649,6 +765,48 @@ static void imageViewer(NSString *dir) {
     [t closeAllWithoutAsking];
 }
 
+static void svgAndTypeScript(NSString *dir) {
+    NSWindow *w; ContentController *t = offscreenController(&w);
+    NSString *svg = mkfile(dir, @"logo.svg", @"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"100\">"
+                           @"<rect width=\"200\" height=\"50\" fill=\"#ff0000\"/><rect y=\"50\" width=\"200\" height=\"50\" fill=\"#0000ff\"/>"
+                           @"<text x=\"10\" y=\"30\" fill=\"#fff\">Hi</text></svg>");
+    [t openPath:svg preview:NO focus:NO];
+    ImagePreviewView *iv = t.activeImage;
+    CHECK(iv && iv.isVector && spinUntil(^BOOL { return iv.decodedSize.width > 0; }, 5), "SVG opens in the image viewer");
+    CHECK([iv.info containsString:@"200 × 100"] && [iv.info containsString:@"SVG"], "SVG size from the file: %s", iv.info.UTF8String);
+    NSRect r = iv.imageRect;
+    CHECK(isRed(pixelAt(iv, NSMakePoint(NSMidX(r), NSMinY(r) + 10))) && isBlue(pixelAt(iv, NSMakePoint(NSMidX(r), NSMaxY(r) - 10))),
+          "SVG drawn upright (red on top)");
+    [iv setZoom:8 around:NSMakePoint(NSMidX(iv.bounds), NSMidY(iv.bounds))];
+    CHECK(spinUntil(^BOOL { return iv.decodedSize.width >= 1600; }, 5), "zooming in re-renders the SVG sharp (%.0f px wide)", iv.decodedSize.width);
+    NSPasteboard *pb = [NSPasteboard pasteboardWithUniqueName];
+    [iv writeToPasteboard:pb];
+    NSBitmapImageRep *png = [NSBitmapImageRep imageRepWithData:[pb dataForType:NSPasteboardTypePNG]];
+    CHECK(png.pixelsWide == 400, "copying an SVG gives a @2x PNG (%ld px)", (long)png.pixelsWide);
+    [pb releaseGlobally];
+
+    // a 14-pt icon with only a viewBox, drawn in currentColor (the kind that looked like nothing opened)
+    w.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    NSString *icon = mkfile(dir, @"icon-small.svg", @"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 14 14\" fill=\"none\">"
+                            @"<rect x=\"1\" y=\"1\" width=\"12\" height=\"12\" fill=\"currentColor\"/></svg>");
+    [t openPath:icon preview:NO focus:NO];
+    iv = t.activeImage;
+    CHECK(iv && spinUntil(^BOOL { return iv.decodedSize.width > 0; }, 5), "viewBox-only SVG opens");
+    CHECK(iv.imageRect.size.width >= 300 && iv.fitsWindow, "small SVG icon is scaled up to fit (%.0f pt wide)", iv.imageRect.size.width);
+    NSColor *ink = pixelAt(iv, NSMakePoint(NSMidX(iv.imageRect), NSMidY(iv.imageRect)));
+    CHECK(ink.brightnessComponent > 0.8, "currentColor follows the text colour, not black on dark (brightness %.2f)", ink.brightnessComponent);
+    w.appearance = nil;
+
+    NSString *bad = mkfile(dir, @"broken.svg", @"<svg this is not finished");
+    [t openPath:bad preview:NO focus:NO];
+    CHECK(spinUntil(^BOOL { return t.editor != nil; }, 5) && [t.currentPath isEqual:bad], "an SVG that can't be drawn opens as source");
+
+    NSString *ts = mkfile(dir, @"db.ts", @"import { Database } from './x';\nexport const db = new Database();\n");
+    [t openPath:ts preview:NO focus:NO];
+    CHECK(t.editor && [t.statusText containsString:@"行 1"], ".ts opens in the editor, not as MPEG-2 video");
+    [t closeAllWithoutAsking];
+}
+
 static void pdfViewer(NSString *dir) {
     NSWindow *w; ContentController *t = offscreenController(&w);
     NSString *pdf = [dir stringByAppendingPathComponent:@"doc.pdf"];
@@ -739,6 +897,158 @@ static void zoomOtherViews(NSString *dir) {
     CHECK(fabs(mv.scale - 1) < 0.01, "⌘0 resets the preview");
     [t closeAllWithoutAsking];
     for (NSString *k in @[@"editorFontSize", @"markdownScale", @"htmlZoom", @"markdownLayout", @"pdfThumbnails"]) [ud removeObjectForKey:k];
+}
+
+#pragma mark Default apps (fake Launch Services: nothing on this Mac is changed)
+
+static void defaultApps(NSString *dir) {
+    NSMutableDictionary<NSString *, NSURL *> *ls = [NSMutableDictionary dictionary];       // uti → app
+    // not ".app": Launch Services would register these fake apps and list them in Finder's "Open With"
+    NSURL *vscode = [NSURL fileURLWithPath:[dir stringByAppendingPathComponent:@"Code.testapp"]];
+    NSURL *textedit = [NSURL fileURLWithPath:[dir stringByAppendingPathComponent:@"TextEdit.testapp"]];
+    NSURL *feather = [NSURL fileURLWithPath:[dir stringByAppendingPathComponent:@"Feather.testapp"]];
+    for (NSURL *app in @[vscode, textedit, feather]) {          // minimal bundles so NSBundle can read their ids
+        NSString *contents = [app.path stringByAppendingPathComponent:@"Contents"];
+        [NSFileManager.defaultManager createDirectoryAtPath:contents withIntermediateDirectories:YES attributes:nil error:nil];
+        NSString *bid = app == feather ? @"test.feather" : [@"test." stringByAppendingString:app.lastPathComponent.stringByDeletingPathExtension];
+        [@{@"CFBundleIdentifier": bid, @"CFBundlePackageType": @"APPL"} writeToFile:[contents stringByAppendingPathComponent:@"Info.plist"] atomically:YES];
+    }
+    FileTypeGroup *md = nil, *txt = nil;
+    for (FileTypeGroup *g in DefaultApps.groups) { if ([g.key isEqual:@"markdown"]) md = g; if ([g.key isEqual:@"text"]) txt = g; }
+    for (NSString *t in md.contentTypes) ls[t] = vscode;
+    for (NSString *t in txt.contentTypes) ls[t] = textedit;
+    NSUserDefaults *store = [[NSUserDefaults alloc] initWithSuiteName:@"feather.tests.defaultapps"];
+    [store removePersistentDomainForName:@"feather.tests.defaultapps"];
+    __block NSUInteger calls = 0;
+    DefaultApps *(^make)(void) = ^DefaultApps *{
+        DefaultApps *a = [DefaultApps new];
+        a.featherBundleID = @"test.feather";
+        a.featherURL = feather;
+        a.store = store;
+        a.lookup = ^NSURL *(NSString *uti) { return ls[uti]; };
+        a.setHandler = ^(NSURL *app, NSString *uti, void (^done)(NSError *)) {
+            calls++;
+            ls[uti] = app;
+            dispatch_async(dispatch_get_main_queue(), ^{ done(nil); });
+        };
+        return a;
+    };
+    DefaultApps *a = make();
+    __block NSString *err = @"?";
+    BOOL (^settled)(void) = ^BOOL { return ![err isEqual:@"?"]; };
+
+    FileTypeGroup *tsGroup = nil, *codeGroup = nil;
+    for (FileTypeGroup *g in DefaultApps.groups) {
+        if ([g.extensions containsObject:@"ts"]) tsGroup = g;
+        if ([g.key isEqual:@"code"]) codeGroup = g;
+    }
+    CHECK(md.contentTypes.count >= 1 && tsGroup && tsGroup != codeGroup,
+          "groups resolve to content types; .ts (also MPEG-2 video) is its own opt-in group");
+    CHECK(![a featherIsDefaultFor:md] && [[a currentDefaultName:md] isEqualToString:@"Code"], "current default shown: %s", [a currentDefaultName:md].UTF8String);
+
+    [a setGroup:md toFeather:YES done:^(NSString *e) { err = e; }];
+    spinUntil(settled, 2);
+    CHECK(!err && [a featherIsDefaultFor:md] && [[a currentDefaultName:md] isEqualToString:@"Feather"], "Markdown now opens with Feather");
+    CHECK([ls[txt.contentTypes.firstObject] isEqual:textedit], "other types untouched");
+    NSUInteger before = calls;
+    err = @"?";
+    [a setGroup:md toFeather:YES done:^(NSString *e) { err = e; }];
+    spinUntil(settled, 2);
+    CHECK(calls == before, "setting it again changes nothing");
+
+    a = make();                                                  // a later launch: the previous app is remembered
+    err = @"?";
+    [a setGroup:md toFeather:NO done:^(NSString *e) { err = e; }];
+    spinUntil(settled, 2);
+    CHECK(!err && [[NSBundle bundleWithURL:ls[md.contentTypes.firstObject]].bundleIdentifier isEqualToString:@"test.Code"], "unticking gives it back to the previous app (%s)", ls[md.contentTypes.firstObject].path.UTF8String);
+
+    err = @"?";
+    [a setGroup:txt toFeather:YES done:^(NSString *e) { err = e; }];
+    spinUntil(settled, 2);
+    [NSFileManager.defaultManager removeItemAtURL:textedit error:nil];      // previous app was deleted meanwhile
+    err = @"?";
+    [a setGroup:txt toFeather:NO done:^(NSString *e) { err = e; }];
+    spinUntil(settled, 2);
+    CHECK([err containsString:@"显示简介"] && [a featherIsDefaultFor:txt], "missing previous app is reported: %s", err.UTF8String);
+
+    for (NSString *t in md.contentTypes) ls[t] = vscode;
+    DefaultAppsPanel *p = [DefaultAppsPanel new];
+    p.apps = make();
+    [p buildSheet];
+    NSUInteger mdIndex = [DefaultApps.groups indexOfObjectPassingTest:^BOOL(FileTypeGroup *g, NSUInteger i, BOOL *s) { return [g.key isEqual:@"markdown"]; }];
+    CHECK(p.checkboxes.count == DefaultApps.groups.count && p.checkboxes[mdIndex].state == NSControlStateValueOff, "sheet reflects current defaults");
+    p.checkboxes[mdIndex].state = NSControlStateValueOn;
+    __block BOOL finished = NO;
+    [p applyThen:^(NSString *e) { finished = YES; }];
+    spinUntil(^BOOL { return finished; }, 2);
+    CHECK([ls[md.contentTypes.firstObject] isEqual:feather], "applying the sheet sets the ticked group");
+
+    // .html belongs to the default browser on macOS: shown, explained, never attempted
+    NSUInteger htmlIndex = [DefaultApps.groups indexOfObjectPassingTest:^BOOL(FileTypeGroup *g, NSUInteger i, BOOL *s) { return [g.key isEqual:@"html"]; }];
+    FileTypeGroup *html = DefaultApps.groups[htmlIndex];
+    NSUInteger before2 = calls;
+    err = @"?";
+    [a setGroup:html toFeather:YES done:^(NSString *e) { err = e; }];
+    spinUntil(settled, 2);
+    CHECK(html.unsupportedReason.length && [err containsString:@"浏览器"] && calls == before2, "HTML is not offered: %s", err.UTF8String);
+    [p buildSheet];
+    CHECK(!p.checkboxes[htmlIndex].enabled, "the HTML checkbox is disabled, with the reason next to it");
+
+    // a refused change must not record a "previous app" (it would hand the type to the wrong app later)
+    FileTypeGroup *pdf = nil;
+    for (FileTypeGroup *g in DefaultApps.groups) if ([g.key isEqual:@"pdf"]) pdf = g;
+    for (NSString *t in pdf.contentTypes) ls[t] = vscode;
+    DefaultApps *refusing = make();
+    refusing.setHandler = ^(NSURL *app, NSString *uti, void (^done)(NSError *)) {
+        NSError *e = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadUnknownError
+                                     userInfo:@{NSUnderlyingErrorKey: [NSError errorWithDomain:NSOSStatusErrorDomain code:-54 userInfo:nil]}];
+        dispatch_async(dispatch_get_main_queue(), ^{ done(e); });
+    };
+    err = @"?";
+    [refusing setGroup:pdf toFeather:YES done:^(NSString *e) { err = e; }];
+    spinUntil(settled, 2);
+    CHECK([err containsString:@"没有权限"] && ![store dictionaryForKey:@"previousDefaultApps"][pdf.contentTypes.firstObject],
+          "a refused change is explained and remembers nothing: %s", err.UTF8String);
+    [store removePersistentDomainForName:@"feather.tests.defaultapps"];
+}
+
+static void openFromFinder(NSString *dir) {
+    NSString *ws = [dir stringByAppendingPathComponent:@"ws_finder"], *other = [dir stringByAppendingPathComponent:@"elsewhere"];
+    for (NSString *x in @[ws, other]) [NSFileManager.defaultManager createDirectoryAtPath:x withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *inside = mkfile(ws, @"in.md", @"# in\n"), *a = mkfile(other, @"a.txt", @"a\n"), *b = mkfile(other, @"b.json", @"{}\n");
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    [ud removeObjectForKey:@"NSWindow Frame FeatherMain"];
+    [ud setObject:ws forKey:@"lastRoot"];
+    [ud setObject:@{ws: @{@"tabs": @[@{@"path": inside, @"preview": @NO, @"line": @1}], @"active": @0}} forKey:@"sessions"];
+    NSNotification *will = [NSNotification notificationWithName:NSApplicationWillFinishLaunchingNotification object:NSApp];
+    NSNotification *did = [NSNotification notificationWithName:NSApplicationDidFinishLaunchingNotification object:NSApp];
+
+    // cold launch by double-clicking two files: Finder delivers them before launch finishes
+    AppDelegate *d = [AppDelegate new];
+    [d applicationWillFinishLaunching:will];
+    [d application:NSApp openURLs:@[[NSURL fileURLWithPath:a], [NSURL fileURLWithPath:b]]];
+    CHECK(d->_content.tabCount == 0, "files are queued until launch finishes");
+    [d applicationDidFinishLaunching:did];
+    CHECK([d->_tree.rootPath isEqualToString:ws], "last workspace restored (%s)", d->_tree.rootPath.UTF8String);
+    CHECK([d->_content.openPaths containsObject:inside] && [d->_content.openPaths containsObject:a] && [d->_content.openPaths containsObject:b],
+          "session tabs + both double-clicked files: %s", [[d->_content.openPaths valueForKey:@"lastPathComponent"] componentsJoinedByString:@","].UTF8String);
+    CHECK([d->_content.currentPath isEqualToString:b], "last opened file is in front");
+
+    NSString *c = mkfile(other, @"c.py", @"x = 1\n");
+    [d application:NSApp openURLs:@[[NSURL fileURLWithPath:c]]];
+    CHECK([d->_tree.rootPath isEqualToString:ws] && [d->_content.currentPath isEqualToString:c], "while running: file from another folder opens as a tab, workspace unchanged");
+    [d application:NSApp openURLs:@[[NSURL fileURLWithPath:other]]];
+    CHECK([d->_tree.rootPath isEqualToString:other], "opening a folder switches the workspace");
+    [d->_content closeAllWithoutAsking];
+
+    for (NSString *k in @[@"lastRoot", @"sessions", @"recentRoots"]) [ud removeObjectForKey:k];
+    AppDelegate *d2 = [AppDelegate new];
+    [d2 applicationWillFinishLaunching:will];
+    [d2 application:NSApp openURLs:@[[NSURL fileURLWithPath:a]]];
+    [d2 applicationDidFinishLaunching:did];
+    CHECK([d2->_tree.rootPath isEqualToString:other] && [d2->_content.currentPath isEqualToString:a], "first launch ever: opens the file's folder");
+    [d2->_content closeAllWithoutAsking];
+    for (NSString *k in @[@"lastRoot", @"sessions", @"recentRoots", @"NSWindow Frame FeatherMain"]) [ud removeObjectForKey:k];
 }
 
 static void htmlPreviewAndAutosave(NSString *dir) {
@@ -849,16 +1159,473 @@ static void layoutAndWorkspaces(NSString *dir) {
     CHECK([d switchToRoot:r2] && d->_content.tabCount == 0 && [d->_tree.rootPath isEqualToString:r2], "switch workspace");
     [d rebuildRootPopupMenu:d->_rootPopup.menu];
     NSMenuItem *ws1 = nil, *ws2 = nil;
+    NSMenuItem *remove1 = nil;
     for (NSMenuItem *i in d->_rootPopup.menu.itemArray) {
+        if (i.isAlternate) { if ([i.representedObject isEqual:r1]) remove1 = i; continue; }
         if ([i.representedObject isEqual:r1]) ws1 = i;
         if ([i.representedObject isEqual:r2]) ws2 = i;
     }
+    CHECK(remove1 && remove1.keyEquivalentModifierMask == NSEventModifierFlagOption && [remove1.title containsString:@"移除"],
+          "holding ⌥ turns another workspace's item into 从列表中移除");
     CHECK(ws1 && ws2 && ws2.state == NSControlStateValueOn && ws1.state == NSControlStateValueOff, "dropdown lists workspaces, current checked");
     [NSApp sendAction:ws1.action to:d from:ws1];
     CHECK([d->_tree.rootPath isEqualToString:r1] && [d->_content.currentPath isEqualToString:f1],
           "clicking a workspace switches back and restores its tabs");
     for (NSString *k in @[@"lastRoot", @"recentRoots", @"sessions", @"NSWindow Frame FeatherMain"])
         [NSUserDefaults.standardUserDefaults removeObjectForKey:k];
+}
+
+#pragma mark Rendered data files
+
+static void dataViews(NSString *dir) {
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    for (NSString *k in @[@"tableLayout", @"jsonLayout", @"plistLayout", @"notebookLayout"]) [ud removeObjectForKey:k];
+    NSWindow *w; ContentController *t = offscreenController(&w);
+    t.alertHandler = ^NSModalResponse(NSAlert *a) { return NSAlertThirdButtonReturn; };
+
+    NSString *csv = mkfile(dir, @"people.csv", @"name,age,city\nZoe,31,Paris\nadam,9,\"New York, NY\"\nBea,100,Oslo\n");
+    [t openPath:csv preview:NO focus:NO];
+    TablePreview *tp = findView(t.view, TablePreview.class);
+    CHECK(t.activeMarkupKind == MarkupTable && t.activeMarkupLayout == MarkupPreview && tp, "a CSV opens as a table");
+    CHECK(tp.visibleRowCount == 3 && tp.tableView.numberOfColumns == 4 && [tp.tableView.tableColumns[1].title isEqual:@"name"] &&
+          [[tp displayedCellAtRow:1 column:2] isEqual:@"New York, NY"], "header row, quoted comma (%lu rows, %ld cols)",
+          (unsigned long)tp.visibleRowCount, (long)tp.tableView.numberOfColumns);
+    [tp sortByColumn:1 ascending:YES];
+    CHECK([[tp displayedCellAtRow:0 column:1] isEqual:@"9"] && [[tp displayedCellAtRow:2 column:1] isEqual:@"100"], "numbers sort as numbers, not text");
+    [tp sortByColumn:0 ascending:YES];
+    CHECK([[tp displayedCellAtRow:0 column:0] isEqual:@"adam"], "text sorts ignoring case");
+    tp.filterText = @"city:o";
+    CHECK(tp.visibleRowCount == 2 && [tp.infoText containsString:@"2 / 3 行"], "filter on one column: %s", tp.infoText.UTF8String);
+    tp.filterText = @"";
+    [tp sortByColumn:-1 ascending:YES];
+    [t.editor gotoLine:5];
+    [t.editor insertText:@"Cy,7,Rome\n" replacementRange:NSMakeRange(NSNotFound, 0)];
+    spinUntil(^BOOL { return tp.model.rowCount == 4; }, 3);
+    CHECK(tp.model.rowCount == 4, "editing the source updates the table (%lu rows)", (unsigned long)tp.model.rowCount);
+    CHECK([tp.model sourceLineOfRow:2] == 4, "row 3 comes from line 4");
+    tp.onJumpToLine(4);
+    CHECK(t.activeMarkupLayout == MarkupSplit && t.editor.caretLine == 4, "double-clicking a row shows the source beside it at that line (%lu)",
+          (unsigned long)t.editor.caretLine);
+
+    NSString *tsv = mkfile(dir, @"x.tsv", @"a\tb\n1\t2\n");
+    [t openPath:tsv preview:NO focus:NO];
+    t.activeMarkupLayout = MarkupPreview;
+    tp = findView(t.view, TablePreview.class);
+    CHECK(tp.tableView.numberOfColumns == 3 && [[tp displayedCellAtRow:0 column:1] isEqual:@"2"], "TSV");
+
+    NSString *json = mkfile(dir, @"package.json", @"{\n  \"name\": \"demo\",\n  // comment\n  \"deps\": {\"b\": \"^1\", \"a\": \"^2\"},\n  \"n\": [1, 2, 3]\n}\n");
+    [t openPath:json preview:NO focus:NO];
+    CHECK(t.activeMarkupKind == MarkupJSON && t.activeMarkupLayout == MarkupSource, "JSON opens as source by default");
+    t.activeMarkupLayout = MarkupPreview;
+    TreePreview *tree = findView(t.view, TreePreview.class);
+    CHECK(tree.root.children.count == 3 && [tree.root.children[1].children[0].key isEqual:@"b"] && tree.outlineView.numberOfRows >= 3,
+          "tree keeps the file's key order (%ld rows)", (long)tree.outlineView.numberOfRows);
+    tree.filterText = @"^2";
+    CHECK(tree.outlineView.numberOfRows == 2 && [tree.outlineView itemAtRow:1] == tree.root.children[1].children[1], "filter keeps the match and its parent (%ld rows)",
+          (long)tree.outlineView.numberOfRows);
+    tree.filterText = @"";
+    [t.editor gotoLine:2];
+    [t.editor insertText:@"oops " replacementRange:NSMakeRange(NSNotFound, 0)];
+    spinUntil(^BOOL { return tree.errorText != nil; }, 3);
+    CHECK([tree.errorText containsString:@"第 2 行"] && tree.root.children.count == 3, "a typo shows where, and keeps the last good tree: %s", tree.errorText.UTF8String);
+    [t.editor undo:nil];
+    spinUntil(^BOOL { return tree.errorText == nil; }, 3);
+    CHECK(!tree.errorText, "fixing it clears the error");
+
+    NSDictionary *nb = @{@"metadata": @{}, @"cells": @[@{@"cell_type": @"markdown", @"source": @"# Notebook title"},
+        @{@"cell_type": @"code", @"execution_count": @1, @"source": @"1+1", @"outputs": @[@{@"output_type": @"execute_result", @"data": @{@"text/plain": @"2"}}]}]};
+    NSString *ipynb = [dir stringByAppendingPathComponent:@"a.ipynb"];
+    [[NSJSONSerialization dataWithJSONObject:nb options:0 error:nil] writeToFile:ipynb atomically:YES];
+    [t openPath:ipynb preview:NO focus:NO];
+    MarkdownPreview *mp = findView(t.view, MarkdownPreview.class);
+    CHECK(t.activeMarkupKind == MarkupNotebook && [mp.textView.string containsString:@"Notebook title"] && [mp.textView.string containsString:@"1+1"],
+          "notebook rendered: %s", [mp.textView.string substringToIndex:MIN((NSUInteger)60, mp.textView.string.length)].UTF8String);
+
+    NSString *plist = [dir stringByAppendingPathComponent:@"Info.plist"];
+    [@{@"CFBundleName": @"X", @"Arr": @[@1]} writeToFile:plist atomically:YES];
+    [t openPath:plist preview:NO focus:NO];
+    CHECK(t.activeMarkupKind == MarkupPlist && t.editor, "an XML plist opens as text with a tree view");
+    [t closeAllWithoutAsking];
+    for (NSString *k in @[@"tableLayout", @"jsonLayout", @"plistLayout", @"notebookLayout"]) [ud removeObjectForKey:k];
+}
+
+static void binaryViews(NSString *dir) {
+    NSWindow *w; ContentController *t = offscreenController(&w);
+    NSString *bplist = [dir stringByAppendingPathComponent:@"bin.plist"];
+    NSData *bin = [NSPropertyListSerialization dataWithPropertyList:@{@"key": @"value", @"list": @[@1, @2]} format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    [bin writeToFile:bplist atomically:YES];
+    [t openPath:bplist preview:NO focus:NO];
+    TreePreview *tree = findView(t.view, TreePreview.class);
+    CHECK(tree && !t.editor && tree.root.children.count == 2 && [t.statusText containsString:@"二进制属性列表"], "a binary plist shows as a tree (was hex)");
+
+    NSString *dbp = [dir stringByAppendingPathComponent:@"app.db"];
+    sqlite3 *db = NULL;
+    sqlite3_open(dbp.fileSystemRepresentation, &db);
+    sqlite3_exec(db, "CREATE TABLE users(id INTEGER, name TEXT, avatar BLOB); INSERT INTO users VALUES (1,'ann',x'0102'),(2,NULL,NULL);"
+                     "CREATE VIEW v AS SELECT name FROM users;", NULL, NULL, NULL);
+    sqlite3_close(db);
+    [t openPath:dbp preview:NO focus:NO];
+    SQLitePreview *sp = findView(t.view, SQLitePreview.class);
+    CHECK(sp && [sp.tableNames isEqualToArray:(@[@"users", @"v"])], "SQLite: tables and views (%s)", [sp.tableNames componentsJoinedByString:@","].UTF8String);
+    spinUntil(^BOOL { return sp.grid.model.rowCount == 2; }, 3);
+    CHECK(sp.grid.model.rowCount == 2 && [[sp.grid.model cellAtRow:0 column:2] isEqual:@"<BLOB 2 字节>"] && [[sp.grid.model cellAtRow:1 column:1] isEqual:@"NULL"],
+          "rows, BLOB and NULL shown readably");
+    [sp runQuery:@"DELETE FROM users"];
+    spinUntil(^BOOL { return [sp.grid.infoText containsString:@"⚠️"]; }, 3);
+    db = NULL;
+    sqlite3_open(dbp.fileSystemRepresentation, &db);
+    sqlite3_stmt *st = NULL; int count = -1;
+    if (sqlite3_prepare_v2(db, "SELECT count(*) FROM users", -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW) count = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st); sqlite3_close(db);
+    CHECK(count == 2 && [sp.grid.infoText containsString:@"⚠️"], "the database is read-only: a DELETE fails and changes nothing (%d rows): %s", count, sp.grid.infoText.UTF8String);
+    [sp runQuery:@"SELECT name FROM users WHERE id = 1"];
+    spinUntil(^BOOL { return sp.grid.model.rowCount == 1 && sp.grid.model.columnCount == 1; }, 3);
+    CHECK([[sp.grid.model cellAtRow:0 column:0] isEqual:@"ann"], "a SELECT runs");
+
+    NSString *src = [dir stringByAppendingPathComponent:@"zipsrc"];
+    [NSFileManager.defaultManager createDirectoryAtPath:[src stringByAppendingPathComponent:@"docs"] withIntermediateDirectories:YES attributes:nil error:nil];
+    mkfile(src, @"readme.txt", @"hello from the zip\n");
+    mkfile([src stringByAppendingPathComponent:@"docs"], @"a b.md", @"# spaced name\n");
+    NSString *zip = [dir stringByAppendingPathComponent:@"pack.zip"];
+    NSTask *z = [NSTask new];
+    z.executableURL = [NSURL fileURLWithPath:@"/usr/bin/zip"];
+    z.arguments = @[@"-qr", zip, @"."];
+    z.currentDirectoryURL = [NSURL fileURLWithPath:src];
+    [z launchAndReturnError:nil];
+    [z waitUntilExit];
+    [t openPath:zip preview:NO focus:NO];
+    ArchivePreview *ap = findView(t.view, ArchivePreview.class);
+    spinUntil(^BOOL { return ap.loaded; }, 5);
+    NSMutableSet *names = [NSMutableSet set];
+    NSUInteger row = NSNotFound;
+    for (NSUInteger r = 0; r < ap.grid.model.rowCount; r++) {
+        NSString *n = [ap.grid.model cellAtRow:r column:0];
+        [names addObject:n];
+        if ([n isEqual:@"docs/a b.md"]) row = r;
+    }
+    CHECK(ap && [names containsObject:@"readme.txt"] && row != NSNotFound, "zip listed (was hex): %s", names.description.UTF8String);
+    CHECK(row != NSNotFound && [[ap.grid.model cellAtRow:row column:1] isEqual:@"14"], "size column, name with a space");
+    __block NSString *opened = nil;
+    ap.onOpenFile = ^(NSString *p) { opened = p; };
+    if (row != NSNotFound) ap.grid.onActivateRow(row);
+    spinUntil(^BOOL { return opened != nil; }, 5);
+    CHECK([fileText(opened, NSUTF8StringEncoding) isEqualToString:@"# spaced name\n"], "double-click extracts and opens the entry");
+    [t closeAllWithoutAsking];
+}
+
+static void hiddenFileSettings(NSString *dir) {
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    NSString *root = [dir stringByAppendingPathComponent:@"ws_hidden"];
+    for (NSString *rel in @[@".env", @".git/HEAD", @".DS_Store", @"cache.pyc", @"main.py"]) {
+        NSString *p = [root stringByAppendingPathComponent:rel];
+        [NSFileManager.defaultManager createDirectoryAtPath:p.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+        [@"x" writeToFile:p atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    }
+    FileOutlineView *ov = [[FileOutlineView alloc] initWithFrame:NSMakeRect(0, 0, 200, 400)];
+    NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:@"n"];
+    [ov addTableColumn:col];
+    ov.outlineTableColumn = col;
+    FileTree *tree = [[FileTree alloc] initWithOutlineView:ov];
+    FTSettings *st = FTSettings.shared;
+    [st resetFileLists];
+    tree.showHidden = st.showHidden;
+    tree.rootPath = root;
+    NSSet *(^names)(void) = ^NSSet * {
+        NSMutableSet *s = [NSMutableSet set];
+        for (NSInteger r = 0; r < ov.numberOfRows; r++) [s addObject:[(FileNode *)[ov itemAtRow:r] name]];
+        return s;
+    };
+    CHECK(st.showHidden && [names() containsObject:@".env"] && ![names() containsObject:@".git"] && ![names() containsObject:@".DS_Store"],
+          "default: dot files are shown, .git and .DS_Store are not: %s", names().description.UTF8String);
+    st.showHidden = NO;
+    tree.showHidden = st.showHidden;
+    CHECK(![names() containsObject:@".env"] && [names() containsObject:@"main.py"] && ![ud boolForKey:@"showHidden"], "turned off, and remembered");
+    st.showHidden = YES;
+    tree.showHidden = YES;
+
+    SettingsWindow *sw = SettingsWindow.shared;
+    [sw reloadFromSettings];
+    sw.alwaysHiddenField.stringValue = @".git, .DS_Store, *.pyc";
+    [sw commitFields];
+    [tree reload];
+    CHECK(![names() containsObject:@"cache.pyc"] && [names() containsObject:@"main.py"] && [st.alwaysHidden containsObject:@"*.pyc"],
+          "a glob added in 设置 hides *.pyc: %s", names().description.UTF8String);
+    sw.alwaysHiddenField.stringValue = @"";
+    [sw commitFields];
+    [tree reload];
+    CHECK([names() containsObject:@".git"] && [names() containsObject:@".DS_Store"], "an empty list shows everything");
+    [sw.showHiddenBox performClick:nil];
+    CHECK(!st.showHidden, "the checkbox in 设置 changes the setting");
+    [st resetFileLists];
+    [sw reloadFromSettings];
+    CHECK(st.showHidden && [sw.alwaysHiddenField.stringValue containsString:@".git"], "恢复默认");
+    for (NSString *k in @[@"showHidden", @"alwaysHidden", @"searchSkipped", @"respectGitignore"]) [ud removeObjectForKey:k];
+    [st apply];
+}
+
+#pragma mark Untitled documents, recent workspaces, appearance
+
+static void untitledDocuments(NSString *dir) {
+    NSString *backups = [dir stringByAppendingPathComponent:@"untitled-backups"];
+    NSString *ws = [dir stringByAppendingPathComponent:@"ws_untitled"];
+    [NSFileManager.defaultManager createDirectoryAtPath:ws withIntermediateDirectories:YES attributes:nil error:nil];
+    NSWindow *w; ContentController *t = offscreenController(&w);
+    t.untitledDirectory = backups;
+    t.workspaceRoot = ws;
+    t.autoSaveMode = AutoSaveOff;                                    // backups must happen anyway
+    __block NSInteger answer = NSAlertSecondButtonReturn;
+    __block NSUInteger asked = 0;
+    t.alertHandler = ^NSModalResponse(NSAlert *a) { asked++; return answer; };
+    __block NSString *suggested = nil, *saveTo = nil;
+    t.savePathHandler = ^NSString *(NSString *name, NSString *d) { suggested = name; return saveTo; };
+    NSUInteger (^backupCount)(void) = ^NSUInteger { return [NSFileManager.defaultManager contentsOfDirectoryAtPath:backups error:nil].count; };
+
+    [t newUntitledDocument];
+    CHECK(t.tabCount == 1 && t.activeIsUntitled && [t.currentTitle isEqual:@"未命名-1"] && !t.currentPath && t.editor,
+          "⌘N opens an editable 未命名-1 tab with no file behind it");
+    CHECK(t.dirtyCount == 0, "an empty untitled tab is not unsaved");
+    [t.editor insertText:@"# Shopping list\nmilk\n" replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK(t.dirtyCount == 1, "with text it counts as unsaved");
+    [t newUntitledDocument];
+    CHECK([t.currentTitle isEqual:@"未命名-2"], "the next one is 未命名-2");
+    [t.editor insertText:@"second" replacementRange:NSMakeRange(NSNotFound, 0)];
+    [t backupUntitled];
+    NSMutableSet *texts = [NSMutableSet set];
+    for (NSString *f in [NSFileManager.defaultManager contentsOfDirectoryAtPath:backups error:nil])
+        [texts addObject:fileText([backups stringByAppendingPathComponent:f], NSUTF8StringEncoding)];
+    CHECK(backupCount() == 2 && [texts containsObject:@"second"] && [texts containsObject:@"# Shopping list\nmilk\n"],
+          "the text is backed up even with auto-save off (%lu files)", (unsigned long)backupCount());
+
+    asked = 0;
+    CHECK([t confirmCloseAll] && asked == 0, "switching away does not ask about untitled tabs");
+    NSDictionary *session = t.sessionState;
+    CHECK([ContentController untitledBackupsInSessions:@{ws: session}].count == 2, "the session lists both backups");
+    [t closeAllWithoutAsking];
+    CHECK(backupCount() == 2, "closing the workspace keeps the backups");
+    [t restoreSession:session];
+    CHECK(t.tabCount == 2 && t.activeIsUntitled && [t.currentTitle isEqual:@"未命名-2"] && [text(t.editor) isEqualToString:@"second"],
+          "restored with titles and text: %s", t.currentTitle.UTF8String);
+
+    answer = NSAlertSecondButtonReturn;
+    asked = 0;
+    CHECK(![t closeActive] && asked == 1 && t.tabCount == 2, "closing asks, 取消 keeps the tab");
+    answer = NSAlertThirdButtonReturn;
+    CHECK([t closeActive] && t.tabCount == 1 && backupCount() == 1, "不保存 closes it and drops its backup");
+
+    [t selectTabAtIndex:0];
+    saveTo = [ws stringByAppendingPathComponent:@"shopping.md"];
+    CHECK([t save] && [suggested isEqualToString:@"Shopping list.txt"], "⌘S asks where to save, suggesting “%s”", suggested.UTF8String);
+    CHECK(!t.activeIsUntitled && [t.currentPath isEqual:saveTo] && [fileText(saveTo, NSUTF8StringEncoding) isEqualToString:@"# Shopping list\nmilk\n"] &&
+          t.activeIsMarkup && t.dirtyCount == 0, "saved as shopping.md: now a normal Markdown tab");
+    struct stat st;
+    CHECK(stat(saveTo.fileSystemRepresentation, &st) == 0 && (st.st_mode & 0777) == 0644, "the new file is 0644 (%o)", st.st_mode & 0777);
+    CHECK(backupCount() == 0, "no backups left");
+
+    [t newUntitledDocument];
+    [t.editor insertText:@"draft" replacementRange:NSMakeRange(NSNotFound, 0)];
+    saveTo = nil;
+    CHECK(![t save] && t.activeIsUntitled && [t.currentTitle isEqual:@"未命名-1"], "cancelling the save panel keeps it untitled (number reused)");
+    answer = NSAlertFirstButtonReturn;
+    CHECK(![t closeActive] && t.tabCount == 2, "保存… then cancelling the panel keeps it open");
+
+    [t newUntitledDocument];
+    asked = 0;
+    CHECK([t closeActive] && asked == 0, "an empty untitled tab closes silently");
+    answer = NSAlertThirdButtonReturn;
+    asked = 0;
+    CHECK([t closeAll] && asked == 1 && t.tabCount == 0 && backupCount() == 0, "全部关闭 → 不保存 drops them");
+    [NSFileManager.defaultManager removeItemAtPath:backups error:nil];
+}
+
+static void recentAndAppearance(NSString *dir) {
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    for (NSString *k in @[@"lastRoot", @"recentRoots", @"sessions", @"appearance", @"NSWindow Frame FeatherMain"]) [ud removeObjectForKey:k];
+    NSString *a = [dir stringByAppendingPathComponent:@"ws_ra"], *b = [dir stringByAppendingPathComponent:@"ws_rb"], *c = [dir stringByAppendingPathComponent:@"ws_rc"];
+    for (NSString *x in @[a, b, c]) [NSFileManager.defaultManager createDirectoryAtPath:x withIntermediateDirectories:YES attributes:nil error:nil];
+    AppDelegate *d = [AppDelegate new];
+    [d applicationWillFinishLaunching:[NSNotification notificationWithName:NSApplicationWillFinishLaunchingNotification object:NSApp]];
+    d->_content.untitledDirectory = [dir stringByAppendingPathComponent:@"untitled-ra"];
+    d->_content.alertHandler = ^NSModalResponse(NSAlert *al) { return NSAlertThirdButtonReturn; };
+    [d openRoot:a];
+    [d->_content newUntitledDocument];
+    [d->_content.editor insertText:@"keep me" replacementRange:NSMakeRange(NSNotFound, 0)];
+    [d updateTitle];
+    CHECK([d->_win.title isEqualToString:@"未命名-1"] && !d->_win.representedURL && d->_win.isDocumentEdited, "window title: %s", d->_win.title.UTF8String);
+    CHECK([d targetPathsFrom:nil].count == 0, "file actions (trash, rename, reveal) have no target on an untitled tab");
+    CHECK([d switchToRoot:b], "switching workspace with an untitled tab doesn't ask");
+    [d openRoot:c];
+    NSArray *three = @[c, b, a];
+    CHECK([d.recentRoots isEqualToArray:three], "three recent workspaces");
+
+    [d removeRecentRoot:b];
+    NSArray *two = @[c, a];
+    CHECK([d.recentRoots isEqualToArray:two], "one entry removed, the others stay: %s", [d.recentRoots componentsJoinedByString:@","].UTF8String);
+    d->_welcome.onRemoveRecent(a);
+    [d saveSession];
+    CHECK([d.recentRoots isEqualToArray:@[c]], "the welcome page's × removes one too");
+    CHECK([ud dictionaryForKey:@"sessions"][a] != nil, "a removed workspace keeps its untitled documents");
+    [d openRoot:a];
+    CHECK(d->_content.tabCount == 1 && [d->_content.currentTitle isEqual:@"未命名-1"] && [text(d->_content.editor) isEqualToString:@"keep me"],
+          "opening it again brings them back");
+
+    NSMenuItem *dark = [[NSMenuItem alloc] initWithTitle:@"深色" action:@selector(setAppearanceMode:) keyEquivalent:@""];
+    dark.tag = 2;
+    [NSApp sendAction:dark.action to:d from:dark];
+    CHECK([NSApp.appearance.name isEqual:NSAppearanceNameDarkAqua] && [ud integerForKey:@"appearance"] == 2 &&
+          [d->_win.effectiveAppearance.name isEqual:NSAppearanceNameDarkAqua], "深色 applies to the window and is remembered");
+    [d validateMenuItem:dark];
+    CHECK(dark.state == NSControlStateValueOn, "the chosen mode is ticked");
+    NSMenuItem *light = [[NSMenuItem alloc] initWithTitle:@"浅色" action:@selector(setAppearanceMode:) keyEquivalent:@""];
+    light.tag = 1;
+    [NSApp sendAction:light.action to:d from:light];
+    CHECK([d->_win.effectiveAppearance.name isEqual:NSAppearanceNameAqua], "浅色");
+    NSMenuItem *system = [[NSMenuItem alloc] initWithTitle:@"跟随系统" action:@selector(setAppearanceMode:) keyEquivalent:@""];
+    system.tag = 0;
+    [NSApp sendAction:system.action to:d from:system];
+    CHECK(NSApp.appearance == nil && [ud integerForKey:@"appearance"] == 0, "跟随系统 clears the override");
+
+    [d->_content closeAll];
+    [NSFileManager.defaultManager removeItemAtPath:d->_content.untitledDirectory error:nil];
+    for (NSString *k in @[@"lastRoot", @"recentRoots", @"sessions", @"appearance", @"NSWindow Frame FeatherMain"]) [ud removeObjectForKey:k];
+}
+
+#pragma mark Search panel
+
+static void searchPanel(NSString *dir) {
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    for (NSString *k in @[@"searchScope", @"searchCase", @"searchWord", @"searchRegex", @"searchFilter"]) [ud removeObjectForKey:k];
+    NSString *root = [dir stringByAppendingPathComponent:@"ws_search"];
+    for (NSString *sub in @[@"src", @"assets/icons", @"tests"])
+        [NSFileManager.defaultManager createDirectoryAtPath:[root stringByAppendingPathComponent:sub] withIntermediateDirectories:YES attributes:nil error:nil];
+    mkfile(root, @"src/app.ts", @"import logo from '../assets/logo.svg';\nconst icon = 'logo.svg';\n");
+    mkfile(root, @"src/view.m", @"// draws logo.svg\nint Logo = 1;\n");
+    mkfile(root, @"tests/app.test.ts", @"expect('logo.svg');\n");
+    mkfile(root, @"assets/logo.svg", @"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"4\"/>");
+    mkfile(root, @"assets/icons/close.svg", @"<svg/>");
+    mkfile(root, @"README.md", @"# demo\n");
+
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 300, 700) styleMask:NSWindowStyleMaskTitled
+                                                backing:NSBackingStoreBuffered defer:YES];
+    SearchPanel *sp = [SearchPanel new];
+    sp.view.frame = w.contentView.bounds;
+    w.contentView = sp.view;
+    sp.root = root;
+    NSMutableArray *opened = [NSMutableArray array];
+    sp.onOpen = ^(SearchHit *h, BOOL f) { [opened addObject:[NSString stringWithFormat:@"%@:%lu", h.path.lastPathComponent, (unsigned long)h.line]]; };
+    sp.onOpenFile = ^(NSString *p, BOOL f) { [opened addObject:p.lastPathComponent]; };
+    void (^run)(NSString *) = ^(NSString *q) { sp.query = q; [sp runNow]; spinUntil(^BOOL { return !sp.busy; }, 8); spinUntil(^BOOL { return NO; }, 0.15); };
+
+    run(@".svg");
+    CHECK(sp.nameCount == 2 && sp.contentFileCount == 3 && sp.hitCount == 4, "“.svg” finds 2 file names and 4 lines in 3 files (%lu / %lu / %lu)",
+          (unsigned long)sp.nameCount, (unsigned long)sp.contentFileCount, (unsigned long)sp.hitCount);
+    CHECK([sp.statusText containsString:@"2 个文件名"] && [sp.statusText containsString:@"3 个文件中 4 处"], "status: %s", sp.statusText.UTF8String);
+    NSOutlineView *ov = sp.resultsView;
+    CHECK(ov.numberOfRows >= 2 + 2 + 3 + 4, "sections, names, files and lines are all listed (%ld rows)", (long)ov.numberOfRows);
+
+    run(@"*.svg");
+    CHECK(sp.nameCount == 2 && sp.contentFileCount == 0, "a glob searches file names only (%lu / %lu)", (unsigned long)sp.nameCount, (unsigned long)sp.contentFileCount);
+    run(@"logo");
+    CHECK(sp.nameCount == 1 && sp.contentFileCount == 3, "plain words: names and contents (%lu / %lu)", (unsigned long)sp.nameCount, (unsigned long)sp.contentFileCount);
+
+    sp.scope = SearchScopeNames;
+    run(@"app");
+    CHECK(sp.nameCount == 2 && sp.contentFileCount == 0, "scope 文件名 (%lu / %lu)", (unsigned long)sp.nameCount, (unsigned long)sp.contentFileCount);
+    sp.scope = SearchScopeContents;
+    sp.filterText = @"*.ts, !tests";
+    run(@"logo");
+    CHECK(sp.nameCount == 0 && sp.contentFileCount == 1 && sp.hitCount == 2, "scope 内容 + include / exclude (%lu files, %lu lines)",
+          (unsigned long)sp.contentFileCount, (unsigned long)sp.hitCount);
+    sp.filterText = @"";
+    sp.caseSensitive = YES;
+    run(@"Logo");
+    CHECK(sp.contentFileCount == 1 && sp.hitCount == 1, "Aa: case-sensitive (%lu)", (unsigned long)sp.hitCount);
+    sp.caseSensitive = NO;
+    sp.wholeWord = YES;
+    run(@"logo");
+    CHECK(sp.hitCount == 5, "全词: logo.svg and Logo match, logos would not (%lu)", (unsigned long)sp.hitCount);
+    sp.wholeWord = NO;
+    sp.regex = YES;
+    run(@"logo\\.(svg|png)'");
+    CHECK(sp.hitCount == 3, ".*: regex (%lu)", (unsigned long)sp.hitCount);
+    run(@"(unclosed");
+    CHECK([sp.statusText containsString:@"正则"] && !sp.hasResults, "bad regex shown in the status: %s", sp.statusText.UTF8String);
+    sp.regex = NO;
+    CHECK([ud integerForKey:@"searchScope"] == SearchScopeContents && ![ud boolForKey:@"searchRegex"], "options are remembered");
+
+    run(@"logo");
+    [opened removeAllObjects];
+    [sp selectNextResult:NO];
+    [sp selectNextResult:NO];
+    [sp selectNextResult:YES];
+    CHECK(opened.count == 3 && [opened[0] isEqual:opened[2]] && ![opened[0] isEqual:opened[1]], "F4 / ⇧F4 step through the matches: %s",
+          [opened componentsJoinedByString:@" "].UTF8String);
+    run(@"no-such-text-anywhere");
+    CHECK(!sp.hasResults && [sp.statusText containsString:@"没有找到"], "no results: %s", sp.statusText.UTF8String);
+    run(@"");
+    CHECK(!sp.hasResults && ov.numberOfRows == 0, "clearing the query clears the list");
+    for (NSString *k in @[@"searchScope", @"searchCase", @"searchWord", @"searchRegex", @"searchFilter"]) [ud removeObjectForKey:k];
+}
+
+#pragma mark Syntax colours
+
+// One letter per character: . plain k keyword s string c comment n number T type f function p property
+// t tag C constant M meta H heading e emphasis S strong I inserted D deleted
+static NSString *kinds(NSString *file, NSString *line) {
+    static const char *K = ".kscnTfptCMHeSID";
+    NSMutableString *m = [NSMutableString string];
+    for (NSUInteger i = 0; i < line.length; i++) [m appendString:@"."];
+    [[Highlighter highlighterForPath:file] tokenize:line emit:^(NSRange r, TokenKind k) {
+        for (NSUInteger i = r.location; i < NSMaxRange(r); i++) [m replaceCharactersInRange:NSMakeRange(i, 1) withString:[NSString stringWithFormat:@"%c", K[k]]];
+    }];
+    return m;
+}
+
+static void syntaxColours(void) {
+    struct { NSString *file, *mode; } modes[] = {
+        {@"a.ts", @"code"}, {@"a.json", @"json"}, {@"a.yml", @"yaml"}, {@"Cargo.toml", @"toml"}, {@".env", @"ini"},
+        {@"a.scss", @"css"}, {@"a.html", @"markup"}, {@"a.svg", @"markup"}, {@"a.vue", @"markup"}, {@"README.md", @"markdown"},
+        {@"x.patch", @"diff"}, {@"Makefile", @"code"}, {@"Dockerfile.dev", @"code"}, {@".gitignore", @"ignore"}};
+    for (size_t i = 0; i < sizeof modes / sizeof *modes; i++)
+        CHECK([[Highlighter highlighterForPath:modes[i].file].modeName isEqual:modes[i].mode], "%s highlighted as %s",
+              modes[i].file.UTF8String, modes[i].mode.UTF8String);
+    CHECK([Highlighter highlighterForPath:@"notes.txt"] == nil, "plain text stays plain");
+
+    // the old palette coloured JSON keys, values and Markdown alike: now each part has its own kind
+    CHECK([kinds(@"a.json", @"\"name\": \"x\", \"n\": 1, \"ok\": true") isEqual:@"pppppp..sss..ppp..n..pppp..CCCC"], "JSON keys ≠ values");
+    CHECK([kinds(@"a.yml", @"  - name: build # step") isEqual:@"..C.pppp..sssss.cccccc"], "YAML key / value / comment");
+    CHECK([kinds(@"Cargo.toml", @"[deps]") isEqual:@"tttttt"] &&
+          [kinds(@"Cargo.toml", @"v = { a = \"1\" }") isEqual:@"p.....p...sss.."], "TOML sections and inline tables");
+    CHECK([kinds(@"a.css", @"  color: #fff; margin: 0 -4px;") isEqual:@"..ppppp..nnnn..pppppp..n.nnnn."], "CSS declarations");
+    CHECK([kinds(@"a.css", @".btn:hover > a {") isEqual:@"TTTTkkkkkk...t.."], "CSS selectors");
+    CHECK([kinds(@"a.html", @"<a href=\"x\">Hi &amp;</a>") isEqual:@"Mt.pppp.sssM...CCCCCMMtM"], "HTML tag / attribute / entity");
+    CHECK([kinds(@"a.md", @"## Install `npm`") isEqual:@"MMHHHHHHHHHsssss"], "Markdown heading keeps its code span");
+    CHECK([kinds(@"a.md", @"- see [doc](x.md) **now**") isEqual:@"C.....MfffMMccccM.MMSSSMM"], "Markdown list / link / bold");
+    CHECK([kinds(@"a.md", @"my snake_case_name") isEqual:@".................."], "underscores inside words are not emphasis");
+    CHECK([kinds(@"a.ts", @"const x = fetchUser(id).name; // hi") isEqual:@"kkkkk.....fffffffff.....pppp..ccccc"], "TS call / member / comment");
+    CHECK([kinds(@"a.sh", @"echo $HOME ${#a} $# # c") isEqual:@"ffff.ppppp.ppppp.pp.ccc"], "shell variables vs # comments");
+    CHECK([kinds(@"a.py", @"@dec  # c") isEqual:@"MMMM..ccc"], "Python decorator");
+    CHECK([kinds(@"a.rs", @"fn f<'a>(s: &'a str)") isEqual:@"kk...TT......TT.TTT."], "Rust lifetimes are not strings");
+    CHECK([kinds(@"x.diff", @"-gone") isEqual:@"DDDDD"] && [kinds(@"x.diff", @"+new") isEqual:@"IIII"], "diff lines");
+
+    // red is reserved for deleted diff lines; everything else is readable on its background
+    for (NSString *name in @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) {
+        [[NSAppearance appearanceNamed:name] performAsCurrentDrawingAppearance:^{
+            NSColor *bg = [NSColor.textBackgroundColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+            CGFloat (^lum)(NSColor *) = ^CGFloat(NSColor *c) {
+                CGFloat ch[3] = {c.redComponent, c.greenComponent, c.blueComponent};
+                for (int i = 0; i < 3; i++) ch[i] = ch[i] <= 0.03928 ? ch[i] / 12.92 : pow((ch[i] + 0.055) / 1.055, 2.4);
+                return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+            };
+            for (TokenKind k = TokKeyword; k < TokKindCount; k++) {
+                NSColor *c = [HLColor(k) colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+                CGFloat h = c.hueComponent * 360, sat = c.saturationComponent;
+                BOOL reddish = sat > 0.35 && (h < 18 || h > 335);
+                CHECK(reddish == (k == TokDeleted), "%s kind %d: hue %.0f° %s", name.UTF8String, k, h, k == TokDeleted ? "is red" : "is not red");
+                CGFloat a = lum(c), b = lum(bg), ratio = (MAX(a, b) + 0.05) / (MIN(a, b) + 0.05);
+                CHECK(ratio >= (k == TokComment ? 2.5 : 3.0), "%s kind %d contrast %.1f", name.UTF8String, k, ratio);
+            }
+        }];
+    }
 }
 
 static void viewers(NSString *dir) {
@@ -888,6 +1655,202 @@ static void viewers(NSString *dir) {
     CHECK([iv.info containsString:@"6016"], "reports original size: %s", iv.info.UTF8String);
 }
 
+#pragma mark Word wrap
+
+// The incrementally maintained row table must equal a fresh measurement of every line.
+static BOOL wrapTableConsistent(TextEditorView *ed, NSString **why) {
+    [ed ensureWrap];
+    if (!ed->_wrapActive) return YES;
+    NSUInteger n = ed->_buf.lineCount;
+    if (ed->_wrapLines != n) { *why = [NSString stringWithFormat:@"table has %lu lines, buffer %lu", ed->_wrapLines, n]; return NO; }
+    uint64_t acc = 0;
+    for (NSUInteger L = 0; L < n; L++) {
+        if (ed->_rowStart[L] != acc) {
+            *why = [NSString stringWithFormat:@"line %lu starts at row %llu, want %llu", L, ed->_rowStart[L], acc];
+            return NO;
+        }
+        WrapRows r = [ed rowsOf:[ed displayString:L]];
+        free(r.starts);
+        acc += r.count;
+    }
+    if (ed->_rowStart[n] != acc) { *why = @"total row count"; return NO; }
+    return YES;
+}
+
+static void wordWrap(NSString *dir) {
+    NSWindow *w; ContentController *t = offscreenController(&w);
+    NSMutableString *src = [NSMutableString stringWithString:@"short line\n"];
+    for (int i = 0; i < 40; i++) [src appendFormat:@"word%d ", i];
+    [src appendString:@"\n\tindented: "];
+    for (int i = 0; i < 30; i++) [src appendString:@"alpha beta "];
+    [src appendString:@"\nhttps://example.com/a/very/long/path/that/keeps/going/and/going/without/any/spaces/at/all/in/it/index.html\n"];
+    for (int i = 0; i < 60; i++) [src appendString:@"中文自动换行测试，"];
+    [src appendString:@"结束。\n"];
+    [src appendString:[@"" stringByPaddingToLength:500 withString:@"x" startingAtIndex:0]];
+    [src appendString:@"\n"];
+    for (int i = 0; i < 200; i++) [src appendFormat:@"line %d\n", i];
+    t.wordWrap = NO;
+    [t openPath:mkfile(dir, @"wrap.txt", src) preview:NO focus:NO];
+    TextEditorView *ed = t.editor;
+    CHECK(!ed.wrapsLines && ed.rowCount == ed->_buf.lineCount, "wrap off: one row per line");
+    NSBitmapImageRep *rep = [ed bitmapImageRepForCachingDisplayInRect:ed.bounds];
+    [ed cacheDisplayInRect:ed.bounds toBitmapImageRep:rep];                 // widest line is learnt while drawing
+    CHECK(ed.maxScrollX > 0, "long lines scroll sideways without wrap");
+
+    t.wordWrap = YES;
+    CHECK(ed.wordWrap && ed.wrapsLines, "wrap on");
+    NSUInteger rows = ed.rowCount;
+    CHECK(rows > ed->_buf.lineCount + 10, "long lines take several rows (%lu rows, %lu lines)",
+          (unsigned long)rows, (unsigned long)ed->_buf.lineCount);
+    CHECK(ed.maxScrollX == 0 && ed.scrollX == 0, "no sideways scrolling while wrapping");
+    NSString *why = nil;
+    CHECK(wrapTableConsistent(ed, &why), "row table after build: %s", why.UTF8String);
+
+    // rows fit the width, cover the line, and break at sensible places
+    CGFloat width = ed->_wrapWidth;
+    for (NSUInteger L = 0; L < 6; L++) {
+        NSString *s = [ed lineString:L];
+        WrapRows r = [ed rowsOf:s];
+        for (NSUInteger k = 0; k < r.count; k++) {
+            NSUInteger a = k ? r.starts[k] : 0, b = k + 1 < r.count ? r.starts[k + 1] : s.length;
+            CHECK(b > a, "row %lu of line %lu is empty", (unsigned long)k, (unsigned long)L);
+            CTLineRef line = [ed createLine:s range:NSMakeRange(a, b - a)];
+            CGFloat lw = CTLineGetTypographicBounds(line, NULL, NULL, NULL) - CTLineGetTrailingWhitespaceWidth(line);
+            CFRelease(line);
+            CHECK((k ? r.indent : 0) + lw <= width + 0.5, "line %lu row %lu is %.1f wide (max %.1f)", (unsigned long)L, (unsigned long)k, lw, width);
+            if (!k) continue;
+            unichar c = [s characterAtIndex:a];
+            CHECK(c != 0xFF0C && c != 0x3002, "line %lu row %lu starts with closing punctuation", (unsigned long)L, (unsigned long)k);
+            if (L == 1) CHECK([s characterAtIndex:a - 1] == ' ', "words break after a space (row %lu)", (unsigned long)k);
+            if (L == 3) CHECK([s characterAtIndex:a - 1] == '/', "URLs break after a slash");
+        }
+        if (L == 2) CHECK(r.count > 1 && r.indent > 0, "continuation rows of an indented line are indented");
+        if (L == 5) {
+            NSUInteger cols = (NSUInteger)floor(width / ed->_charWidth + 0.01);
+            CHECK(r.count == (500 + cols - 1) / cols, "a word without breaks fills whole rows (%lu rows, %lu cols)",
+                  (unsigned long)r.count, (unsigned long)cols);
+        }
+        free(r.starts);
+    }
+
+    // nothing is drawn between the wrap edge and the minimap
+    ed.scrollY = 0;
+    [ed cacheDisplayInRect:ed.bounds toBitmapImageRep:rep];
+    CGFloat scale = rep.pixelsWide / ed.bounds.size.width;
+    CGFloat bandA = ed.textOriginX + width + 2, bandB = NSMinX(ed.minimapRect) - 2;
+    NSColor *bg = [rep colorAtX:(NSInteger)(bandA * scale) y:2];
+    NSUInteger ink = 0;
+    for (NSInteger y = 0; y < rep.pixelsHigh; y += 2)
+        for (NSInteger x = (NSInteger)(bandA * scale); x < (NSInteger)(bandB * scale); x++) {
+            NSColor *c = [rep colorAtX:x y:y];
+            if (fabs(c.redComponent - bg.redComponent) + fabs(c.greenComponent - bg.greenComponent) + fabs(c.blueComponent - bg.blueComponent) > 0.1) ink++;
+        }
+    CHECK(bandB > bandA && ink == 0, "no text past the wrap edge (%lu inked pixels)", (unsigned long)ink);
+
+    // caret: up / down walk rows, End goes to the end of the logical line
+    NSUInteger l1 = [ed->_buf lineStart:1], row1 = [ed firstRowOfLine:1];
+    [ed moveCaretTo:l1 extend:NO];
+    [ed doCommandBySelector:@selector(moveDown:)];
+    CHECK([ed->_buf lineForOffset:ed->_caret] == 1 && [ed rowOfOffset:ed->_caret x:NULL] == row1 + 1, "moveDown goes one row down inside the line");
+    [ed doCommandBySelector:@selector(moveToEndOfLine:)];
+    CHECK(ed->_caret == [ed->_buf lineEnd:1], "End goes to the end of the logical line");
+    [ed doCommandBySelector:@selector(moveUp:)];
+    CHECK([ed->_buf lineForOffset:ed->_caret] == 1, "moveUp from the last row stays in the line");
+
+    // clicks
+    ed.scrollY = 0;
+    CGFloat lh = ed->_lineHeight;
+    NSUInteger off = [ed offsetAtPoint:NSMakePoint(ed.textOriginX + 3 * ed->_charWidth + 1, 4 + (row1 + 1) * lh + lh / 2)];
+    CHECK([ed rowOfOffset:off x:NULL] == row1 + 1, "a click lands on the wrapped row it hits");
+    off = [ed offsetAtPoint:NSMakePoint(ed.textOriginX + width - 2, 4 + row1 * lh + lh / 2)];
+    CHECK([ed rowOfOffset:off x:NULL] == row1 && [ed->_buf lineForOffset:off] == 1, "a click right of a wrapped row stays on that row");
+
+    // edits keep the table equal to a full rebuild
+    [ed moveCaretTo:[ed->_buf lineEnd:1] extend:NO];
+    for (int i = 0; i < 120; i++) [ed insertText:(i % 9 == 8 ? @" " : @"y") replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK(wrapTableConsistent(ed, &why), "after typing: %s", why.UTF8String);
+    [ed doCommandBySelector:@selector(insertNewline:)];
+    [ed insertText:@"inserted line" replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK(wrapTableConsistent(ed, &why), "after a newline: %s", why.UTF8String);
+    [ed moveCaretTo:[ed->_buf lineStart:2] extend:NO];
+    [ed moveCaretTo:[ed->_buf lineStart:6] extend:YES];
+    [ed doCommandBySelector:@selector(deleteBackward:)];
+    CHECK(wrapTableConsistent(ed, &why), "after deleting lines: %s", why.UTF8String);
+    [ed undo:nil];
+    CHECK(wrapTableConsistent(ed, &why), "after undo: %s", why.UTF8String);
+    [ed redo:nil];
+    [ed undo:nil];
+    NSUInteger hits = [ed replaceAll:@" " with:@"  "];
+    CHECK(hits > 64 && wrapTableConsistent(ed, &why), "after replace all (%lu): %s", (unsigned long)hits, why.UTF8String);
+    [ed undo:nil];
+    CHECK(wrapTableConsistent(ed, &why), "after undoing replace all: %s", why.UTF8String);
+
+    // IME text on the line wraps with it
+    [ed moveCaretTo:[ed->_buf lineEnd:0] extend:NO];
+    NSString *ime = [@"" stringByPaddingToLength:120 withString:@"输入法组合文字" startingAtIndex:0];
+    [ed setMarkedText:ime selectedRange:NSMakeRange(0, 0) replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK([ed firstRowOfLine:1] - [ed firstRowOfLine:0] > 1 && wrapTableConsistent(ed, &why), "composition wraps: %s", why.UTF8String);
+    [ed cacheDisplayInRect:ed.bounds toBitmapImageRep:rep];
+    [ed insertText:@"好" replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK([ed firstRowOfLine:1] - [ed firstRowOfLine:0] == 1 && wrapTableConsistent(ed, &why), "committed: %s", why.UTF8String);
+
+    // resizing re-wraps and keeps the line at the top
+    [ed scrollToLine:4.5];
+    CGFloat top = ed.topVisibleLine;
+    NSSize size = ed.frame.size;
+    rows = ed.rowCount;
+    [ed setFrameSize:NSMakeSize(size.width / 2, size.height)];
+    CHECK(ed.rowCount > rows && wrapTableConsistent(ed, &why), "narrower: more rows (%lu → %lu) %s",
+          (unsigned long)rows, (unsigned long)ed.rowCount, why.UTF8String);
+    CHECK(fabs(ed.topVisibleLine - top) < 0.01, "narrowing keeps the top line (%.2f → %.2f)", top, ed.topVisibleLine);
+    [ed setFrameSize:size];
+    CHECK(ed.rowCount == rows && fabs(ed.topVisibleLine - top) < 0.01, "widening restores (%.2f)", ed.topVisibleLine);
+    ed.fontSize = 18;
+    CHECK(fabs(ed.topVisibleLine - top) < 0.01 && wrapTableConsistent(ed, &why), "font size keeps the top line (%.2f) %s", ed.topVisibleLine, why.UTF8String);
+    ed.fontSize = 13;
+    t.showsMinimap = NO;
+    CHECK(ed.rowCount < rows && fabs(ed.topVisibleLine - top) < 0.01, "hiding the minimap widens the text");
+    t.showsMinimap = YES;
+    [ed setFrameSize:NSMakeSize(150, size.height)];
+    CHECK(!ed.wrapsLines, "too narrow to wrap: falls back to scrolling");
+    [ed setFrameSize:size];
+    t.wordWrap = NO;
+    CHECK(!ed.wrapsLines && ed.rowCount == ed->_buf.lineCount && fabs(ed.topVisibleLine - top) < 0.01, "wrap off again keeps the line (%.2f)", ed.topVisibleLine);
+    t.wordWrap = YES;
+
+    // cost on a 100k-line file: building the table, typing, scrolling frames
+    NSMutableString *big = [NSMutableString string];
+    for (int i = 0; i < 100000; i++)
+        [big appendFormat:i % 10 ? @"    if (value_%d > %d) { call(\"str\", %d); } // comment\n"
+                                 : @"    // %d a much longer comment line that will certainly wrap at the normal editor width, with words and more words\n", i, i, i];
+    [t openPath:mkfile(dir, @"bigwrap.c", big) preview:NO focus:NO];
+    ed = t.editor;
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    ed.wordWrap = NO; ed.wordWrap = YES;
+    double build = (CFAbsoluteTimeGetCurrent() - t0) * 1000;
+    CHECK(ed.wrapsLines && ed.rowCount > 110000, "big file wraps (%lu rows)", (unsigned long)ed.rowCount);
+    [ed moveCaretTo:[ed->_buf lineEnd:50000] extend:NO];
+    t0 = CFAbsoluteTimeGetCurrent();
+    for (int i = 0; i < 200; i++) [ed insertText:@"z" replacementRange:NSMakeRange(NSNotFound, 0)];
+    double typing = (CFAbsoluteTimeGetCurrent() - t0) * 1000 / 200;
+    NSBitmapImageRep *r2 = [ed bitmapImageRepForCachingDisplayInRect:ed.bounds];
+    t0 = CFAbsoluteTimeGetCurrent();
+    for (int f = 0; f < 100; f++) { ed.scrollY = ed.maxScrollY * f / 100.0; [ed cacheDisplayInRect:ed.bounds toBitmapImageRep:r2]; }
+    double frame = (CFAbsoluteTimeGetCurrent() - t0) * 1000 / 100;
+    printf("   wrap on a 100k-line file: build %.1f ms, keystroke %.3f ms, frame %.2f ms\n", build, typing, frame);
+    CHECK(build < 250 && typing < 2 && frame < 16, "wrap is fast enough");
+    CHECK(wrapTableConsistent(ed, &why), "big file table: %s", why.UTF8String);
+
+    // very large files don't wrap, and say so
+    NSMutableData *many = [NSMutableData dataWithLength:1000001];
+    memset(many.mutableBytes, '\n', many.length);
+    NSString *mp = [dir stringByAppendingPathComponent:@"many.txt"];
+    [many writeToFile:mp atomically:NO];
+    [t openPath:mp preview:NO focus:NO];
+    CHECK(t.editor.wordWrap && !t.editor.wrapsLines && [t.editor.statusText containsString:@"未自动换行"], "a million lines: no wrap, noted in the status bar");
+    [t closeAllWithoutAsking];
+}
+
 int main(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
@@ -903,17 +1866,30 @@ int main(void) {
         crlfAndEncodings(dir);
         replaceAndJump(dir);
         tree(dir);
+        treeMultiSelect(dir);
         tabs(dir);
         markdownPreview(dir);
         minimap(dir);
+        wordWrap(dir);
         readmeIssues(dir);
         imageViewer(dir);
+        svgAndTypeScript(dir);
         pdfViewer(dir);
         zoomOtherViews(dir);
+        defaultApps(dir);
+        openFromFinder(dir);
+        multiSelectActions(dir);
         htmlPreviewAndAutosave(dir);
         autosave(dir);
         layoutAndWorkspaces(dir);
         viewers(dir);
+        syntaxColours();
+        searchPanel(dir);
+        untitledDocuments(dir);
+        dataViews(dir);
+        binaryViews(dir);
+        hiddenFileSettings(dir);
+        recentAndAppearance(dir);
         [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     }
     if (failures) { printf("%d editor failure(s)\n", failures); return 1; }
