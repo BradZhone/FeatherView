@@ -1,4 +1,5 @@
 #import "TextEditorView+Private.h"
+#import "Localization.h"
 #include <sys/stat.h>
 
 @implementation TextEditorView (Edit)
@@ -170,7 +171,7 @@
     char tmp[PATH_MAX];
     strlcpy(tmp, tmpl.fileSystemRepresentation, sizeof tmp);
     int fd = mkstemp(tmp);
-    if (fd < 0) { if (error) *error = @"无法在该目录创建临时文件"; return NO; }
+    if (fd < 0) { if (error) *error = FTL(@"Couldn’t create a temporary file in this folder"); return NO; }
 
     BOOL ok;
     if (_encoding == NSUTF8StringEncoding) {
@@ -180,7 +181,7 @@
         NSString *s = [[NSString alloc] initWithData:u8 encoding:NSUTF8StringEncoding];
         NSData *out = [s dataUsingEncoding:_encoding allowLossyConversion:NO];
         ok = out && write(fd, out.bytes, out.length) == (ssize_t)out.length;
-        if (!out && error) *error = @"内容无法用原编码保存";
+        if (!out && error) *error = FTL(@"The text can’t be saved in its original encoding");
     }
     struct stat st;
     if (ok && stat(real.fileSystemRepresentation, &st) == 0) fchmod(fd, st.st_mode & 07777);
@@ -189,7 +190,7 @@
     // rename keeps the old inode alive, so the current mmap stays valid
     if (!ok || rename(tmp, real.fileSystemRepresentation) != 0) {
         unlink(tmp);
-        if (error && !*error) *error = @"写入失败";
+        if (error && !*error) *error = FTL(@"Write failed");
         return NO;
     }
     _savedSerial = _undo.count ? _undo.lastObject.serial : 0;

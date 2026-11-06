@@ -1,4 +1,5 @@
 #import "BinaryPreviews.h"
+#import "Localization.h"
 #import "TablePreview.h"
 #import "TableModel.h"
 #import "CanvasView.h"
@@ -27,7 +28,7 @@ static NSString *quoted(NSString *ident) { return [NSString stringWithFormat:@"\
 static NSString *cellString(sqlite3_stmt *st, int i) {
     switch (sqlite3_column_type(st, i)) {
         case SQLITE_NULL: return @"NULL";
-        case SQLITE_BLOB: return [NSString stringWithFormat:@"<BLOB %d 字节>", sqlite3_column_bytes(st, i)];
+        case SQLITE_BLOB: return [NSString stringWithFormat:FTLP((NSUInteger)sqlite3_column_bytes(st, i), @"<BLOB %d byte>", @"<BLOB %d bytes>"), sqlite3_column_bytes(st, i)];
         default: {
             const unsigned char *t = sqlite3_column_text(st, i);
             return t ? ([NSString stringWithUTF8String:(const char *)t] ?: @"?") : @"";
@@ -62,8 +63,8 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
 - (NSString *)status {
     NSUInteger views = 0;
     for (NSDictionary *i in _items) if ([i[@"type"] isEqual:@"view"]) views++;
-    return [NSString stringWithFormat:@"SQLite 数据库（只读）   %lu 张表%@   %@", (unsigned long)(_items.count - views),
-            views ? [NSString stringWithFormat:@" · %lu 个视图", (unsigned long)views] : @"", [NSByteCountFormatter stringFromByteCount:(long long)_bytes countStyle:NSByteCountFormatterCountStyleFile]];
+    return [NSString stringWithFormat:FTLP(_items.count - views, @"SQLite database (read-only)   %lu table%@   %@", @"SQLite database (read-only)   %lu tables%@   %@"), (unsigned long)(_items.count - views),
+            views ? [NSString stringWithFormat:FTLP(views, @" · %lu view", @" · %lu views"), (unsigned long)views] : @"", [NSByteCountFormatter stringFromByteCount:(long long)_bytes countStyle:NSByteCountFormatterCountStyleFile]];
 }
 
 // Table sizes, counted in the background (capped so a huge table doesn't stall).
@@ -78,7 +79,7 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
             NSString *c = @"?";
             if (sqlite3_prepare_v2(db, q.UTF8String, -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW) {
                 long long k = sqlite3_column_int64(st, 0);
-                c = k > 1000000 ? @"100 万+" : FTGrouped((NSUInteger)k);
+                c = k > 1000000 ? FTL(@"1M+") : FTGrouped((NSUInteger)k);
             }
             sqlite3_finalize(st);
             dispatch_async(dispatch_get_main_queue(), ^{ SQLitePreview *me = weakSelf; if (me) { me->_counts[n] = c; [me->_list reloadData]; } });
@@ -89,7 +90,7 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
 - (void)runSQL:(NSString *)sql label:(NSString *)label {
     sqlite3 *db = _db;
     __weak SQLitePreview *weakSelf = self;
-    _grid.extraInfo = @"查询中…";
+    _grid.extraInfo = FTL(@"Querying…");
     dispatch_async(_q, ^{
         sqlite3_stmt *st = NULL;
         NSMutableArray *rows = [NSMutableArray array], *headers = [NSMutableArray array];
@@ -113,7 +114,7 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
             SQLitePreview *me = weakSelf;
             if (!me) return;
             [me->_grid setModel:[ArrayTable tableWithHeaders:headers rows:rows truncated:more]];
-            me->_grid.extraInfo = err ? [@"⚠️ " stringByAppendingString:err] : more ? [NSString stringWithFormat:@"%@ · 只显示前 %lu 行", label, (unsigned long)kMaxRows] : label;
+            me->_grid.extraInfo = err ? [@"⚠️ " stringByAppendingString:err] : more ? [NSString stringWithFormat:FTL(@"%@ · first %lu rows shown"), label, (unsigned long)kMaxRows] : label;
             if (me.onChange) me.onChange();
         });
     });
@@ -124,14 +125,14 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
     for (NSDictionary *i in _items) if ([i[@"name"] isEqual:name]) _schema.string = i[@"sql"] ?: @"";
     [self runSQL:[NSString stringWithFormat:@"SELECT * FROM %@", quoted(name)] label:name];
 }
-- (void)runQuery:(NSString *)sql { if (sql.length) { _mode.selectedSegment = 0; [self modeChanged:nil]; [self runSQL:sql label:@"查询结果"]; } }
+- (void)runQuery:(NSString *)sql { if (sql.length) { _mode.selectedSegment = 0; [self modeChanged:nil]; [self runSQL:sql label:FTL(@"Query Result")]; } }
 
 #pragma mark Views
 
 - (void)buildViews {
     _list = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 200, 300)];
     NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:@"t"];
-    c.title = @"表";
+    c.title = FTL(@"Tables");
     [_list addTableColumn:c];
     _list.headerView = nil;
     _list.style = NSTableViewStyleSourceList;
@@ -142,12 +143,12 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
     ls.hasVerticalScroller = YES; ls.autohidesScrollers = YES; ls.drawsBackground = NO;
     ls.translatesAutoresizingMaskIntoConstraints = NO;
 
-    _mode = [NSSegmentedControl segmentedControlWithLabels:@[@"数据", @"结构"] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(modeChanged:)];
+    _mode = [NSSegmentedControl segmentedControlWithLabels:@[FTL(@"Data"), FTL(@"Schema")] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(modeChanged:)];
     _mode.selectedSegment = 0;
     _mode.controlSize = NSControlSizeSmall;
     _mode.translatesAutoresizingMaskIntoConstraints = NO;
     _sql = [NSTextField textFieldWithString:@""];
-    _sql.placeholderString = @"SELECT … （只读，回车运行）";
+    _sql.placeholderString = FTL(@"SELECT … (read-only, Return to run)");
     _sql.font = [NSFont monospacedSystemFontOfSize:11.5 weight:NSFontWeightRegular];
     _sql.controlSize = NSControlSizeSmall;
     _sql.target = self; _sql.action = @selector(sqlEntered:);
@@ -191,7 +192,7 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
 - (id)tableView:(NSTableView *)t objectValueForTableColumn:(NSTableColumn *)c row:(NSInteger)row {
     NSDictionary *i = _items[(NSUInteger)row];
     NSMutableAttributedString *s = [[NSMutableAttributedString alloc] initWithString:i[@"name"] attributes:@{NSFontAttributeName: [NSFont systemFontOfSize:12.5]}];
-    NSString *extra = [i[@"type"] isEqual:@"view"] ? @"  视图" : (_counts[i[@"name"]] ? [@"  " stringByAppendingString:_counts[i[@"name"]]] : @"");
+    NSString *extra = [i[@"type"] isEqual:@"view"] ? FTL(@"  view") : (_counts[i[@"name"]] ? [@"  " stringByAppendingString:_counts[i[@"name"]]] : @"");
     [s appendAttributedString:[[NSAttributedString alloc] initWithString:extra attributes:@{
         NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular], NSForegroundColorAttributeName: NSColor.tertiaryLabelColor}]];
     return s;

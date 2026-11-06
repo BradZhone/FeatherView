@@ -1,4 +1,5 @@
 #import "TreePreview+Private.h"
+#import "Localization.h"
 
 static const NSUInteger kSyncNodes = 30000;
 
@@ -60,7 +61,7 @@ static NSHashTable *visibleFor(JSONNode *root, NSString *q, NSUInteger *matches)
         [self updateInfoWithMatches:hits];
     };
     if (_nodeCount <= kSyncNodes) { NSUInteger h; NSHashTable *k = visibleFor(root, q, &h); show(k, h); return; }
-    _info.stringValue = @"筛选中…";
+    _info.stringValue = FTL(@"Filtering…");
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSUInteger h;
         NSHashTable *k = visibleFor(root, q, &h);
@@ -72,8 +73,8 @@ static NSHashTable *visibleFor(JSONNode *root, NSString *q, NSUInteger *matches)
 
 - (void)updateInfoWithMatches:(NSUInteger)hits {
     if (!_root) { _info.stringValue = @""; return; }
-    NSMutableString *s = [NSMutableString stringWithFormat:@"%@ 个节点", FTGrouped(_nodeCount)];
-    if (hits != NSNotFound) [s appendFormat:@" · %@ 处匹配", FTGrouped(hits)];
+    NSMutableString *s = [NSMutableString stringWithFormat:FTLP(_nodeCount, @"%@ node", @"%@ nodes"), FTGrouped(_nodeCount)];
+    if (hits != NSNotFound) [s appendFormat:FTLP(hits, @" · %@ match", @" · %@ matches"), FTGrouped(hits)];
     JSONNode *sel = _ov.selectedRow >= 0 ? [_ov itemAtRow:_ov.selectedRow] : nil;
     if (sel) [s appendFormat:@" · %@", sel.path];
     _info.stringValue = s;
@@ -111,17 +112,17 @@ static NSString *valueText(JSONNode *n) {
         i.representedObject = act;
     };
     BOOL container = n.kind == JSONObject || n.kind == JSONArray;
-    add(container ? @"拷贝为 JSON" : @"拷贝值", ^{ FTCopyString(valueText(n)); });
-    if (n.key) add(@"拷贝名称", ^{ FTCopyString(n.key); });
-    add([NSString stringWithFormat:@"拷贝路径  %@", n.path.length > 40 ? [[n.path substringToIndex:40] stringByAppendingString:@"…"] : n.path], ^{ FTCopyString(n.path); });
+    add(container ? FTL(@"Copy as JSON") : FTL(@"Copy Value"), ^{ FTCopyString(valueText(n)); });
+    if (n.key) add(FTL(@"Copy Name"), ^{ FTCopyString(n.key); });
+    add([NSString stringWithFormat:FTL(@"Copy Path  %@"), n.path.length > 40 ? [[n.path substringToIndex:40] stringByAppendingString:@"…"] : n.path], ^{ FTCopyString(n.path); });
     if (container && n.children.count) {
         [menu addItem:NSMenuItem.separatorItem];
-        add(@"展开全部子项", ^{ [self->_ov expandItem:n expandChildren:YES]; });
-        add(@"折叠", ^{ [self->_ov collapseItem:n collapseChildren:YES]; });
+        add(FTL(@"Expand All Children"), ^{ [self->_ov expandItem:n expandChildren:YES]; });
+        add(FTL(@"Collapse"), ^{ [self->_ov collapseItem:n collapseChildren:YES]; });
     }
     if (n.line && self.onJumpToLine) {
         [menu addItem:NSMenuItem.separatorItem];
-        add([NSString stringWithFormat:@"在源码中显示（第 %lu 行）", (unsigned long)n.line], ^{ self.onJumpToLine(n.line); });
+        add([NSString stringWithFormat:FTL(@"Show in Source (Line %lu)"), (unsigned long)n.line], ^{ self.onJumpToLine(n.line); });
     }
 }
 

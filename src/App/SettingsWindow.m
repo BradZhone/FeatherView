@@ -1,4 +1,5 @@
 #import "SettingsWindow.h"
+#import "Localization.h"
 #import "Settings.h"
 
 @implementation SettingsWindow {
@@ -45,15 +46,15 @@ static NSStackView *column(NSArray<NSView *> *views) {
     NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 520)
                                               styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                 backing:NSBackingStoreBuffered defer:YES];
-    w.title = @"设置";
+    w.title = FTL(@"Settings");
     w.releasedWhenClosed = NO;
     if (!(self = [super initWithWindow:w])) return nil;
 
     _appearancePopup = [NSPopUpButton new];
-    [_appearancePopup addItemsWithTitles:@[@"跟随系统", @"浅色", @"深色"]];
+    [_appearancePopup addItemsWithTitles:@[FTL(@"System"), FTL(@"Light"), FTL(@"Dark")]];
     _appearancePopup.target = self; _appearancePopup.action = @selector(appearanceChanged:);
 
-    _showHiddenBox = [NSButton checkboxWithTitle:@"显示隐藏文件（以 . 开头的文件和访达中隐藏的文件）" target:self action:@selector(boxChanged:)];
+    _showHiddenBox = [NSButton checkboxWithTitle:FTL(@"Show hidden files (dot files and files hidden in Finder)") target:self action:@selector(boxChanged:)];
     _alwaysHiddenField = [NSTextField textFieldWithString:@""];
     _alwaysHiddenField.placeholderString = @".git, .DS_Store, *.pyc";
     _alwaysHiddenField.delegate = self;
@@ -62,25 +63,25 @@ static NSStackView *column(NSArray<NSView *> *views) {
     _searchSkippedField.placeholderString = @"node_modules, build, dist";
     _searchSkippedField.delegate = self;
     [_searchSkippedField.widthAnchor constraintEqualToConstant:360].active = YES;
-    _gitignoreBox = [NSButton checkboxWithTitle:@"搜索内容时跳过 .gitignore 里的文件" target:self action:@selector(boxChanged:)];
+    _gitignoreBox = [NSButton checkboxWithTitle:FTL(@"Skip files listed in .gitignore when searching contents") target:self action:@selector(boxChanged:)];
 
     _autoSavePopup = [NSPopUpButton new];
-    [_autoSavePopup addItemsWithTitles:@[@"关闭", @"停止输入 1 秒后保存", @"切换文件或窗口时保存"]];
+    [_autoSavePopup addItemsWithTitles:@[FTL(@"Off"), FTL(@"1 Second After Typing Stops"), FTL(@"On Switching Files or Windows")]];
     _autoSavePopup.target = self; _autoSavePopup.action = @selector(autoSaveChanged:);
-    _minimapBox = [NSButton checkboxWithTitle:@"显示小地图" target:self action:@selector(boxChanged:)];
-    _wrapBox = [NSButton checkboxWithTitle:@"自动换行（随窗口宽度）" target:self action:@selector(boxChanged:)];
+    _minimapBox = [NSButton checkboxWithTitle:FTL(@"Show minimap") target:self action:@selector(boxChanged:)];
+    _wrapBox = [NSButton checkboxWithTitle:FTL(@"Wrap lines to the window width") target:self action:@selector(boxChanged:)];
 
     NSGridView *grid = [NSGridView gridViewWithViews:@[
-        @[heading(@"外观"), NSGridCell.emptyContentView],
-        @[rowLabel(@"主题："), _appearancePopup],
-        @[heading(@"文件"), NSGridCell.emptyContentView],
-        @[NSGridCell.emptyContentView, column(@[_showHiddenBox, note(@"也可以用 ⇧⌘. 随时切换。")])],
-        @[rowLabel(@"始终隐藏："), column(@[_alwaysHiddenField, note(@"文件树、快速打开和搜索都不显示这些名字。逗号分隔，可用通配符，如 *.pyc。")])],
-        @[rowLabel(@"搜索时跳过："), column(@[_searchSkippedField, note(@"搜索和快速打开不进入这些文件夹（文件树里照常显示）。")])],
+        @[heading(FTL(@"Appearance")), NSGridCell.emptyContentView],
+        @[rowLabel(FTL(@"Theme:")), _appearancePopup],
+        @[heading(FTL(@"Files")), NSGridCell.emptyContentView],
+        @[NSGridCell.emptyContentView, column(@[_showHiddenBox, note(FTL(@"You can also toggle this at any time with ⇧⌘."))])],
+        @[rowLabel(FTL(@"Always hide:")), column(@[_alwaysHiddenField, note(FTL(@"Never shown in the file tree, Quick Open or search. Separate with commas; wildcards such as *.pyc are allowed."))])],
+        @[rowLabel(FTL(@"Skip when searching:")), column(@[_searchSkippedField, note(FTL(@"Search and Quick Open don’t look inside these folders (they still appear in the file tree)."))])],
         @[NSGridCell.emptyContentView, _gitignoreBox],
-        @[heading(@"编辑器"), NSGridCell.emptyContentView],
-        @[rowLabel(@"自动保存："), _autoSavePopup],
-        @[NSGridCell.emptyContentView, column(@[_wrapBox, note(@"也可以用 ⌥Z 切换。超过 100 万行或 32 MB 的文件不换行。")])],
+        @[heading(FTL(@"Editor")), NSGridCell.emptyContentView],
+        @[rowLabel(FTL(@"Auto save:")), _autoSavePopup],
+        @[NSGridCell.emptyContentView, column(@[_wrapBox, note(FTL(@"Toggle with ⌥Z. Files over 1 million lines or 32 MB are not wrapped."))])],
         @[NSGridCell.emptyContentView, _minimapBox]]];
     grid.rowSpacing = 10;
     grid.columnSpacing = 10;
@@ -95,18 +96,25 @@ static NSStackView *column(NSArray<NSView *> *views) {
     }
     for (NSInteger r = 0; r < grid.numberOfRows; r++) [grid rowAtIndex:r].rowAlignment = NSGridRowAlignmentFirstBaseline;
 
-    NSButton *reset = [NSButton buttonWithTitle:@"文件设置恢复默认" target:self action:@selector(resetFiles:)];
+    NSButton *reset = [NSButton buttonWithTitle:FTL(@"Restore Default File Settings") target:self action:@selector(resetFiles:)];
     NSStackView *all = [NSStackView stackViewWithViews:@[grid, reset]];
     all.orientation = NSUserInterfaceLayoutOrientationVertical;
     all.alignment = NSLayoutAttributeLeading;
     all.spacing = 18;
     all.detachesHiddenViews = YES;
-    all.edgeInsets = NSEdgeInsetsMake(20, 24, 20, 24);
-    w.contentView = all;
+    NSView *content = [NSView new];
+    all.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:all];
+    [NSLayoutConstraint activateConstraints:@[
+        [all.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:24],
+        [all.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-24],
+        [all.topAnchor constraintEqualToAnchor:content.topAnchor constant:20],
+        [all.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-20]]];
+    w.contentView = content;
     [self reloadFromSettings];
     [reset.leadingAnchor constraintEqualToAnchor:_alwaysHiddenField.leadingAnchor].active = YES;
-    [all layoutSubtreeIfNeeded];
-    [w setContentSize:all.fittingSize];
+    [content layoutSubtreeIfNeeded];
+    [w setContentSize:content.fittingSize];
     [w center];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(reloadFromSettings) name:FTSettingsDidChange object:nil];
     return self;

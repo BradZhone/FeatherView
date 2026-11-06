@@ -345,14 +345,14 @@ static void jsonTrees(void) {
     JSONNode *odd = JSONParse(U(@"{\"@types/node\": [\"x\\\"y\"]}"), NULL);
     CHECK([odd.children[0].children[0].path isEqual:@"$[\"@types/node\"][0]"] && [[odd JSONStringPretty:NO] isEqual:@"{\"@types/node\":[\"x\\\"y\"]}"],
           "quoted path segment and re-serialised JSON: %s", [odd JSONStringPretty:NO].UTF8String);
-    CHECK(!JSONParse(U(@"{\n  \"a\": 1\n  \"b\": 2\n}"), &err) && [err hasPrefix:@"第 3 行第 3 列"], "error position: %s", err.UTF8String);
+    CHECK(!JSONParse(U(@"{\n  \"a\": 1\n  \"b\": 2\n}"), &err) && [err hasPrefix:@"Line 3, column 3"], "error position: %s", err.UTF8String);
     CHECK(!JSONParse(U(@"[1, 2"), &err) && [err containsString:@"]"], "unterminated array: %s", err.UTF8String);
-    CHECK(!JSONParse(U(@""), &err) && [err containsString:@"空"], "empty file");
+    CHECK(!JSONParse(U(@""), &err) && [err containsString:@"empty"], "empty file");
     NSMutableString *deep = [NSMutableString string];
     for (int i = 0; i < 600; i++) [deep appendString:@"["];
-    CHECK(!JSONParse(U(deep), &err) && [err containsString:@"嵌套"], "deep nesting refused, not a stack overflow");
+    CHECK(!JSONParse(U(deep), &err) && [err containsString:@"Nested"], "deep nesting refused, not a stack overflow");
     JSONNode *pl = JSONFromPropertyList(@{@"b": @YES, @"a": @[@1, [NSData dataWithBytes:"\x01\x02" length:2]], @"when": [NSDate dateWithTimeIntervalSince1970:0]});
-    CHECK(pl.children.count == 3 && [pl.children[0].key isEqual:@"a"] && pl.children[1].kind == JSONBool && [pl.children[0].children[1].text hasPrefix:@"2 字节  0102"] &&
+    CHECK(pl.children.count == 3 && [pl.children[0].key isEqual:@"a"] && pl.children[1].kind == JSONBool && [pl.children[0].children[1].text hasPrefix:@"2 bytes  0102"] &&
           pl.children[2].kind == JSONDate, "property list: sorted keys, bool, data, date");
     CHECK(JSONNodeCount(r, 100) == 9, "node count (%lu)", (unsigned long)JSONNodeCount(r, 100));
 }
@@ -372,7 +372,7 @@ static void notebooks(void) {
     CHECK([md containsString:@"```text\n1\n```"] && [md containsString:@"```text\nTraceback\n```"], "stream text and ANSI-free traceback");
     NSArray *files = [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil];
     CHECK(files.count == 1 && [md containsString:@"![]("] && ![md containsString:@"<Figure>"], "image output written and linked instead of its text");
-    CHECK([NotebookToMarkdown(U(@"{\"x\":1}"), dir, NULL) containsString:@"无法解析"], "not a notebook → explanation");
+    CHECK([NotebookToMarkdown(U(@"{\"x\":1}"), dir, NULL) containsString:@"Couldn’t read"], "not a notebook → explanation");
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
 }
 

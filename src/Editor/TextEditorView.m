@@ -1,4 +1,5 @@
 #import "TextEditorView+Private.h"
+#import "Localization.h"
 
 @implementation EditOp @end
 @implementation EditGroup @end
@@ -269,11 +270,11 @@ static CGColorRef tokenColor(TokenKind k) { return HLColor(k).CGColor; }
     NSUInteger col = [self utf16Index:_caret inLine:L] + 1;
     NSString *enc = _encoding == NSUTF8StringEncoding ? @"UTF-8" :
                     _encoding == NSUTF16StringEncoding ? @"UTF-16" : @"GB18030";
-    NSMutableString *s = [NSMutableString stringWithFormat:@"行 %lu，列 %lu   %@   %@",
+    NSMutableString *s = [NSMutableString stringWithFormat:FTL(@"Ln %lu, Col %lu   %@   %@"),
                           (unsigned long)L + 1, (unsigned long)col, enc, _buf.usesCRLF ? @"CRLF" : @"LF"];
     NSRange sel = self.selection;
-    if (sel.length) [s appendFormat:@"   已选 %lu 字节", (unsigned long)sel.length];
-    if (self.wrapLimited) [s appendString:@"   文件较大，未自动换行"];
+    if (sel.length) [s appendFormat:FTLP(sel.length, @"   %lu byte selected", @"   %lu bytes selected"), (unsigned long)sel.length];
+    if (self.wrapLimited) [s appendString:FTL(@"   Large file, not wrapped")];
     return s;
 }
 

@@ -1,4 +1,5 @@
 #import "ImageViewer.h"
+#import "Localization.h"
 #import "CanvasView.h"
 #import "SVGImage.h"
 #import <ImageIO/ImageIO.h>
@@ -354,12 +355,12 @@ static CGImageRef rasterizeSVG(NSImage *svg, CGFloat longSide) {
 }
 
 - (NSString *)info {
-    if (!_img) return @"解码中…";
+    if (!_img) return FTL(@"Decoding…");
     NSMutableString *s = [NSMutableString stringWithFormat:@"%.0f × %.0f   %@", _origPixels.width, _origPixels.height,
                           _path.pathExtension.uppercaseString];
-    if (_frames > 1) [s appendFormat:@"   %lu 帧%@", (unsigned long)_frames, _animating ? @"" : @"（太大，只显示第一帧）"];
-    [s appendFormat:@"   %@%.0f%%", _fit ? @"适合窗口 " : @"", self.zoomPercent];
-    if (_rot) [s appendFormat:@"   已旋转 %ld°", (long)_rot * 90];
+    if (_frames > 1) [s appendFormat:FTL(@"   %lu frames%@"), (unsigned long)_frames, _animating ? @"" : FTL(@" (too large, first frame only)")];
+    [s appendFormat:@"   %@%.0f%%", _fit ? FTL(@"Fit ") : @"", self.zoomPercent];
+    if (_rot) [s appendFormat:FTL(@"   Rotated %ld°"), (long)_rot * 90];
     return s;
 }
 
@@ -457,13 +458,13 @@ static CGImageRef rasterizeSVG(NSImage *svg, CGFloat longSide) {
     if (_tools) return _tools;
     _percent = FTToolLabel(44);
     _percent.stringValue = [NSString stringWithFormat:@"%.0f%%", self.zoomPercent];
-    _tools = FTToolStrip(@[FTToolButton(@"minus.magnifyingglass", @"缩小（⌘-）", self, @selector(ftZoomOut)),
+    _tools = FTToolStrip(@[FTToolButton(@"minus.magnifyingglass", FTL(@"Zoom Out (⌘-)"), self, @selector(ftZoomOut)),
                            _percent,
-                           FTToolButton(@"plus.magnifyingglass", @"放大（⌘+）", self, @selector(ftZoomIn)),
-                           FTToolButton(@"arrow.down.right.and.arrow.up.left", @"适合窗口（⌘0）", self, @selector(ftZoomToFit)),
-                           FTToolButton(@"1.magnifyingglass", @"实际大小", self, @selector(ftZoomActualSize)),
-                           FTToolButton(@"rotate.left", @"向左旋转", self, @selector(rotateLeft:)),
-                           FTToolButton(@"rotate.right", @"向右旋转", self, @selector(rotateRight:))]);
+                           FTToolButton(@"plus.magnifyingglass", FTL(@"Zoom In (⌘+)"), self, @selector(ftZoomIn)),
+                           FTToolButton(@"arrow.down.right.and.arrow.up.left", FTL(@"Fit to Window (⌘0)"), self, @selector(ftZoomToFit)),
+                           FTToolButton(@"1.magnifyingglass", FTL(@"Actual Size"), self, @selector(ftZoomActualSize)),
+                           FTToolButton(@"rotate.left", FTL(@"Rotate Left"), self, @selector(rotateLeft:)),
+                           FTToolButton(@"rotate.right", FTL(@"Rotate Right"), self, @selector(rotateRight:))]);
     return _tools;
 }
 
@@ -472,7 +473,7 @@ static CGImageRef rasterizeSVG(NSImage *svg, CGFloat longSide) {
 
 - (BOOL)isAccessibilityElement { return YES; }
 - (NSAccessibilityRole)accessibilityRole { return NSAccessibilityImageRole; }
-- (NSString *)accessibilityLabel { return [NSString stringWithFormat:@"图片 %@，%@", _path.lastPathComponent, self.info]; }
+- (NSString *)accessibilityLabel { return [NSString stringWithFormat:FTL(@"Image %@, %@"), _path.lastPathComponent, self.info]; }
 
 @end
 

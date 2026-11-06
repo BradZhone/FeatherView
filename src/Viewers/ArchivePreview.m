@@ -1,4 +1,5 @@
 #import "BinaryPreviews.h"
+#import "Localization.h"
 #import "TablePreview.h"
 #import "TableModel.h"
 #import "CanvasView.h"
@@ -54,7 +55,7 @@ static NSArray *parseListing(NSString *verbose, NSArray<NSString *> *names, unsi
             when = [NSString stringWithFormat:@"%ld-%02lu-%02ld%@", (long)(hasTime ? year : t.integerValue), (unsigned long)mon,
                     (long)[l substringWithRange:[m rangeAtIndex:4]].integerValue, hasTime ? [@" " stringByAppendingString:t] : @""];
         }
-        [rows addObject:@[name, size, when, dir ? @"文件夹" : (name.pathExtension.length ? name.pathExtension.lowercaseString : @"文件")]];
+        [rows addObject:@[name, size, when, dir ? FTL(@"folder") : (name.pathExtension.length ? name.pathExtension.lowercaseString : FTL(@"file"))]];
     }
     return rows;
 }
@@ -65,7 +66,7 @@ static NSArray *parseListing(NSString *verbose, NSArray<NSString *> *names, unsi
     _path = [path copy];
     _grid = [[TablePreview alloc] initWithFrame:self.bounds];
     _grid.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    _grid.extraInfo = @"正在读取…";
+    _grid.extraInfo = FTL(@"Reading…");
     [self addSubview:_grid];
     __weak ArchivePreview *weakSelf = self;
     _grid.onActivateRow = ^(NSUInteger row) { [weakSelf extract:row]; };
@@ -83,9 +84,9 @@ static NSArray *parseListing(NSString *verbose, NSArray<NSString *> *names, unsi
             me->_rows = rows ?: @[];
             me->_total = total;
             me->_loaded = YES;
-            if (!rows) me->_error = @"无法读取这个压缩包（可能已损坏或加密）";
-            [me->_grid setModel:[ArrayTable tableWithHeaders:@[@"名称", @"大小（字节）", @"修改时间", @"类型"] rows:me->_rows truncated:names.count > kMaxEntries]];
-            me->_grid.extraInfo = me->_error ?: [NSString stringWithFormat:@"解压后共 %@ · 双击打开其中的文件",
+            if (!rows) me->_error = FTL(@"Couldn’t read this archive (it may be damaged or encrypted)");
+            [me->_grid setModel:[ArrayTable tableWithHeaders:@[FTL(@"Name"), FTL(@"Size (bytes)"), FTL(@"Modified"), FTL(@"Kind")] rows:me->_rows truncated:names.count > kMaxEntries]];
+            me->_grid.extraInfo = me->_error ?: [NSString stringWithFormat:FTL(@"%@ uncompressed · double-click a file to open it"),
                 [NSByteCountFormatter stringFromByteCount:(long long)total countStyle:NSByteCountFormatterCountStyleFile]];
             if (me.onChange) me.onChange();
         });
@@ -97,13 +98,13 @@ static NSArray *parseListing(NSString *verbose, NSArray<NSString *> *names, unsi
 - (TablePreview *)grid { return _grid; }
 - (NSUInteger)entryCount { return _rows.count; }
 - (NSString *)status {
-    if (!_loaded) return @"压缩包   正在读取…";
-    if (_error) return [@"压缩包   " stringByAppendingString:_error];
-    return [NSString stringWithFormat:@"压缩包（只读）   %@ 项", FTGrouped(_rows.count)];
+    if (!_loaded) return FTL(@"Archive   Reading…");
+    if (_error) return [FTL(@"Archive   ") stringByAppendingString:_error];
+    return [NSString stringWithFormat:FTLP(_rows.count, @"Archive (read-only)   %@ item", @"Archive (read-only)   %@ items"), FTGrouped(_rows.count)];
 }
 
 - (void)extract:(NSUInteger)row {
-    if (row >= _rows.count || [_rows[row][3] isEqual:@"文件夹"]) { NSBeep(); return; }
+    if (row >= _rows.count || [_rows[row][3] isEqual:FTL(@"folder")]) { NSBeep(); return; }
     NSString *name = _rows[row][0], *archive = _path;
     NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"feather-archive-" stringByAppendingString:NSUUID.UUID.UUIDString]];
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];

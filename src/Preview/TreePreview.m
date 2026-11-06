@@ -1,4 +1,5 @@
 #import "TreePreview+Private.h"
+#import "Localization.h"
 #import "CanvasView.h"
 #import "Highlighter.h"
 
@@ -21,13 +22,13 @@ static NSButton *tool(NSString *symbol, NSString *tip, id target, SEL action) {
     if (!(self = [super initWithFrame:frame])) return nil;
     FTClipToBounds(self);
     _filter = [NSSearchField new];
-    _filter.placeholderString = @"筛选键或值";
+    _filter.placeholderString = FTL(@"Filter keys or values");
     _filter.delegate = self;
     _filter.controlSize = NSControlSizeSmall;
     _filter.font = [NSFont systemFontOfSize:11.5];
     _filter.translatesAutoresizingMaskIntoConstraints = NO;
-    _expandAll = tool(@"plus.square.on.square", @"全部展开", self, @selector(expandAllAction:));
-    _collapseAll = tool(@"minus.square", @"全部折叠", self, @selector(collapseAllAction:));
+    _expandAll = tool(@"plus.square.on.square", FTL(@"Expand All"), self, @selector(expandAllAction:));
+    _collapseAll = tool(@"minus.square", FTL(@"Collapse All"), self, @selector(collapseAllAction:));
     _info = [NSTextField labelWithString:@""];
     _info.font = [NSFont systemFontOfSize:11];
     _info.textColor = NSColor.secondaryLabelColor;
@@ -44,7 +45,7 @@ static NSButton *tool(NSString *symbol, NSString *tip, id target, SEL action) {
 
     _ov = [[NSOutlineView alloc] initWithFrame:NSMakeRect(0, 0, 400, 300)];
     NSTableColumn *k = [[NSTableColumn alloc] initWithIdentifier:@"key"], *v = [[NSTableColumn alloc] initWithIdentifier:@"value"];
-    k.title = @"名称"; v.title = @"值";
+    k.title = FTL(@"Name"); v.title = FTL(@"Value");
     k.width = 260; v.width = 420;
     k.resizingMask = v.resizingMask = NSTableColumnUserResizingMask;
     [_ov addTableColumn:k];
@@ -113,14 +114,14 @@ static JSONNode *parseSource(NSData *d, BOOL plist, NSString **err) {
     if (!plist) return JSONParse(d, err);
     NSError *e = nil;
     id obj = [NSPropertyListSerialization propertyListWithData:d options:NSPropertyListImmutable format:NULL error:&e];
-    if (!obj) { *err = [NSString stringWithFormat:@"无法解析属性列表：%@", e.localizedDescription ?: @"格式错误"]; return nil; }
+    if (!obj) { *err = [NSString stringWithFormat:FTL(@"Couldn’t read the property list: %@"), e.localizedDescription ?: FTL(@"Malformed")]; return nil; }
     return JSONFromPropertyList(obj);
 }
 
 - (void)setSourceData:(NSData *)utf8 path:(NSString *)path {
     _path = [path copy];
     BOOL plist = [@[@"plist", @"strings", @"stringsdict", @"entitlements", @"xcprivacy", @"mobileconfig", @"webloc"] containsObject:path.pathExtension.lowercaseString];
-    if (utf8.length > kMaxTreeBytes) { [self showError:@"文件超过 64 MB，树形视图已关闭。请使用源码视图。" keepTree:NO]; return; }
+    if (utf8.length > kMaxTreeBytes) { [self showError:FTL(@"The file is larger than 64 MB, so the tree view is off. Use the source view.") keepTree:NO]; return; }
     NSUInteger gen = ++_parseGen;
     void (^done)(JSONNode *, NSString *) = ^(JSONNode *r, NSString *err) {
         if (gen != self->_parseGen) return;
@@ -130,7 +131,7 @@ static JSONNode *parseSource(NSData *d, BOOL plist, NSString **err) {
         [self installRoot:r keepExpansion:self->_root != nil];
     };
     if (utf8.length <= kSyncBytes) { NSString *err = nil; JSONNode *r = parseSource(utf8, plist, &err); done(r, err); return; }
-    _info.stringValue = @"正在解析…";
+    _info.stringValue = FTL(@"Parsing…");
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *err = nil;
         JSONNode *r = parseSource(utf8, plist, &err);
@@ -139,7 +140,7 @@ static JSONNode *parseSource(NSData *d, BOOL plist, NSString **err) {
 }
 
 - (void)showError:(NSString *)err keepTree:(BOOL)keep {
-    _error.stringValue = keep && _root ? [NSString stringWithFormat:@"⚠️ %@（下面是上一次能解析时的内容）", err] : [@"⚠️ " stringByAppendingString:err ?: @""];
+    _error.stringValue = keep && _root ? [NSString stringWithFormat:FTL(@"⚠️ %@ (showing the last version that parsed)"), err] : [@"⚠️ " stringByAppendingString:err ?: @""];
     _error.hidden = NO;
     _errorHeight.active = NO;
     if (!keep || !_root) { _root = nil; _nodeCount = 0; [_ov reloadData]; [self updateInfo]; }

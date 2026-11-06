@@ -1,4 +1,5 @@
 #import "TabBarView.h"
+#import "Localization.h"
 #import "CanvasView.h"
 
 @implementation TabItem @end
@@ -221,14 +222,14 @@ static NSRect closeRect(NSRect tab) { return NSMakeRect(NSMaxX(tab) - 24, NSMidY
 
 - (BOOL)isAccessibilityElement { return YES; }
 - (NSAccessibilityRole)accessibilityRole { return NSAccessibilityTabGroupRole; }
-- (NSString *)accessibilityLabel { return @"打开的文件"; }
+- (NSString *)accessibilityLabel { return FTL(@"Open files"); }
 - (NSArray *)accessibilityChildren {
     if (_ax) return _ax;
     NSMutableArray *a = [NSMutableArray array];
     for (NSInteger i = 0; i < (NSInteger)_items.count; i++) {
         TabAXElement *el = [TabAXElement accessibilityElementWithRole:NSAccessibilityRadioButtonRole
             frame:[self.window convertRectToScreen:[self convertRect:[self rectForTab:i] toView:nil]]
-            label:[_items[i].title stringByAppendingString:_items[i].dirty ? @"，未保存" : @""] parent:self];
+            label:[_items[i].title stringByAppendingString:_items[i].dirty ? FTL(@", unsaved") : @""] parent:self];
         el.bar = self;
         el.index = i;
         el.accessibilityValue = @(i == _selectedIndex);

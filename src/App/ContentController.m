@@ -1,4 +1,5 @@
 #import "ContentController.h"
+#import "Localization.h"
 #import "TextEditorView.h"
 #import "PieceTable.h"
 #import "Viewers.h"
@@ -173,14 +174,14 @@ static NSString *sizeString(off_t n) {
 
     FindBarView *find = [[FindBarView alloc] initWithFrame:NSMakeRect(0, 0, 800, kFindH)];
     _search = [[NSSearchField alloc] initWithFrame:NSZeroRect];
-    _search.placeholderString = @"查找";
+    _search.placeholderString = FTL(@"Find");
     _search.delegate = self;
     _search.sendsWholeSearchString = YES;
     _replace = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    _replace.placeholderString = @"替换为";
+    _replace.placeholderString = FTL(@"Replace with");
     _replace.delegate = self;
-    NSButton *one = [NSButton buttonWithTitle:@"替换" target:self action:@selector(replaceOne:)];
-    NSButton *all = [NSButton buttonWithTitle:@"全部替换" target:self action:@selector(replaceAllAction:)];
+    NSButton *one = [NSButton buttonWithTitle:FTL(@"Replace") target:self action:@selector(replaceOne:)];
+    NSButton *all = [NSButton buttonWithTitle:FTL(@"Replace All") target:self action:@selector(replaceAllAction:)];
     one.controlSize = all.controlSize = NSControlSizeSmall;
     one.font = all.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
     [one sizeToFit]; [all sizeToFit];
@@ -204,7 +205,7 @@ static NSString *sizeString(off_t n) {
     _statusBar = bar;
 
     NSArray *icons = @[@"doc.plaintext", @"rectangle.split.2x1", @"eye"];
-    NSArray *tips = @[@"源码", @"并排预览（⌥⌘V）", @"预览（⇧⌘V）"];
+    NSArray *tips = @[FTL(@"Source"), FTL(@"Side by Side (⌥⌘V)"), FTL(@"Preview (⇧⌘V)")];
     NSSegmentedControl *sw = [NSSegmentedControl segmentedControlWithImages:@[
         [NSImage imageWithSystemSymbolName:icons[0] accessibilityDescription:tips[0]],
         [NSImage imageWithSystemSymbolName:icons[1] accessibilityDescription:tips[1]],
@@ -335,7 +336,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 - (void)loadViewer:(Doc *)d {
     struct timespec mt; off_t sz;
     d.missing = !statPath(d.path, &mt, &sz);
-    if (d.missing) { d.viewer = [self placeholder:@"文件已不存在"]; d.status = @"已删除"; return; }
+    if (d.missing) { d.viewer = [self placeholder:FTL(@"The file no longer exists")]; d.status = FTL(@"Deleted"); return; }
     d.mtime = mt; d.size = sz; d.changedOnDisk = NO;
     ViewerKind k = d.mode == ViewerAuto ? FKGuessKind(d.path) : d.mode;
     switch (k) {
@@ -368,8 +369,8 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
         if (!me || !doc || !e) return;
         BOOL dirty = e.isDirty;
         NSString *warn = doc.saveError ? [@"   ⚠️ " stringByAppendingString:doc.saveError]
-                       : doc.changedOnDisk ? @"   ⚠️ 文件已在外部修改" : @"";
-        doc.status = doc.untitled ? [NSString stringWithFormat:@"%@   未保存的新文档 · ⌘S 选择保存位置%@", e.statusText, warn]
+                       : doc.changedOnDisk ? FTL(@"   ⚠️ Changed on disk") : @"";
+        doc.status = doc.untitled ? [NSString stringWithFormat:FTL(@"%@   New document · ⌘S to choose where to save%@"), e.statusText, warn]
                                   : [NSString stringWithFormat:@"%@   %@%@", e.statusText, sizeString(doc.size), warn];
         if (doc == me->_active) me->_status.stringValue = doc.status;
         if (e.editCount != doc.lastEdit) {             // content changed (not just the caret)
@@ -426,9 +427,9 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 - (void)loadHex:(Doc *)d {
     NSString *err = nil;
     NSData *data = FKLoadRaw(d.path, &err);
-    if (!data) { d.viewer = [self placeholder:err ?: @"无法读取"]; d.status = @""; return; }
+    if (!data) { d.viewer = [self placeholder:err ?: FTL(@"Couldn’t read the file")]; d.status = @""; return; }
     d.viewer = [[HexView alloc] initWithFrame:NSZeroRect data:data];
-    d.status = [NSString stringWithFormat:@"十六进制（只读）   %@", sizeString(d.size)];
+    d.status = [NSString stringWithFormat:FTL(@"Hex (read-only)   %@"), sizeString(d.size)];
 }
 
 - (void)loadImage:(Doc *)d {
@@ -457,14 +458,14 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     if (!pv) { [self loadQuickLook:d]; return; }
     while (pv.isLocked) {
         NSAlert *a = [NSAlert new];
-        a.messageText = [NSString stringWithFormat:@"“%@”已加密", d.path.lastPathComponent];
-        a.informativeText = @"输入密码以打开。";
+        a.messageText = [NSString stringWithFormat:FTL(@"“%@” is encrypted"), d.path.lastPathComponent];
+        a.informativeText = FTL(@"Enter the password to open it.");
         NSSecureTextField *f = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 240, 24)];
         a.accessoryView = f;
         a.window.initialFirstResponder = f;
-        [a addButtonWithTitle:@"打开"];
-        [a addButtonWithTitle:@"取消"];
-        if ([self runAlert:a] != NSAlertFirstButtonReturn) { d.viewer = [self placeholder:@"PDF 已加密，未输入密码"]; d.status = @""; return; }
+        [a addButtonWithTitle:FTL(@"Open")];
+        [a addButtonWithTitle:FTL(@"Cancel")];
+        if ([self runAlert:a] != NSAlertFirstButtonReturn) { d.viewer = [self placeholder:FTL(@"Encrypted PDF, no password entered")]; d.status = @""; return; }
         if (![pv unlock:f.stringValue]) NSBeep();
     }
     __weak ContentController *weakSelf = self;
@@ -489,7 +490,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     TreePreview *t = [[TreePreview alloc] initWithFrame:NSZeroRect];
     [t setRoot:JSONFromPropertyList(obj)];
     d.viewer = t;
-    d.status = [NSString stringWithFormat:@"二进制属性列表（只读）   %@", sizeString(d.size)];
+    d.status = [NSString stringWithFormat:FTL(@"Binary property list (read-only)   %@"), sizeString(d.size)];
 }
 
 - (void)loadSQLite:(Doc *)d {
@@ -520,7 +521,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     if (!ql) { [self loadText:d]; return; }
     d.viewer = ql;
     d.viewerIsQL = YES;
-    d.status = [NSString stringWithFormat:@"快速查看   %@", sizeString(d.size)];
+    d.status = [NSString stringWithFormat:FTL(@"Quick Look   %@"), sizeString(d.size)];
 }
 
 - (void)releaseViewer:(Doc *)d {
@@ -602,7 +603,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
             MarkdownPreview.defaultScale = s;
             [ud setDouble:MarkdownPreview.defaultScale forKey:@"markdownScale"];
             for (Doc *d in _docs) d.markup.markdownView.scale = MarkdownPreview.defaultScale;
-            [self flashStatus:[NSString stringWithFormat:@"预览缩放 %.0f%%", MarkdownPreview.defaultScale * 100]];
+            [self flashStatus:[NSString stringWithFormat:FTL(@"Preview zoom %.0f%%"), MarkdownPreview.defaultScale * 100]];
             break;
         }
         case 3: {
@@ -610,13 +611,13 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
             HTMLPreview.defaultZoom = s;
             [ud setDouble:HTMLPreview.defaultZoom forKey:@"htmlZoom"];
             for (Doc *d in _docs) d.markup.htmlView.zoom = HTMLPreview.defaultZoom;
-            [self flashStatus:[NSString stringWithFormat:@"网页缩放 %.0f%%", HTMLPreview.defaultZoom * 100]];
+            [self flashStatus:[NSString stringWithFormat:FTL(@"Page zoom %.0f%%"), HTMLPreview.defaultZoom * 100]];
             break;
         }
         case 5: {
             FTSetDataFontSize(dir ? FTDataFontSize() + dir : 12);
             [ud setDouble:FTDataFontSize() forKey:@"dataFontSize"];
-            [self flashStatus:[NSString stringWithFormat:@"表格字号 %.0f", FTDataFontSize()]];
+            [self flashStatus:[NSString stringWithFormat:FTL(@"Table font size %.0f"), FTDataFontSize()]];
             break;
         }
         case 4: {
@@ -624,7 +625,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
             TextEditorView.defaultFontSize = s;
             [ud setDouble:TextEditorView.defaultFontSize forKey:@"editorFontSize"];
             for (Doc *d in _docs) d.editor.fontSize = TextEditorView.defaultFontSize;
-            [self flashStatus:[NSString stringWithFormat:@"编辑器字号 %.0f", TextEditorView.defaultFontSize]];
+            [self flashStatus:[NSString stringWithFormat:FTL(@"Editor font size %.0f"), TextEditorView.defaultFontSize]];
             break;
         }
     }
@@ -659,7 +660,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
         t.dirty = docDirty(d);
         t.preview = d.preview;
         t.missing = d.missing;
-        t.toolTip = d.untitled ? @"未保存的新文档（⌘S 选择保存位置）" : [d.path stringByAbbreviatingWithTildeInPath];
+        t.toolTip = d.untitled ? FTL(@"New document (⌘S to choose where to save)") : [d.path stringByAbbreviatingWithTildeInPath];
         [items addObject:t];
     }
     _tabBar.items = items;
@@ -756,12 +757,12 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     if (!d.untitled && _autoSaveMode != AutoSaveOff && [self autoSave:d]) return YES;   // only ask when auto-save could not save
     if (d != _active) [self activate:d focus:NO];
     NSAlert *a = [NSAlert new];
-    a.messageText = d.untitled ? [NSString stringWithFormat:@"要保存“%@”吗？", d.title]
-                               : [NSString stringWithFormat:@"“%@”有未保存的修改", d.path.lastPathComponent];
-    a.informativeText = d.untitled ? @"这是新建的文档，还没有存成文件。不保存的话内容会丢失。" : @"不保存的话修改会丢失。";
-    [a addButtonWithTitle:d.untitled ? @"保存…" : @"保存"];
-    [a addButtonWithTitle:@"取消"];
-    [a addButtonWithTitle:@"不保存"];
+    a.messageText = d.untitled ? [NSString stringWithFormat:FTL(@"Save “%@”?"), d.title]
+                               : [NSString stringWithFormat:FTL(@"“%@” has unsaved changes"), d.path.lastPathComponent];
+    a.informativeText = d.untitled ? FTL(@"This document has never been saved. Its contents will be lost if you don’t save it.") : FTL(@"Your changes will be lost if you don’t save them.");
+    [a addButtonWithTitle:d.untitled ? FTL(@"Save…") : FTL(@"Save")];
+    [a addButtonWithTitle:FTL(@"Cancel")];
+    [a addButtonWithTitle:FTL(@"Don’t Save")];
     NSModalResponse r = [self runAlert:a];
     if (r == NSAlertFirstButtonReturn) return [self saveDoc:d];
     if (r == NSAlertThirdButtonReturn) { d.discarded = YES; return YES; }
@@ -842,13 +843,13 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     if (!dirty.count) return YES;
     if (dirty.count == 1) return [self askSave:dirty[0]];
     NSAlert *a = [NSAlert new];
-    a.messageText = [NSString stringWithFormat:@"有 %lu 个文件未保存", (unsigned long)dirty.count];
+    a.messageText = [NSString stringWithFormat:FTL(@"%lu files have unsaved changes"), (unsigned long)dirty.count];
     NSMutableArray *names = [NSMutableArray array];
     for (Doc *d in dirty) [names addObject:docName(d)];
-    a.informativeText = [names componentsJoinedByString:@"、"];
-    [a addButtonWithTitle:@"全部保存"];
-    [a addButtonWithTitle:@"取消"];
-    [a addButtonWithTitle:@"不保存"];
+    a.informativeText = [names componentsJoinedByString:FTL(@", ")];
+    [a addButtonWithTitle:FTL(@"Save All")];
+    [a addButtonWithTitle:FTL(@"Cancel")];
+    [a addButtonWithTitle:FTL(@"Don’t Save")];
     NSModalResponse r = [self runAlert:a];
     if (r == NSAlertFirstButtonReturn) { for (Doc *d in dirty) if (![self saveDoc:d]) return NO; return YES; }
     if (r == NSAlertThirdButtonReturn) { for (Doc *d in dirty) d.discarded = YES; return YES; }
@@ -982,15 +983,15 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
         NSString *err = nil;
         [NSFileManager.defaultManager createDirectoryAtPath:d.path.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
         if (![NSFileManager.defaultManager fileExistsAtPath:d.path]) [NSData.data writeToFile:d.path atomically:NO];
-        if (![ed save:&err]) { d.saveError = [NSString stringWithFormat:@"无法暂存：%@", err ?: @"未知错误"]; ed.onChange(); return NO; }
+        if (![ed save:&err]) { d.saveError = [NSString stringWithFormat:FTL(@"Couldn’t keep a backup: %@"), err ?: FTL(@"Unknown error")]; ed.onChange(); return NO; }
         [self didSave:d];
         return YES;
     }
     NSString *problem = nil;
-    if (d.missing || ![NSFileManager.defaultManager fileExistsAtPath:d.path]) problem = @"文件已被删除，未自动保存（⌘S 可重新创建）";
-    else if ([self diskChanged:d]) problem = @"文件已在外部修改，未自动保存（⌘S 选择是否覆盖）";
+    if (d.missing || ![NSFileManager.defaultManager fileExistsAtPath:d.path]) problem = FTL(@"The file was deleted; not auto-saved (⌘S recreates it)");
+    else if ([self diskChanged:d]) problem = FTL(@"The file changed on disk; not auto-saved (⌘S to decide whether to overwrite)");
     NSString *err = nil;
-    if (!problem && ![ed save:&err]) problem = [NSString stringWithFormat:@"自动保存失败：%@", err ?: @"未知错误"];
+    if (!problem && ![ed save:&err]) problem = [NSString stringWithFormat:FTL(@"Auto-save failed: %@"), err ?: FTL(@"Unknown error")];
     if (problem) {
         d.saveError = problem;
         ed.onChange();
@@ -1018,17 +1019,17 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     if (!ed) return YES;
     if ([self diskChanged:d]) {
         NSAlert *a = [NSAlert new];
-        a.messageText = [NSString stringWithFormat:@"“%@”已在外部修改", d.path.lastPathComponent];
-        a.informativeText = @"保存会覆盖磁盘上的新内容。";
-        [a addButtonWithTitle:@"覆盖"];
-        [a addButtonWithTitle:@"取消"];
+        a.messageText = [NSString stringWithFormat:FTL(@"“%@” has changed on disk"), d.path.lastPathComponent];
+        a.informativeText = FTL(@"Saving will overwrite the newer version on disk.");
+        [a addButtonWithTitle:FTL(@"Overwrite")];
+        [a addButtonWithTitle:FTL(@"Cancel")];
         if ([self runAlert:a] != NSAlertFirstButtonReturn) return NO;
     }
     NSString *err = nil;
     if (![ed save:&err]) {
         NSAlert *a = [NSAlert new];
-        a.messageText = @"保存失败";
-        a.informativeText = err ?: @"未知错误";
+        a.messageText = FTL(@"Couldn’t Save");
+        a.informativeText = err ?: FTL(@"Unknown error");
         [self runAlert:a];
         return NO;
     }
@@ -1053,14 +1054,14 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     NSMutableSet *used = [NSMutableSet set];
     for (Doc *d in _docs) if (d.untitled) [used addObject:d.title];
     NSUInteger n = 1;
-    while ([used containsObject:[NSString stringWithFormat:@"未命名-%lu", (unsigned long)n]]) n++;
+    while ([used containsObject:[NSString stringWithFormat:FTL(@"Untitled-%lu"), (unsigned long)n]]) n++;
     NSString *dir = self.untitledDirectory;
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     NSString *path = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.txt", NSUUID.UUID.UUIDString]];
     if (![NSData.data writeToFile:path atomically:NO]) { NSBeep(); return; }
     Doc *d = [Doc new];
     d.path = path; d.mode = ViewerText; d.untitled = YES;
-    d.title = [NSString stringWithFormat:@"未命名-%lu", (unsigned long)n];
+    d.title = [NSString stringWithFormat:FTL(@"Untitled-%lu"), (unsigned long)n];
     NSUInteger at = _active ? [_docs indexOfObject:_active] + 1 : _docs.count;
     [_docs insertObject:d atIndex:MIN(at, _docs.count)];
     [self activate:d focus:YES];
@@ -1090,7 +1091,7 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
     p.canCreateDirectories = YES;
     p.allowsOtherFileTypes = YES;
     p.extensionHidden = NO;
-    p.message = @"选择保存位置。扩展名决定语法高亮，例如 .md、.py、.json。";
+    p.message = FTL(@"Choose where to save. The extension sets the syntax highlighting, for example .md, .py or .json.");
     return [p runModal] == NSModalResponseOK ? p.URL.path : nil;
 }
 
@@ -1110,8 +1111,8 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
         [ed setDocumentPath:backup];
         if (!existed) [NSFileManager.defaultManager removeItemAtPath:dest error:nil];
         NSAlert *a = [NSAlert new];
-        a.messageText = @"保存失败";
-        a.informativeText = err ?: @"未知错误";
+        a.messageText = FTL(@"Couldn’t Save");
+        a.informativeText = err ?: FTL(@"Unknown error");
         [self runAlert:a];
         return NO;
     }
@@ -1172,14 +1173,14 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
 
 - (void)findNext:(BOOL)backward {
     if (!_search.stringValue.length) { [self showFindBar]; return; }
-    _findBar.info.stringValue = [self findInActive:_search.stringValue backward:backward] ? @"" : @"无结果";
+    _findBar.info.stringValue = [self findInActive:_search.stringValue backward:backward] ? @"" : FTL(@"No results");
 }
 
 - (BOOL)control:(NSControl *)c textView:(NSTextView *)tv doCommandBySelector:(SEL)sel {
     if (sel == @selector(insertNewline:)) {
         if (c == _replace) { [self replaceOne:nil]; return YES; }
         BOOL back = (NSApp.currentEvent.modifierFlags & NSEventModifierFlagShift) != 0;
-        _findBar.info.stringValue = [self findInActive:_search.stringValue backward:back] ? @"" : @"无结果";
+        _findBar.info.stringValue = [self findInActive:_search.stringValue backward:back] ? @"" : FTL(@"No results");
         return YES;
     }
     if (sel == @selector(cancelOperation:)) { [self hideFindBar]; return YES; }
@@ -1195,7 +1196,7 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
 - (void)replaceAllAction:(id)sender {
     if (!_search.stringValue.length) return;
     NSUInteger n = [self.editor replaceAll:_search.stringValue with:_replace.stringValue];
-    _findBar.info.stringValue = n ? [NSString stringWithFormat:@"已替换 %lu 处", (unsigned long)n] : @"无结果";
+    _findBar.info.stringValue = n ? [NSString stringWithFormat:FTLP(n, @"Replaced %lu occurrence", @"Replaced %lu occurrences"), (unsigned long)n] : FTL(@"No results");
 }
 
 - (void)openHit:(NSString *)path line:(NSUInteger)line column:(NSUInteger)col length:(NSUInteger)len {
@@ -1253,15 +1254,15 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
         it.target = self;
         it.representedObject = d;
     };
-    add(@"关闭", @selector(menuClose:));
-    add(@"关闭其他", @selector(menuCloseOthers:));
-    add(@"关闭右侧", @selector(menuCloseRight:));
-    add(@"全部关闭", @selector(menuCloseAll:));
+    add(FTL(@"Close"), @selector(menuClose:));
+    add(FTL(@"Close Others"), @selector(menuCloseOthers:));
+    add(FTL(@"Close to the Right"), @selector(menuCloseRight:));
+    add(FTL(@"Close All"), @selector(menuCloseAll:));
     [m addItem:NSMenuItem.separatorItem];
-    if (d.preview) add(@"保持打开", @selector(menuPin:));
-    if (d.untitled) { add(@"保存…", @selector(menuSave:)); return m; }
-    add(@"在访达中显示", @selector(menuReveal:));
-    add(@"拷贝路径", @selector(menuCopyPath:));
+    if (d.preview) add(FTL(@"Keep Open"), @selector(menuPin:));
+    if (d.untitled) { add(FTL(@"Save…"), @selector(menuSave:)); return m; }
+    add(FTL(@"Show in Finder"), @selector(menuReveal:));
+    add(FTL(@"Copy Path"), @selector(menuCopyPath:));
     return m;
 }
 

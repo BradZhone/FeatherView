@@ -1,4 +1,5 @@
 #import "FileOps.h"
+#import "Localization.h"
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -6,24 +7,24 @@
 
 static NSString *errnoMessage(int e) {
     switch (e) {
-        case EEXIST: return @"已存在同名项目";
-        case EACCES: case EPERM: return @"没有权限";
-        case ENOENT: return @"文件不存在";
-        case EROFS: return @"磁盘是只读的";
-        case ENOSPC: return @"磁盘空间不足";
+        case EEXIST: return FTL(@"An item with that name already exists");
+        case EACCES: case EPERM: return FTL(@"Permission denied");
+        case ENOENT: return FTL(@"The file doesn’t exist");
+        case EROFS: return FTL(@"The disk is read-only");
+        case ENOSPC: return FTL(@"Not enough disk space");
         default: return @(strerror(e));
     }
 }
 
 NSString *FOValidateName(NSString *name) {
     NSString *t = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (!t.length) return @"名称不能为空";
-    if ([t isEqualToString:@"."] || [t isEqualToString:@".."]) return @"名称无效";
+    if (!t.length) return FTL(@"The name can’t be empty");
+    if ([t isEqualToString:@"."] || [t isEqualToString:@".."]) return FTL(@"Invalid name");
     if ([t rangeOfString:@"/"].location != NSNotFound || [t rangeOfString:@":"].location != NSNotFound)
-        return @"名称不能包含 / 或 :";
+        return FTL(@"The name can’t contain / or :");
     if ([t rangeOfCharacterFromSet:[NSCharacterSet characterSetWithRange:NSMakeRange(0, 1)]].location != NSNotFound)
-        return @"名称无效";
-    if ([t lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 255) return @"名称太长";
+        return FTL(@"Invalid name");
+    if ([t lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 255) return FTL(@"The name is too long");
     return nil;
 }
 
@@ -52,7 +53,7 @@ NSString *FORename(NSString *from, NSString *to) {
 NSString *FOTrash(NSString *path) {
     NSError *e = nil;
     if ([NSFileManager.defaultManager trashItemAtURL:[NSURL fileURLWithPath:path] resultingItemURL:nil error:&e]) return nil;
-    return e.localizedDescription ?: @"无法移到废纸篓";
+    return e.localizedDescription ?: FTL(@"Couldn’t Move to Trash");
 }
 
 BOOL FOPathIsWithin(NSString *path, NSString *base) {

@@ -4,7 +4,7 @@
 Every entry uses LSHandlerRank None: FeatherView is listed under "Open With" for these files but Launch
 Services never picks it on its own. (Alternate was not enough: when the other editor declares no rank,
 e.g. VS Code, macOS started preferring it after it was installed.) The user picks defaults in
-FeatherView → 默认打开方式…, which records an explicit choice.
+FeatherView → Default Apps…, which records an explicit choice.
 Extensions without a system UTI (.md .go .rs .toml …) are claimed by extension, so FeatherView does
 not redefine the type other apps already use for them.
 """

@@ -19,12 +19,12 @@ pgrep -xq "$NAME" && RUNNING=1
 pgrep -xq Feather && RUNNING=1
 if [ -e "$DEST" ]; then
     id=$(bundle_id "$DEST")
-    [ "$id" = "$BID" ] || { echo "$DEST 已存在且不是本项目构建的应用（bundle id: ${id:-未知}），未做改动。"; exit 1; }
+    [ "$id" = "$BID" ] || { echo "$DEST exists and was not built from this project (bundle id: ${id:-unknown}); nothing was changed."; exit 1; }
     rm -rf "$DEST"
 fi
 ditto "$SRC" "$DEST"
 "$LSREGISTER" -f "$DEST"
-echo "已安装到 $DEST"
+echo "Installed to $DEST"
 
 # Before the rename the app was Feather.app with the same bundle id: two copies would compete in
 # Launch Services, so the old one goes to the Trash (recoverable; settings and sessions are kept).
@@ -33,7 +33,7 @@ if [ -d "$OLD" ] && [ "$(bundle_id "$OLD")" = "$BID" ]; then
     "$LSREGISTER" -u "$OLD" >/dev/null 2>&1 || true
     TRASHED="$HOME/.Trash/Feather $(date +%Y%m%d-%H%M%S).app"
     mv "$OLD" "$TRASHED"
-    echo "旧版 Feather.app 已移到废纸篓（$TRASHED），设置和会话不受影响。"
+    echo "Moved the old Feather.app to the Trash ($TRASHED); settings and sessions are kept."
 fi
-[ "$RUNNING" = 1 ] && echo "旧版本正在运行：按 ⌘Q 退出后打开 $NAME 即可使用新版本。"
+[ "$RUNNING" = 1 ] && echo "An older version is running: quit it (⌘Q) and open $NAME to use the new version."
 exit 0

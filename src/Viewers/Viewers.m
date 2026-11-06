@@ -1,4 +1,5 @@
 #import "Viewers.h"
+#import "Localization.h"
 #import <CoreText/CoreText.h>
 #import <ImageIO/ImageIO.h>
 #include <dlfcn.h>
@@ -63,7 +64,7 @@
 
 - (BOOL)isAccessibilityElement { return YES; }
 - (NSAccessibilityRole)accessibilityRole { return NSAccessibilityStaticTextRole; }
-- (NSString *)accessibilityLabel { return [NSString stringWithFormat:@"十六进制视图，%lu 字节", (unsigned long)_data.length]; }
+- (NSString *)accessibilityLabel { return [NSString stringWithFormat:FTLP(_data.length, @"Hex view, %lu byte", @"Hex view, %lu bytes"), (unsigned long)_data.length]; }
 
 @end
 

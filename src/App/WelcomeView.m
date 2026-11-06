@@ -1,4 +1,5 @@
 #import "WelcomeView.h"
+#import "Localization.h"
 #import "CanvasView.h"
 
 @implementation WelcomeView {
@@ -61,31 +62,31 @@ static NSTextField *label(NSString *s, NSFont *f, NSColor *c) {
     if (root) [_stack addArrangedSubview:label(root.stringByAbbreviatingWithTildeInPath, [NSFont systemFontOfSize:12], NSColor.secondaryLabelColor)];
     [_stack setCustomSpacing:26 afterView:_stack.arrangedSubviews.lastObject];
 
-    [_stack addArrangedSubview:label(@"开始", head, NSColor.secondaryLabelColor)];
+    [_stack addArrangedSubview:label(FTL(@"Start"), head, NSColor.secondaryLabelColor)];
     if (root) {
-        [_stack addArrangedSubview:[self link:@"快速打开文件" detail:@"⌘P" action:NSSelectorFromString(@"quickOpen:") target:nil]];
-        [_stack addArrangedSubview:[self link:@"在工作区中搜索" detail:@"⇧⌘F" action:NSSelectorFromString(@"searchWorkspace:") target:nil]];
-        [_stack addArrangedSubview:[self link:@"新建文档" detail:@"⌘N，先不用存成文件" action:NSSelectorFromString(@"newUntitled:") target:nil]];
-        [_stack addArrangedSubview:[self link:@"新建文件…" detail:@"⌥⌘N" action:NSSelectorFromString(@"newFile:") target:nil]];
+        [_stack addArrangedSubview:[self link:FTL(@"Quick Open") detail:@"⌘P" action:NSSelectorFromString(@"quickOpen:") target:nil]];
+        [_stack addArrangedSubview:[self link:FTL(@"Search in Workspace") detail:@"⇧⌘F" action:NSSelectorFromString(@"searchWorkspace:") target:nil]];
+        [_stack addArrangedSubview:[self link:FTL(@"New Document") detail:FTL(@"⌘N, no need to save it first") action:NSSelectorFromString(@"newUntitled:") target:nil]];
+        [_stack addArrangedSubview:[self link:FTL(@"New File…") detail:@"⌥⌘N" action:NSSelectorFromString(@"newFile:") target:nil]];
     }
-    [_stack addArrangedSubview:[self link:@"打开文件夹…" detail:@"⌘O" action:NSSelectorFromString(@"openFolder:") target:nil]];
+    [_stack addArrangedSubview:[self link:FTL(@"Open Folder…") detail:@"⌘O" action:NSSelectorFromString(@"openFolder:") target:nil]];
     [_stack setCustomSpacing:26 afterView:_stack.arrangedSubviews.lastObject];
 
     NSMutableArray *others = [NSMutableArray array];
     for (NSString *r in _recent) if (![r isEqualToString:root]) [others addObject:r];
     if (others.count) {
-        [_stack addArrangedSubview:label(@"最近的工作区", head, NSColor.secondaryLabelColor)];
+        [_stack addArrangedSubview:label(FTL(@"Recent Workspaces"), head, NSColor.secondaryLabelColor)];
         for (NSUInteger i = 0; i < MIN(others.count, (NSUInteger)8); i++) {
             NSString *r = others[i];
             NSButton *b = [self link:r.lastPathComponent detail:r.stringByDeletingLastPathComponent.stringByAbbreviatingWithTildeInPath
                               action:@selector(recentClicked:) target:self];
             b.tag = (NSInteger)[_recent indexOfObject:r];
             b.toolTip = r;
-            NSButton *x = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"xmark.circle.fill" accessibilityDescription:@"从最近列表中移除"]
+            NSButton *x = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"xmark.circle.fill" accessibilityDescription:FTL(@"Remove from Recent")]
                                              target:self action:@selector(removeClicked:)];
             x.bordered = NO;
             x.contentTintColor = NSColor.tertiaryLabelColor;
-            x.toolTip = @"从最近列表中移除（文件夹本身不受影响）";
+            x.toolTip = FTL(@"Remove from Recent (the folder itself is not affected)");
             x.tag = b.tag;
             [x setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
             NSStackView *row = [NSStackView stackViewWithViews:@[b, x]];
