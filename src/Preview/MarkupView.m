@@ -1,4 +1,5 @@
 #import "MarkupView.h"
+#import "Localization.h"
 #import "MarkdownRender.h"
 #import "TextEditorView.h"
 #import "CanvasView.h"
@@ -106,7 +107,7 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
     _textView.linkTextAttributes = @{NSCursorAttributeName: NSCursor.pointingHandCursor};   // colour set per link by the renderer
     _textView.delegate = self;
     _textView.textContainerInset = NSMakeSize(32, 24);
-    _textView.accessibilityLabel = @"Markdown 预览";
+    _textView.accessibilityLabel = FTL(@"Markdown preview");
     _scroll.documentView = _textView;
     [self addSubview:_scroll];
     _scale = gMarkdownScale;

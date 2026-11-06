@@ -1,4 +1,5 @@
 #import "AppDelegate.h"
+#import "Localization.h"
 #import "FileOps.h"
 #import "FileWalker.h"
 
@@ -52,7 +53,7 @@ static const NSUInteger kMaxRecent = 10;
     NSOpenPanel *p = [NSOpenPanel openPanel];
     p.canChooseDirectories = YES;
     p.canChooseFiles = NO;
-    p.prompt = @"打开";
+    p.prompt = FTL(@"Open");
     p.directoryURL = [NSURL fileURLWithPath:_tree.rootPath ?: NSHomeDirectory()];
     [p beginSheetModalForWindow:_win completionHandler:^(NSModalResponse r) {
         if (r == NSModalResponseOK) [self switchToRoot:p.URL.path.stringByStandardizingPath];
@@ -76,7 +77,7 @@ static const NSUInteger kMaxRecent = 10;
 
 - (void)switchWorkspace:(id)s {
     QuickPicker *p = [QuickPicker new];
-    p.placeholder = @"切换工作区";
+    p.placeholder = FTL(@"Switch Workspace");
     NSArray *roots = self.recentRoots;
     __weak QuickPicker *weakP = p;
     p.onQuery = ^(NSString *q) {
@@ -85,7 +86,7 @@ static const NSUInteger kMaxRecent = 10;
             NSString *r = roots[i.unsignedIntegerValue];
             [items addObject:[PickerItem title:r.lastPathComponent subtitle:[r.stringByDeletingLastPathComponent stringByAbbreviatingWithTildeInPath] payload:r]];
         }
-        [items addObject:[PickerItem title:@"打开其他文件夹…" subtitle:@"⌘O" payload:NSNull.null]];
+        [items addObject:[PickerItem title:FTL(@"Open Another Folder…") subtitle:@"⌘O" payload:NSNull.null]];
         [weakP setItems:items];
     };
     p.onPick = ^(PickerItem *it) {
@@ -97,14 +98,14 @@ static const NSUInteger kMaxRecent = 10;
         [self removeRecentRoot:it.payload];
         return YES;
     };
-    p.footnote = @"⌘⌫ 从列表中移除";
+    p.footnote = FTL(@"⌘⌫ removes from the list");
     [self presentPicker:p cleanup:nil];
 }
 
 - (void)quickOpen:(id)s {
     if (!_tree.rootPath) return;
     QuickPicker *p = [QuickPicker new];
-    p.placeholder = [NSString stringWithFormat:@"在 %@ 中按名称查找文件", _tree.rootPath.lastPathComponent];
+    p.placeholder = [NSString stringWithFormat:FTL(@"Find files by name in %@"), _tree.rootPath.lastPathComponent];
     FileList *list = [[FileList alloc] initWithRoot:_tree.rootPath includeHidden:_tree.showHidden];   // follows 显示隐藏文件
     PickerGeneration *gen = [PickerGeneration new];
     __weak QuickPicker *weakP = p;
@@ -135,7 +136,7 @@ static const NSUInteger kMaxRecent = 10;
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (gen.value != g) return;
                 [weakP setItems:items];
-                [weakP setStatus:[NSString stringWithFormat:@"%@%lu 个文件", done ? @"" : @"扫描中… ", (unsigned long)paths.count]];
+                [weakP setStatus:[NSString stringWithFormat:FTLP(paths.count, @"%@%lu file", @"%@%lu files"), done ? @"" : FTL(@"Scanning… "), (unsigned long)paths.count]];
             });
         });
     };
@@ -161,7 +162,7 @@ static const NSUInteger kMaxRecent = 10;
     NSAlert *a = [NSAlert new];
     a.messageText = title;
     [a addButtonWithTitle:button];
-    [a addButtonWithTitle:@"取消"];
+    [a addButtonWithTitle:FTL(@"Cancel")];
     NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 280, 24)];
     tf.stringValue = initial;
     a.accessoryView = tf;
@@ -170,7 +171,7 @@ static const NSUInteger kMaxRecent = 10;
         if (r != NSAlertFirstButtonReturn) return;
         NSString *name = [tf.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         NSString *err = FOValidateName(name);
-        if (err) { dispatch_async(dispatch_get_main_queue(), ^{ [self showError:err title:@"名称无效"]; }); return; }
+        if (err) { dispatch_async(dispatch_get_main_queue(), ^{ [self showError:err title:FTL(@"Invalid name")]; }); return; }
         done(name);
     }];
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -193,11 +194,11 @@ static const NSUInteger kMaxRecent = 10;
 - (void)createItem:(id)sender directory:(BOOL)isDir {
     NSString *dir = [self directoryForNewItem:sender];
     if (!dir) return;
-    NSString *title = [NSString stringWithFormat:@"在“%@”中新建%@", dir.lastPathComponent, isDir ? @"文件夹" : @"文件"];
-    [self promptName:title initial:isDir ? @"新建文件夹" : @"未命名.txt" button:@"创建" done:^(NSString *name) {
+    NSString *title = [NSString stringWithFormat:FTL(@"New %2$@ in “%1$@”"), dir.lastPathComponent, isDir ? FTL(@"Folder") : FTL(@"File")];
+    [self promptName:title initial:isDir ? FTL(@"New Folder") : FTL(@"Untitled.txt") button:FTL(@"Create") done:^(NSString *name) {
         NSString *p = [dir stringByAppendingPathComponent:name];
         NSString *err = FOCreate(p, isDir);
-        if (err) { [self showError:err title:@"无法创建"]; return; }
+        if (err) { [self showError:err title:FTL(@"Couldn’t Create")]; return; }
         [self->_tree reloadAndReveal:p];
         [self->_search fileSystemChanged];
         if (!isDir) [self->_content openPath:p preview:NO focus:YES layout:MarkupSource];   // new .md starts in the editor
@@ -210,10 +211,10 @@ static const NSUInteger kMaxRecent = 10;
 - (void)renameItem:(id)sender {
     NSString *from = [self targetPathFrom:sender];
     if (!from || [from isEqualToString:_tree.rootPath]) return;
-    [self promptName:@"重命名" initial:from.lastPathComponent button:@"重命名" done:^(NSString *name) {
+    [self promptName:FTL(@"Rename") initial:from.lastPathComponent button:FTL(@"Rename") done:^(NSString *name) {
         NSString *to = [from.stringByDeletingLastPathComponent stringByAppendingPathComponent:name];
         NSString *err = FORename(from, to);
-        if (err) { [self showError:err title:@"无法重命名"]; return; }
+        if (err) { [self showError:err title:FTL(@"Couldn’t Rename")]; return; }
         [self->_content pathMoved:from to:to];
         [self->_search fileSystemChanged];
         [self->_tree reloadAndReveal:to];
@@ -240,12 +241,12 @@ static const NSUInteger kMaxRecent = 10;
     NSMutableArray *errors = [NSMutableArray array];
     for (NSString *p in paths) {
         NSString *err = _trashHandler ? _trashHandler(p) : FOTrash(p);
-        if (err) [errors addObject:paths.count > 1 ? [NSString stringWithFormat:@"%@：%@", p.lastPathComponent, err] : err];
+        if (err) [errors addObject:paths.count > 1 ? [NSString stringWithFormat:FTL(@"%@: %@"), p.lastPathComponent, err] : err];
     }
     [_tree reloadAndReveal:_content.currentPath ?: paths.firstObject.stringByDeletingLastPathComponent];
     [_search fileSystemChanged];
     [self updateTitle];
-    if (errors.count) [self showError:[errors componentsJoinedByString:@"\n"] title:@"无法移到废纸篓"];
+    if (errors.count) [self showError:[errors componentsJoinedByString:@"\n"] title:FTL(@"Couldn’t Move to Trash")];
 }
 
 @end

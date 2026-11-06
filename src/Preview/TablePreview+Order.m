@@ -1,4 +1,5 @@
 #import "TablePreview+Private.h"
+#import "Localization.h"
 
 static const NSUInteger kSyncRows = 20000;
 
@@ -111,19 +112,19 @@ static NSMutableData *computeOrder(id<TableModel> m, NSInteger sortCol, BOOL asc
 - (void)updateInfo {
     if (!_model) { _info.stringValue = @""; return; }
     if (!_model.rowCount && !_model.columnCount) {
-        _info.stringValue = self.extraInfo.length ? [@"空表格 · " stringByAppendingString:self.extraInfo] : @"空表格";
+        _info.stringValue = self.extraInfo.length ? [FTL(@"Empty table · ") stringByAppendingString:self.extraInfo] : FTL(@"Empty table");
         return;
     }
     NSMutableString *s = [NSMutableString string];
     NSUInteger shown = self.visibleRowCount, total = _model.rowCount;
-    if (_order && shown != total) [s appendFormat:@"%@ / %@ 行", FTGrouped(shown), FTGrouped(total)];
-    else [s appendFormat:@"%@ 行", FTGrouped(total)];
-    [s appendFormat:@" × %@ 列", FTGrouped(_model.columnCount)];
-    if ([_model respondsToSelector:@selector(truncated)] && _model.truncated) [s appendString:@"（文件太大，只读了前面的部分）"];
+    if (_order && shown != total) [s appendFormat:FTL(@"%@ of %@ rows"), FTGrouped(shown), FTGrouped(total)];
+    else [s appendFormat:FTLP(total, @"%@ row", @"%@ rows"), FTGrouped(total)];
+    [s appendFormat:FTLP(_model.columnCount, @" × %@ column", @" × %@ columns"), FTGrouped(_model.columnCount)];
+    if ([_model respondsToSelector:@selector(truncated)] && _model.truncated) [s appendString:FTL(@" (file too large, only the beginning was read)")];
     if ([_model isKindOfClass:JSONLinesTable.class] && [(JSONLinesTable *)_model badLines])
-        [s appendFormat:@" · %lu 行不是 JSON 对象", (unsigned long)[(JSONLinesTable *)_model badLines]];
+        [s appendFormat:FTLP([(JSONLinesTable *)_model badLines], @" · %lu line is not a JSON object", @" · %lu lines are not JSON objects"), (unsigned long)[(JSONLinesTable *)_model badLines]];
     if (self.extraInfo.length) [s appendFormat:@" · %@", self.extraInfo];
-    if (_working) [s appendString:@" · 处理中…"];
+    if (_working) [s appendString:FTL(@" · Working…")];
     _info.stringValue = s;
 }
 
@@ -197,20 +198,20 @@ static NSMutableData *computeOrder(id<TableModel> m, NSInteger sortCol, BOOL asc
     };
     if (col && ![col.identifier isEqualToString:@"#"]) {
         NSString *v = [_model cellAtRow:r column:(NSUInteger)col.identifier.integerValue];
-        add(@"拷贝单元格", ^{ FTCopyString(v); });
+        add(FTL(@"Copy Cell"), ^{ FTCopyString(v); });
         NSString *name = [_model headerForColumn:(NSUInteger)col.identifier.integerValue];
-        add([NSString stringWithFormat:@"只看“%@”是这个值的行", name.length > 16 ? [[name substringToIndex:16] stringByAppendingString:@"…"] : name], ^{
+        add([NSString stringWithFormat:FTL(@"Show Only Rows with This “%@”"), name.length > 16 ? [[name substringToIndex:16] stringByAppendingString:@"…"] : name], ^{
             self.filterText = [NSString stringWithFormat:@"%@:%@", name, v];
         });
     }
     NSIndexSet *sel = _table.selectedRowIndexes;
-    add(sel.count > 1 ? [NSString stringWithFormat:@"拷贝 %lu 行（TSV）", (unsigned long)sel.count] : @"拷贝这一行（TSV）", ^{ FTCopyString([self rowsAsTSV:sel]); });
+    add(sel.count > 1 ? [NSString stringWithFormat:FTL(@"Copy %lu Rows (TSV)"), (unsigned long)sel.count] : FTL(@"Copy Row (TSV)"), ^{ FTCopyString([self rowsAsTSV:sel]); });
     NSUInteger line = [_model respondsToSelector:@selector(sourceLineOfRow:)] ? [_model sourceLineOfRow:r] : 0;
     if (line && self.onJumpToLine) {
         [menu addItem:NSMenuItem.separatorItem];
-        add([NSString stringWithFormat:@"在源码中显示（第 %lu 行）", (unsigned long)line], ^{ self.onJumpToLine(line); });
+        add([NSString stringWithFormat:FTL(@"Show in Source (Line %lu)"), (unsigned long)line], ^{ self.onJumpToLine(line); });
     }
-    if (_sortColumn >= 0) add(@"恢复文件顺序", ^{ [self sortByColumn:-1 ascending:YES]; });
+    if (_sortColumn >= 0) add(FTL(@"Restore File Order"), ^{ [self sortByColumn:-1 ascending:YES]; });
 }
 
 - (void)runMenuBlock:(NSMenuItem *)i { void (^b)(void) = i.representedObject; if (b) b(); }

@@ -1,4 +1,5 @@
 #import "FileKind.h"
+#import "Localization.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -113,11 +114,11 @@ BOOL FKIsValidUTF8(const uint8_t *p, NSUInteger n) {
 
 static NSData *readFile(NSString *path, NSString **error, BOOL forceMap) {
     struct stat st;
-    if (stat(path.fileSystemRepresentation, &st) != 0) { if (error) *error = @"无法读取文件"; return nil; }
+    if (stat(path.fileSystemRepresentation, &st) != 0) { if (error) *error = FTL(@"Couldn’t read the file"); return nil; }
     NSDataReadingOptions opt = (forceMap || (NSUInteger)st.st_size >= kCopyThreshold) ? NSDataReadingMappedAlways : 0;
     NSError *e = nil;
     NSData *d = st.st_size == 0 ? [NSData data] : [NSData dataWithContentsOfFile:path options:opt error:&e];
-    if (!d && error) *error = e.localizedDescription ?: @"无法读取文件";
+    if (!d && error) *error = e.localizedDescription ?: FTL(@"Couldn’t read the file");
     return d;
 }
 
@@ -126,7 +127,7 @@ NSData *FKLoadRaw(NSString *path, NSString **error) { return readFile(path, erro
 NSData *FKLoadText(NSString *path, NSStringEncoding *enc, NSString **error) {
     NSData *d = readFile(path, error, NO);
     if (!d) return nil;
-    if (d.length > kMaxTextSize) { if (error) *error = @"文件过大，改用十六进制查看"; return nil; }
+    if (d.length > kMaxTextSize) { if (error) *error = FTL(@"File too large, showing as hex"); return nil; }
     const uint8_t *b = d.bytes;
     NSUInteger n = d.length;
 
@@ -134,13 +135,13 @@ NSData *FKLoadText(NSString *path, NSStringEncoding *enc, NSString **error) {
         NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF16StringEncoding];
         if (s) { *enc = NSUTF16StringEncoding; return [s dataUsingEncoding:NSUTF8StringEncoding]; }
     }
-    if (memchr(b, 0, MIN(n, (NSUInteger)8192))) { if (error) *error = @"二进制文件"; return nil; }
+    if (memchr(b, 0, MIN(n, (NSUInteger)8192))) { if (error) *error = FTL(@"Binary file"); return nil; }
     if (FKIsValidUTF8(b, n)) { *enc = NSUTF8StringEncoding; return d; }
     if (n < (64u << 20)) {
         NSStringEncoding gb = CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000);
         NSString *s = [[NSString alloc] initWithData:d encoding:gb];
         if (s) { *enc = gb; return [s dataUsingEncoding:NSUTF8StringEncoding]; }
     }
-    if (error) *error = @"无法识别的编码";
+    if (error) *error = FTL(@"Unrecognized text encoding");
     return nil;
 }

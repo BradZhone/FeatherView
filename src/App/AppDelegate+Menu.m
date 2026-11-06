@@ -1,4 +1,5 @@
 #import "AppDelegate.h"
+#import "Localization.h"
 #import "TextEditorView.h"
 #import "PDFViewer.h"
 #import "ImageViewer.h"
@@ -19,98 +20,98 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
 - (void)buildMenu {
     const NSEventModifierFlags C = NSEventModifierFlagCommand, S = NSEventModifierFlagShift,
                                O = NSEventModifierFlagOption, K = NSEventModifierFlagControl;
-    NSMenuItem *recent = item(@"最近打开", NULL, nil, 0);
-    _recentMenu = [[NSMenu alloc] initWithTitle:@"最近打开"];
+    NSMenuItem *recent = item(FTL(@"Open Recent"), NULL, nil, 0);
+    _recentMenu = [[NSMenu alloc] initWithTitle:FTL(@"Open Recent")];
     _recentMenu.delegate = self;
     recent.submenu = _recentMenu;
 
     NSArray *spec = @[
-        @[@"FeatherView", @[item(@"关于 FeatherView", @selector(orderFrontStandardAboutPanel:), nil, 0),
+        @[@"FeatherView", @[item(FTL(@"About FeatherView"), @selector(orderFrontStandardAboutPanel:), nil, 0),
                         NSMenuItem.separatorItem,
-                        item(@"设置…", @selector(showSettings:), @",", C),
-                        item(@"默认打开方式…", @selector(showDefaultApps:), nil, 0),
+                        item(FTL(@"Settings…"), @selector(showSettings:), @",", C),
+                        item(FTL(@"Default Apps…"), @selector(showDefaultApps:), nil, 0),
                         NSMenuItem.separatorItem,
-                        item(@"隐藏 FeatherView", @selector(hide:), @"h", C),
-                        item(@"退出 FeatherView", @selector(terminate:), @"q", C)]],
-        @[@"文件", @[item(@"新建文档", @selector(newUntitled:), @"n", C),
-                    item(@"新建文件…", @selector(newFile:), @"n", C | O),
-                    item(@"新建文件夹…", @selector(newFolder:), @"n", C | S),
+                        item(FTL(@"Hide FeatherView"), @selector(hide:), @"h", C),
+                        item(FTL(@"Quit FeatherView"), @selector(terminate:), @"q", C)]],
+        @[FTL(@"File"), @[item(FTL(@"New Document"), @selector(newUntitled:), @"n", C),
+                    item(FTL(@"New File…"), @selector(newFile:), @"n", C | O),
+                    item(FTL(@"New Folder…"), @selector(newFolder:), @"n", C | S),
                     NSMenuItem.separatorItem,
-                    item(@"打开文件夹…", @selector(openFolder:), @"o", C),
+                    item(FTL(@"Open Folder…"), @selector(openFolder:), @"o", C),
                     recent,
-                    item(@"切换工作区…", @selector(switchWorkspace:), @"r", K),
-                    item(@"快速打开文件…", @selector(quickOpen:), @"p", C),
+                    item(FTL(@"Switch Workspace…"), @selector(switchWorkspace:), @"r", K),
+                    item(FTL(@"Quick Open…"), @selector(quickOpen:), @"p", C),
                     NSMenuItem.separatorItem,
-                    item(@"保存", @selector(saveDocument:), @"s", C),
-                    item(@"全部保存", @selector(saveAllDocuments:), @"s", C | O),
+                    item(FTL(@"Save"), @selector(saveDocument:), @"s", C),
+                    item(FTL(@"Save All"), @selector(saveAllDocuments:), @"s", C | O),
                     [self autoSaveMenuItem],
                     NSMenuItem.separatorItem,
-                    item(@"关闭标签页", @selector(closeTab:), @"w", C),
-                    item(@"关闭其他标签页", @selector(closeOtherTabs:), nil, 0),
-                    item(@"关闭所有标签页", @selector(closeAllTabs:), @"w", C | O),
-                    item(@"重新打开关闭的标签页", @selector(reopenClosedTab:), @"t", C | S),
+                    item(FTL(@"Close Tab"), @selector(closeTab:), @"w", C),
+                    item(FTL(@"Close Other Tabs"), @selector(closeOtherTabs:), nil, 0),
+                    item(FTL(@"Close All Tabs"), @selector(closeAllTabs:), @"w", C | O),
+                    item(FTL(@"Reopen Closed Tab"), @selector(reopenClosedTab:), @"t", C | S),
                     NSMenuItem.separatorItem,
-                    item(@"重命名…", @selector(renameItem:), nil, 0),
-                    item(@"移到废纸篓", @selector(trashItem:), nil, 0),
+                    item(FTL(@"Rename…"), @selector(renameItem:), nil, 0),
+                    item(FTL(@"Move to Trash"), @selector(trashItem:), nil, 0),
                     NSMenuItem.separatorItem,
-                    item(@"刷新文件树", @selector(reloadTree:), @"r", C),
-                    item(@"在访达中显示", @selector(revealInFinder:), @"r", C | S),
-                    item(@"用默认应用打开", @selector(openInDefaultAppAction:), @"o", C | S),
-                    item(@"拷贝路径", @selector(copyItemPath:), @"c", C | O),
+                    item(FTL(@"Refresh File Tree"), @selector(reloadTree:), @"r", C),
+                    item(FTL(@"Show in Finder"), @selector(revealInFinder:), @"r", C | S),
+                    item(FTL(@"Open with Default App"), @selector(openInDefaultAppAction:), @"o", C | S),
+                    item(FTL(@"Copy Path"), @selector(copyItemPath:), @"c", C | O),
                     NSMenuItem.separatorItem,
-                    item(@"关闭窗口", @selector(performClose:), @"w", C | S)]],
-        @[@"编辑", @[item(@"撤销", @selector(undo:), @"z", C),
-                    item(@"重做", @selector(redo:), @"z", C | S),
+                    item(FTL(@"Close Window"), @selector(performClose:), @"w", C | S)]],
+        @[FTL(@"Edit"), @[item(FTL(@"Undo"), @selector(undo:), @"z", C),
+                    item(FTL(@"Redo"), @selector(redo:), @"z", C | S),
                     NSMenuItem.separatorItem,
-                    item(@"剪切", @selector(cut:), @"x", C),
-                    item(@"拷贝", @selector(copy:), @"c", C),
-                    item(@"粘贴", @selector(paste:), @"v", C),
-                    item(@"全选", @selector(selectAll:), @"a", C),
+                    item(FTL(@"Cut"), @selector(cut:), @"x", C),
+                    item(FTL(@"Copy"), @selector(copy:), @"c", C),
+                    item(FTL(@"Paste"), @selector(paste:), @"v", C),
+                    item(FTL(@"Select All"), @selector(selectAll:), @"a", C),
                     NSMenuItem.separatorItem,
-                    item(@"查找…", @selector(showFind:), @"f", C),
-                    item(@"查找和替换…", @selector(showReplace:), @"f", C | O),
-                    item(@"查找下一个", @selector(findNextMatch:), @"g", C),
-                    item(@"查找上一个", @selector(findPrevMatch:), @"g", C | S),
-                    item(@"在工作区中搜索…", @selector(searchWorkspace:), @"f", C | S),
-                    item(@"下一个搜索结果", @selector(nextSearchResult:), [NSString stringWithFormat:@"%C", (unichar)NSF4FunctionKey], 0),
-                    item(@"上一个搜索结果", @selector(previousSearchResult:), [NSString stringWithFormat:@"%C", (unichar)NSF4FunctionKey], S),
-                    item(@"跳到行…", @selector(promptGoToLine:), @"l", C)]],
-        @[@"显示", @[item(@"放大", @selector(zoomInAction:), @"=", C),
-                    item(@"缩小", @selector(zoomOutAction:), @"-", C),
-                    item(@"适合窗口 / 恢复默认大小", @selector(zoomResetAction:), @"0", C),
-                    item(@"实际大小", @selector(zoomActualAction:), nil, 0),
-                    item(@"向左旋转", @selector(rotateLeftAction:), nil, 0),
-                    item(@"向右旋转", @selector(rotateRightAction:), nil, 0),
+                    item(FTL(@"Find…"), @selector(showFind:), @"f", C),
+                    item(FTL(@"Find and Replace…"), @selector(showReplace:), @"f", C | O),
+                    item(FTL(@"Find Next"), @selector(findNextMatch:), @"g", C),
+                    item(FTL(@"Find Previous"), @selector(findPrevMatch:), @"g", C | S),
+                    item(FTL(@"Search in Workspace…"), @selector(searchWorkspace:), @"f", C | S),
+                    item(FTL(@"Next Search Result"), @selector(nextSearchResult:), [NSString stringWithFormat:@"%C", (unichar)NSF4FunctionKey], 0),
+                    item(FTL(@"Previous Search Result"), @selector(previousSearchResult:), [NSString stringWithFormat:@"%C", (unichar)NSF4FunctionKey], S),
+                    item(FTL(@"Go to Line…"), @selector(promptGoToLine:), @"l", C)]],
+        @[FTL(@"View"), @[item(FTL(@"Zoom In"), @selector(zoomInAction:), @"=", C),
+                    item(FTL(@"Zoom Out"), @selector(zoomOutAction:), @"-", C),
+                    item(FTL(@"Fit to Window / Default Size"), @selector(zoomResetAction:), @"0", C),
+                    item(FTL(@"Actual Size"), @selector(zoomActualAction:), nil, 0),
+                    item(FTL(@"Rotate Left"), @selector(rotateLeftAction:), nil, 0),
+                    item(FTL(@"Rotate Right"), @selector(rotateRightAction:), nil, 0),
                     NSMenuItem.separatorItem,
-                    item(@"PDF 缩略图", @selector(togglePDFThumbsAction:), @"t", C | O),
-                    item(@"PDF 双页显示", @selector(togglePDFTwoPagesAction:), nil, 0),
+                    item(FTL(@"PDF Thumbnails"), @selector(togglePDFThumbsAction:), @"t", C | O),
+                    item(FTL(@"PDF Two Pages"), @selector(togglePDFTwoPagesAction:), nil, 0),
                     NSMenuItem.separatorItem,
-                    item(@"预览（Markdown、表格、JSON…）", @selector(togglePreview:), @"v", C | S),
-                    item(@"并排预览", @selector(splitPreview:), @"v", C | O),
-                    item(@"仅源码", @selector(sourceOnly:), nil, 0),
+                    item(FTL(@"Preview (Markdown, Tables, JSON…)"), @selector(togglePreview:), @"v", C | S),
+                    item(FTL(@"Side-by-Side Preview"), @selector(splitPreview:), @"v", C | O),
+                    item(FTL(@"Source Only"), @selector(sourceOnly:), nil, 0),
                     NSMenuItem.separatorItem,
-                    item(@"自动换行", @selector(toggleWordWrap:), @"z", O),
-                    item(@"显示小地图", @selector(toggleMinimap:), @"m", NSEventModifierFlagCommand | NSEventModifierFlagOption),
+                    item(FTL(@"Word Wrap"), @selector(toggleWordWrap:), @"z", O),
+                    item(FTL(@"Show Minimap"), @selector(toggleMinimap:), @"m", NSEventModifierFlagCommand | NSEventModifierFlagOption),
                     [self appearanceMenuItem],
                     NSMenuItem.separatorItem,
-                    item(@"文件树", @selector(showFilesTab:), @"e", C | S),
-                    item(@"搜索", @selector(searchWorkspace:), nil, 0),
+                    item(FTL(@"File Tree"), @selector(showFilesTab:), @"e", C | S),
+                    item(FTL(@"Search"), @selector(searchWorkspace:), nil, 0),
                     NSMenuItem.separatorItem,
-                    item(@"自动", @selector(viewAuto:), @"0", C | O),
-                    item(@"作为文本", @selector(viewText:), @"1", C | O),
-                    item(@"作为十六进制", @selector(viewHex:), @"2", C | O),
-                    item(@"快速查看", @selector(viewQuickLook:), @"3", C | O),
+                    item(FTL(@"Automatic"), @selector(viewAuto:), @"0", C | O),
+                    item(FTL(@"As Text"), @selector(viewText:), @"1", C | O),
+                    item(FTL(@"As Hex"), @selector(viewHex:), @"2", C | O),
+                    item(FTL(@"Quick Look"), @selector(viewQuickLook:), @"3", C | O),
                     NSMenuItem.separatorItem,
-                    item(@"显示隐藏文件", @selector(toggleHidden:), @".", C | S)]],
-        @[@"标签页", [self tabMenuItems]],
+                    item(FTL(@"Show Hidden Files"), @selector(toggleHidden:), @".", C | S)]],
+        @[FTL(@"Tabs"), [self tabMenuItems]],
     ];
     NSMenu *bar = [NSMenu new];
     for (NSArray *m in spec) {
         NSMenuItem *top = [NSMenuItem new];
         NSMenu *sub = [[NSMenu alloc] initWithTitle:m[0]];
         for (NSMenuItem *i in m[1]) [sub addItem:i];
-        if ([m[0] isEqualToString:@"显示"]) {               // ⌘+ (shift-=) as well as ⌘=
-            NSMenuItem *plus = item(@"放大", @selector(zoomInAction:), @"+", NSEventModifierFlagCommand);
+        if ([m[0] isEqualToString:FTL(@"View")]) {               // ⌘+ (shift-=) as well as ⌘=
+            NSMenuItem *plus = item(FTL(@"Zoom In"), @selector(zoomInAction:), @"+", NSEventModifierFlagCommand);
             plus.hidden = YES;
             plus.allowsKeyEquivalentWhenHidden = YES;
             [sub addItem:plus];
@@ -125,14 +126,14 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
     const NSEventModifierFlags C = NSEventModifierFlagCommand, O = NSEventModifierFlagOption;
     NSString *right = [NSString stringWithFormat:@"%C", (unichar)NSRightArrowFunctionKey];
     NSString *left = [NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey];
-    NSMutableArray *a = [@[item(@"下一个标签页", @selector(nextTab:), right, C | O),
-                           item(@"上一个标签页", @selector(previousTab:), left, C | O),
+    NSMutableArray *a = [@[item(FTL(@"Next Tab"), @selector(nextTab:), right, C | O),
+                           item(FTL(@"Previous Tab"), @selector(previousTab:), left, C | O),
                            NSMenuItem.separatorItem,
-                           item(@"保持打开（固定预览标签页）", @selector(pinTab:), nil, 0),
-                           item(@"单击文件时使用预览标签页", @selector(togglePreviewTabs:), nil, 0),
+                           item(FTL(@"Keep Open (Pin Preview Tab)"), @selector(pinTab:), nil, 0),
+                           item(FTL(@"Single Click Opens a Preview Tab"), @selector(togglePreviewTabs:), nil, 0),
                            NSMenuItem.separatorItem] mutableCopy];
     for (int i = 1; i <= 9; i++) {
-        NSMenuItem *m = item(i == 9 ? @"最后一个标签页" : [NSString stringWithFormat:@"第 %d 个标签页", i],
+        NSMenuItem *m = item(i == 9 ? FTL(@"Last Tab") : [NSString stringWithFormat:FTL(@"Tab %d"), i],
                              @selector(selectTabByNumber:), [NSString stringWithFormat:@"%d", i], C);
         m.tag = i;
         [a addObject:m];
@@ -142,14 +143,14 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
 
 - (NSMenu *)treeContextMenu {
     NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
-    for (NSMenuItem *i in @[item(@"新建文件…", @selector(newFile:), nil, 0),
-                            item(@"新建文件夹…", @selector(newFolder:), nil, 0),
+    for (NSMenuItem *i in @[item(FTL(@"New File…"), @selector(newFile:), nil, 0),
+                            item(FTL(@"New Folder…"), @selector(newFolder:), nil, 0),
                             NSMenuItem.separatorItem,
-                            item(@"重命名…", @selector(renameItem:), nil, 0),
-                            item(@"移到废纸篓", @selector(trashItem:), nil, 0),
+                            item(FTL(@"Rename…"), @selector(renameItem:), nil, 0),
+                            item(FTL(@"Move to Trash"), @selector(trashItem:), nil, 0),
                             NSMenuItem.separatorItem,
-                            item(@"在访达中显示", @selector(revealInFinder:), nil, 0),
-                            item(@"拷贝路径", @selector(copyItemPath:), nil, 0)]) { i.tag = kContextTag; [m addItem:i]; }
+                            item(FTL(@"Show in Finder"), @selector(revealInFinder:), nil, 0),
+                            item(FTL(@"Copy Path"), @selector(copyItemPath:), nil, 0)]) { i.tag = kContextTag; [m addItem:i]; }
     m.delegate = self;
     return m;
 }
@@ -163,14 +164,14 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
             NSMenuItem *i = item([r stringByAbbreviatingWithTildeInPath], @selector(openRecent:), nil, 0);
             i.representedObject = r;
             [menu addItem:i];
-            [self addRemoveAlternateFor:r title:[@"从列表中移除 " stringByAppendingString:r.stringByAbbreviatingWithTildeInPath] to:menu];
+            [self addRemoveAlternateFor:r title:[FTL(@"Remove from List: ") stringByAppendingString:r.stringByAbbreviatingWithTildeInPath] to:menu];
         }
-        if (!menu.numberOfItems) { NSMenuItem *e = item(@"无", NULL, nil, 0); e.enabled = NO; [menu addItem:e]; }
+        if (!menu.numberOfItems) { NSMenuItem *e = item(FTL(@"None"), NULL, nil, 0); e.enabled = NO; [menu addItem:e]; }
         [menu addItem:NSMenuItem.separatorItem];
-        NSMenuItem *hint = item(@"按住 ⌥ 可单独移除", NULL, nil, 0);
+        NSMenuItem *hint = item(FTL(@"Hold ⌥ to remove one"), NULL, nil, 0);
         hint.enabled = NO;
         [menu addItem:hint];
-        [menu addItem:item(@"清除列表", @selector(clearRecent:), nil, 0)];
+        [menu addItem:item(FTL(@"Clear List"), @selector(clearRecent:), nil, 0)];
         return;
     }
     if (menu == _rootPopup.menu) { [self rebuildRootPopupMenu:menu]; return; }
@@ -185,7 +186,7 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
     NSString *root = _tree.rootPath;
     NSArray *recent = self.recentRoots;
     if (recent.count) {
-        NSMenuItem *h = item(@"最近的工作区", NULL, nil, 0);
+        NSMenuItem *h = item(FTL(@"Recent Workspaces"), NULL, nil, 0);
         h.enabled = NO;
         [menu addItem:h];
     }
@@ -200,18 +201,18 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
         i.representedObject = r;
         i.state = [r isEqualToString:root] ? NSControlStateValueOn : NSControlStateValueOff;
         [menu addItem:i];
-        if (![r isEqualToString:root]) [self addRemoveAlternateFor:r title:[@"从列表中移除 " stringByAppendingString:r.lastPathComponent] to:menu];
+        if (![r isEqualToString:root]) [self addRemoveAlternateFor:r title:[FTL(@"Remove from List: ") stringByAppendingString:r.lastPathComponent] to:menu];
     }
     if (recent.count > 1) {
-        NSMenuItem *hint = item(@"按住 ⌥ 可单独移除", NULL, nil, 0);
+        NSMenuItem *hint = item(FTL(@"Hold ⌥ to remove one"), NULL, nil, 0);
         hint.enabled = NO;
         [menu addItem:hint];
     }
     [menu addItem:NSMenuItem.separatorItem];
-    [menu addItem:item(@"打开文件夹…", @selector(openFolder:), nil, 0)];
-    [menu addItem:item(@"按名称切换工作区…", @selector(switchWorkspace:), nil, 0)];
-    if (root) [menu addItem:item(@"在访达中显示工作区", @selector(revealRootInFinder:), nil, 0)];
-    if (recent.count > 1) [menu addItem:item(@"清除最近列表", @selector(clearRecent:), nil, 0)];
+    [menu addItem:item(FTL(@"Open Folder…"), @selector(openFolder:), nil, 0)];
+    [menu addItem:item(FTL(@"Switch Workspace by Name…"), @selector(switchWorkspace:), nil, 0)];
+    if (root) [menu addItem:item(FTL(@"Show Workspace in Finder"), @selector(revealRootInFinder:), nil, 0)];
+    if (recent.count > 1) [menu addItem:item(FTL(@"Clear Recent List"), @selector(clearRecent:), nil, 0)];
 }
 
 // Shown in place of the item above it while ⌥ is held.
@@ -248,14 +249,14 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
         return targets.count == 1 && ![target isEqualToString:_tree.rootPath];
     if (a == @selector(trashItem:)) {
         NSUInteger n = [self trashablePaths:targets].count;
-        mi.title = n > 1 ? [NSString stringWithFormat:@"将 %lu 项移到废纸篓", (unsigned long)n] : @"移到废纸篓";
+        mi.title = n > 1 ? [NSString stringWithFormat:FTL(@"Move %lu Items to Trash"), (unsigned long)n] : FTL(@"Move to Trash");
         return n > 0;
     }
     if (a == @selector(newFile:) || a == @selector(newFolder:) || a == @selector(quickOpen:) ||
         a == @selector(searchWorkspace:)) return hasRoot;
     if (a == @selector(nextSearchResult:) || a == @selector(previousSearchResult:)) return _search.hasResults;
     if (a == @selector(copyItemPath:)) {
-        mi.title = targets.count > 1 ? [NSString stringWithFormat:@"拷贝 %lu 个路径", (unsigned long)targets.count] : @"拷贝路径";
+        mi.title = targets.count > 1 ? [NSString stringWithFormat:FTL(@"Copy %lu Paths"), (unsigned long)targets.count] : FTL(@"Copy Path");
         return targets.count > 0;
     }
     if (a == @selector(revealInFinder:)) return targets.count > 0;
@@ -273,7 +274,7 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
     }
     BOOL pdf = _content.activePDF != nil;
     if (a == @selector(zoomInAction:) || a == @selector(zoomOutAction:) || a == @selector(zoomResetAction:) || a == @selector(zoomActualAction:)) {
-        if (a == @selector(zoomResetAction:)) mi.title = (pdf || _content.activeImage) ? @"适合窗口" : @"恢复默认大小";
+        if (a == @selector(zoomResetAction:)) mi.title = (pdf || _content.activeImage) ? FTL(@"Fit to Window") : FTL(@"Default Size");
         return _content.canZoom;
     }
     if (a == @selector(rotateLeftAction:) || a == @selector(rotateRightAction:)) return _content.activeCanRotate;
@@ -281,7 +282,7 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
     if (a == @selector(togglePDFTwoPagesAction:)) { mi.state = _content.activePDF.twoPages; return pdf; }
     if (a == @selector(openInDefaultAppAction:)) return _content.currentPath != nil;
     if (a == @selector(promptGoToLine:)) {
-        mi.title = pdf ? @"跳到页…" : @"跳到行…";
+        mi.title = pdf ? FTL(@"Go to Page…") : FTL(@"Go to Line…");
         return pdf || (_content.editor != nil && !(_content.activeIsMarkup && _content.activeMarkupLayout == MarkupPreview));
     }
     BOOL dataView = _content.activeHasDataView;
@@ -338,9 +339,9 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
 }
 
 - (NSMenuItem *)appearanceMenuItem {
-    NSMenuItem *top = item(@"外观", NULL, nil, 0);
-    NSMenu *m = [[NSMenu alloc] initWithTitle:@"外观"];
-    NSArray *titles = @[@"跟随系统", @"浅色", @"深色"];
+    NSMenuItem *top = item(FTL(@"Appearance"), NULL, nil, 0);
+    NSMenu *m = [[NSMenu alloc] initWithTitle:FTL(@"Appearance")];
+    NSArray *titles = @[FTL(@"System"), FTL(@"Light"), FTL(@"Dark")];
     for (NSInteger i = 0; i < 3; i++) { NSMenuItem *x = item(titles[i], @selector(setAppearanceMode:), nil, 0); x.tag = i; [m addItem:x]; }
     top.submenu = m;
     return top;
@@ -351,9 +352,9 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
 - (void)newUntitled:(id)s { [_content newUntitledDocument]; }
 
 - (NSMenuItem *)autoSaveMenuItem {
-    NSMenuItem *top = item(@"自动保存", NULL, nil, 0);
-    NSMenu *m = [[NSMenu alloc] initWithTitle:@"自动保存"];
-    NSArray *titles = @[@"关闭", @"停止输入 1 秒后保存", @"切换文件或窗口时保存"];
+    NSMenuItem *top = item(FTL(@"Auto Save"), NULL, nil, 0);
+    NSMenu *m = [[NSMenu alloc] initWithTitle:FTL(@"Auto Save")];
+    NSArray *titles = @[FTL(@"Off"), FTL(@"1 Second After Typing Stops"), FTL(@"On Switching Files or Windows")];
     for (NSInteger i = 0; i < 3; i++) { NSMenuItem *x = item(titles[i], @selector(setAutoSave:), nil, 0); x.tag = i; [m addItem:x]; }
     top.submenu = m;
     return top;
@@ -408,11 +409,11 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
 - (void)promptGoToLine:(id)s {
     PDFPreview *pdf = _content.activePDF;
     NSAlert *a = [NSAlert new];
-    a.messageText = pdf ? [NSString stringWithFormat:@"跳到页（共 %lu 页）", (unsigned long)pdf.pageCount] : @"跳到行";
+    a.messageText = pdf ? [NSString stringWithFormat:FTL(@"Go to Page (1–%lu)"), (unsigned long)pdf.pageCount] : FTL(@"Go to Line");
     NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
     a.accessoryView = tf;
-    [a addButtonWithTitle:@"跳转"];
-    [a addButtonWithTitle:@"取消"];
+    [a addButtonWithTitle:FTL(@"Go")];
+    [a addButtonWithTitle:FTL(@"Cancel")];
     a.window.initialFirstResponder = tf;
     if ([a runModal] != NSAlertFirstButtonReturn || tf.integerValue <= 0) return;
     if (pdf) [_content goToPage:(NSUInteger)tf.integerValue - 1];

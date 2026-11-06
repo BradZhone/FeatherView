@@ -1,4 +1,5 @@
 #import "JSONTree.h"
+#import "Localization.h"
 
 static const NSUInteger kMaxDepth = 512, kMaxNodes = 2000000;
 
@@ -7,7 +8,7 @@ static const NSUInteger kMaxDepth = 512, kMaxNodes = 2000000;
 - (NSString *)displayKey {
     if (_key) return _key;
     if (_parent) return [NSString stringWithFormat:@"[%lu]", (unsigned long)_index];
-    return @"根";
+    return FTL(@"root");
 }
 
 static BOOL identifierSafe(NSString *k) {
@@ -141,7 +142,7 @@ static NSString *parseString(P *p) {
     NSMutableData *buf = nil;
     while (p->i < p->n && s[p->i] != q) {
         uint8_t c = s[p->i];
-        if (c == '\n') { fail(p, "字符串没有结束"); return nil; }
+        if (c == '\n') { fail(p, "Unterminated string"); return nil; }
         if (c != '\\') { if (buf) [buf appendBytes:&s[p->i] length:1]; p->i++; continue; }
         if (!buf) buf = [NSMutableData dataWithBytes:s + start length:p->i - start];
         if (p->i + 1 >= p->n) break;
@@ -155,7 +156,7 @@ static NSString *parseString(P *p) {
             case 'f': [buf appendBytes:"\f" length:1]; break;
             case 'u': {
                 uint32_t cp = 0;
-                for (int k = 0; k < 4; k++) { int h = p->i < p->n ? hexv(s[p->i]) : -1; if (h < 0) { fail(p, "\\u 后面需要 4 位十六进制数"); return nil; } cp = cp * 16 + h; p->i++; }
+                for (int k = 0; k < 4; k++) { int h = p->i < p->n ? hexv(s[p->i]) : -1; if (h < 0) { fail(p, "\\u must be followed by 4 hex digits"); return nil; } cp = cp * 16 + h; p->i++; }
                 if (cp >= 0xD800 && cp < 0xDC00 && p->i + 5 < p->n && s[p->i] == '\\' && s[p->i + 1] == 'u') {
                     uint32_t lo = 0; BOOL ok = YES;
                     for (int k = 0; k < 4; k++) { int h = hexv(s[p->i + 2 + k]); if (h < 0) { ok = NO; break; } lo = lo * 16 + h; }
@@ -167,7 +168,7 @@ static NSString *parseString(P *p) {
             default: [buf appendBytes:&e length:1];              // \" \\ \/ \' and anything else literally
         }
     }
-    if (p->i >= p->n) { fail(p, "字符串没有结束"); return nil; }
+    if (p->i >= p->n) { fail(p, "Unterminated string"); return nil; }
     NSString *out = buf ? decodeBytes(buf.bytes, buf.length) : decodeBytes(s + start, p->i - start);
     p->i++;
     return out;
@@ -184,7 +185,7 @@ static NSString *parseIdent(P *p) {
 static JSONNode *parseValue(P *p);
 
 static JSONNode *parseContainer(P *p, JSONNode *node, BOOL object) {
-    if (++p->depth > kMaxDepth) { fail(p, "嵌套太深"); return nil; }
+    if (++p->depth > kMaxDepth) { fail(p, "Nested too deeply"); return nil; }
     uint8_t close = object ? '}' : ']';
     p->i++;
     NSMutableArray *kids = [NSMutableArray array];
@@ -194,14 +195,14 @@ static JSONNode *parseContainer(P *p, JSONNode *node, BOOL object) {
         ws(p);
         NSString *key = nil;
         if (object) {
-            if (p->i >= p->n) { fail(p, "缺少 }"); return nil; }
+            if (p->i >= p->n) { fail(p, "Missing }"); return nil; }
             uint8_t c = p->s[p->i];
             if (c == '"' || c == '\'') key = parseString(p);
             else if (identChar(c)) key = parseIdent(p);
-            else { fail(p, "这里需要属性名"); return nil; }
+            else { fail(p, "Expected a property name"); return nil; }
             if (!key) return nil;
             ws(p);
-            if (p->i >= p->n || p->s[p->i] != ':') { fail(p, "属性名后面缺少 :"); return nil; }
+            if (p->i >= p->n || p->s[p->i] != ':') { fail(p, "Missing : after the property name"); return nil; }
             p->i++;
         }
         JSONNode *v = parseValue(p);
@@ -218,7 +219,7 @@ static JSONNode *parseContainer(P *p, JSONNode *node, BOOL object) {
             continue;
         }
         if (p->i < p->n && p->s[p->i] == close) { p->i++; break; }
-        fail(p, object ? "缺少 , 或 }" : "缺少 , 或 ]");
+        fail(p, object ? "Missing , or }" : "Missing , or ]");
         return nil;
     }
     node.children = kids;
@@ -228,8 +229,8 @@ static JSONNode *parseContainer(P *p, JSONNode *node, BOOL object) {
 
 static JSONNode *parseValue(P *p) {
     ws(p);
-    if (p->i >= p->n) { fail(p, "内容意外结束"); return nil; }
-    if (++p->nodes > kMaxNodes) { fail(p, "节点太多（超过 200 万）"); return nil; }
+    if (p->i >= p->n) { fail(p, "Unexpected end of input"); return nil; }
+    if (++p->nodes > kMaxNodes) { fail(p, "Too many nodes (more than 2 million)"); return nil; }
     JSONNode *node = [JSONNode new];
     node.line = lineOf(p, p->i);
     uint8_t c = p->s[p->i];
@@ -259,7 +260,7 @@ static JSONNode *parseValue(P *p) {
                     NSString *w = parseIdent(p);
                     if ([w isEqualToString:@"Infinity"]) { node.kind = JSONNumber; node.text = decodeBytes(p->s + a, p->i - a); return node; }
                 }
-                p->i = a; fail(p, "数字格式不对"); return nil;
+                p->i = a; fail(p, "Malformed number"); return nil;
             }
         }
         node.kind = JSONNumber;
@@ -273,11 +274,11 @@ static JSONNode *parseValue(P *p) {
         if ([w isEqualToString:@"null"]) { node.kind = JSONNull; node.text = w; return node; }
         if ([w isEqualToString:@"Infinity"] || [w isEqualToString:@"NaN"]) { node.kind = JSONNumber; node.text = w; return node; }
         p->i = a;
-        failw(p, "无法识别的值“%s”", (w.length > 20 ? [[w substringToIndex:20] stringByAppendingString:@"…"] : w).UTF8String);
+        failw(p, "Unrecognized value “%s”", (w.length > 20 ? [[w substringToIndex:20] stringByAppendingString:@"…"] : w).UTF8String);
         return nil;
     }
     char ch[2] = {(char)c, 0};
-    failw(p, "意外的字符“%s”", c >= 0x20 && c < 0x7F ? ch : "?");
+    failw(p, "Unexpected character “%s”", c >= 0x20 && c < 0x7F ? ch : "?");
     return nil;
 }
 
@@ -286,11 +287,11 @@ JSONNode *JSONParse(NSData *utf8, NSString **error) {
     p.s = utf8.bytes; p.n = utf8.length; p.line = 1;
     if (p.n >= 3 && p.s[0] == 0xEF && p.s[1] == 0xBB && p.s[2] == 0xBF) p.i = 3;
     ws(&p);
-    if (p.i >= p.n) { if (error) *error = @"文件是空的"; return nil; }
+    if (p.i >= p.n) { if (error) *error = FTL(@"The file is empty"); return nil; }
     JSONNode *root = parseValue(&p);
     if (root) {
         ws(&p);
-        if (p.i < p.n) { fail(&p, "值的后面还有多余的内容"); root = nil; }
+        if (p.i < p.n) { fail(&p, "Unexpected content after the value"); root = nil; }
     }
     if (!root) {
         if (error) {
@@ -299,8 +300,8 @@ JSONNode *JSONParse(NSData *utf8, NSString **error) {
                 if (p.s[k] == '\n') { line++; col = 1; }
                 else if ((p.s[k] & 0xC0) != 0x80) col++;
             }
-            NSString *msg = p.err ? [[NSString stringWithUTF8String:p.err] stringByReplacingOccurrencesOfString:@"%s" withString:@(p.word)] : @"格式错误";
-            *error = [NSString stringWithFormat:@"第 %lu 行第 %lu 列：%@", (unsigned long)line, (unsigned long)col, msg];
+            NSString *msg = p.err ? [FTL(@(p.err)) stringByReplacingOccurrencesOfString:@"%s" withString:@(p.word)] : FTL(@"Malformed");
+            *error = [NSString stringWithFormat:FTL(@"Line %lu, column %lu: %@"), (unsigned long)line, (unsigned long)col, msg];
         }
         return nil;
     }
@@ -345,7 +346,7 @@ static JSONNode *plistNode(id v, NSUInteger depth) {
         const uint8_t *b = d.bytes;
         for (NSUInteger i = 0; i < MIN(d.length, (NSUInteger)24); i++) [hex appendFormat:@"%02x", b[i]];
         n.kind = JSONData;
-        n.text = [NSString stringWithFormat:@"%lu 字节  %@%@", (unsigned long)d.length, hex, d.length > 24 ? @"…" : @""];
+        n.text = [NSString stringWithFormat:FTLP(d.length, @"%lu byte  %@%@", @"%lu bytes  %@%@"), (unsigned long)d.length, hex, d.length > 24 ? @"…" : @""];
     } else if ([v isKindOfClass:NSDate.class]) {
         n.kind = JSONDate;
         NSISO8601DateFormatter *f = [NSISO8601DateFormatter new];

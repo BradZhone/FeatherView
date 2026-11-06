@@ -1,4 +1,5 @@
 #import "MarkupView.h"
+#import "Localization.h"
 #import "TablePreview.h"
 #import "TreePreview.h"
 #import "Notebook.h"
@@ -36,7 +37,7 @@ static NSString *absolute(NSString *p) {
     _web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _web.navigationDelegate = self;
     _web.UIDelegate = self;
-    _web.accessibilityLabel = @"HTML 预览";
+    _web.accessibilityLabel = FTL(@"HTML preview");
     self.zoom = gHTMLZoom;
     [self addSubview:_web];
     [self load];
@@ -249,7 +250,7 @@ static NSString *absolute(NSString *p) {
     if (self.markdownView) {
         NSString *dir = _path.stringByDeletingLastPathComponent;
         if (_editor.contentLength > kMaxMarkdownBytes) {
-            [self.markdownView setMarkdown:@"> 文件超过 2 MB，预览已关闭。请使用源码视图。" baseDir:dir];
+            [self.markdownView setMarkdown:FTL(@"> The file is larger than 2 MB, so the preview is off. Use the source view.") baseDir:dir];
             return;
         }
         NSString *s = [[NSString alloc] initWithData:_editor.contentData encoding:NSUTF8StringEncoding] ?: @"";
@@ -299,8 +300,8 @@ static NSString *absolute(NSString *p) {
         NSBeep();
         NSString *shown = FOPathIsWithin(p, _path.stringByDeletingLastPathComponent)
             ? [p substringFromIndex:MIN(p.length, _path.stringByDeletingLastPathComponent.length + 1)] : p.stringByAbbreviatingWithTildeInPath;
-        if (self.onMessage) self.onMessage(dir ? [NSString stringWithFormat:@"“%@”是文件夹，无法在标签页中打开", shown]
-                                               : [NSString stringWithFormat:@"链接的文件不存在：%@", shown]);
+        if (self.onMessage) self.onMessage(dir ? [NSString stringWithFormat:FTL(@"“%@” is a folder and can’t be opened in a tab"), shown]
+                                               : [NSString stringWithFormat:FTL(@"Linked file not found: %@"), shown]);
         return;
     }
     if ([p isEqualToString:_path.stringByStandardizingPath]) { if (anchor) [self.markdownView scrollToAnchor:anchor]; return; }

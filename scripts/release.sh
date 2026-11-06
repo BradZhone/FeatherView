@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds a universal (arm64 + x86_64) FeatherView.app, runs the tests, and writes
 # dist/FeatherView-<version>-macos-universal.zip plus its SHA-256.
-# The app is ad-hoc signed, not notarized: see README "安装" for the Gatekeeper step.
+# The app is ad-hoc signed, not notarized: see README "Installation" for the Gatekeeper step.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 NAME=FeatherView

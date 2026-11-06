@@ -1,4 +1,5 @@
 #import "DefaultAppsPanel.h"
+#import "Localization.h"
 
 @implementation DefaultAppsPanel {
     NSWindow *_sheet;
@@ -41,21 +42,20 @@ static NSTextField *small(NSString *s, NSColor *c) {
     NSGridView *grid = [NSGridView gridViewWithViews:rows];
     grid.rowSpacing = 10;
     grid.columnSpacing = 14;
-    [grid columnAtIndex:0].width = 120;
-    [grid columnAtIndex:1].width = 300;
+    [grid columnAtIndex:0].width = 170;
+    [grid columnAtIndex:1].width = 280;
     [grid columnAtIndex:2].width = 150;
     for (NSInteger i = 0; i < grid.numberOfRows; i++) [grid rowAtIndex:i].yPlacement = NSGridCellPlacementTop;
 
-    NSTextField *title = [NSTextField labelWithString:@"用 FeatherView 打开这些文件"];
+    NSTextField *title = [NSTextField labelWithString:FTL(@"Open These Files with FeatherView")];
     title.font = [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold];
-    NSTextField *hint = small(@"勾选后，在访达里双击这类文件会用 FeatherView 打开。取消勾选会还给原来的应用。"
-                              @"右侧是当前的默认应用。", NSColor.secondaryLabelColor);
+    NSTextField *hint = small(FTL(@"When a type is selected, double-clicking such files in Finder opens them in FeatherView. Deselecting it hands them back to the previous app. The current default app is shown on the right."), NSColor.secondaryLabelColor);
     hint.preferredMaxLayoutWidth = 600;
     _status = small(@"", NSColor.systemRedColor);
     _status.preferredMaxLayoutWidth = 600;
-    NSButton *cancel = [NSButton buttonWithTitle:@"取消" target:self action:@selector(cancel:)];
+    NSButton *cancel = [NSButton buttonWithTitle:FTL(@"Cancel") target:self action:@selector(cancel:)];
     cancel.keyEquivalent = @"\e";
-    _apply = [NSButton buttonWithTitle:@"应用" target:self action:@selector(apply:)];
+    _apply = [NSButton buttonWithTitle:FTL(@"Apply") target:self action:@selector(apply:)];
     _apply.keyEquivalent = @"\r";
     NSStackView *buttons = [NSStackView stackViewWithViews:@[cancel, _apply]];
     NSStackView *all = [NSStackView stackViewWithViews:@[title, hint, grid, _status, buttons]];
@@ -78,7 +78,7 @@ static NSTextField *small(NSString *s, NSColor *c) {
     for (NSUInteger i = 0; i < _groups.count; i++) {
         BOOL on = [_apps featherIsDefaultFor:_groups[i]];
         _boxes[i].state = on ? NSControlStateValueOn : NSControlStateValueOff;
-        _current[i].stringValue = on ? @"FeatherView" : [@"现在：" stringByAppendingString:[_apps currentDefaultName:_groups[i]]];
+        _current[i].stringValue = on ? @"FeatherView" : [FTL(@"Now: ") stringByAppendingString:[_apps currentDefaultName:_groups[i]]];
     }
 }
 
@@ -100,7 +100,7 @@ static NSTextField *small(NSString *s, NSColor *c) {
         if (pending) return;
         self->_apply.enabled = YES;
         [self refresh];
-        NSString *err = errors.count ? [errors componentsJoinedByString:@"；"] : nil;
+        NSString *err = errors.count ? [errors componentsJoinedByString:FTL(@"; ")] : nil;
         self->_status.stringValue = err ?: @"";
         if (!err && !finished) [self->_sheet.sheetParent endSheet:self->_sheet];
         if (finished) finished(err);
@@ -111,7 +111,7 @@ static NSTextField *small(NSString *s, NSColor *c) {
         pending++;
         NSString *title = _groups[i].title;
         [_apps setGroup:_groups[i] toFeather:want done:^(NSString *error) {
-            if (error) [errors addObject:[NSString stringWithFormat:@"%@：%@", title, error]];
+            if (error) [errors addObject:[NSString stringWithFormat:FTL(@"%@: %@"), title, error]];
             pending--;
             maybeDone();
         }];

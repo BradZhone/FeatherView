@@ -18,6 +18,7 @@
 #import "JSONTree.h"
 #import "Settings.h"
 #import "SettingsWindow.h"
+#import "Localization.h"
 #include <sqlite3.h>
 #import <PDFKit/PDFKit.h>
 #include <sys/stat.h>
@@ -284,9 +285,9 @@ static void multiSelectActions(NSString *dir) {
     NSMenuItem *copy = [[NSMenuItem alloc] initWithTitle:@"拷贝路径" action:@selector(copyItemPath:) keyEquivalent:@""];
     BOOL trashOK = [d validateMenuItem:trash], renameOK = [d validateMenuItem:rename];
     [d validateMenuItem:copy];
-    CHECK(trashOK && [trash.title isEqualToString:@"将 3 项移到废纸篓"], "menu counts 3 items (folder/x.txt goes with its folder): %s", trash.title.UTF8String);
+    CHECK(trashOK && [trash.title isEqualToString:@"Move 3 Items to Trash"], "menu counts 3 items (folder/x.txt goes with its folder): %s", trash.title.UTF8String);
     CHECK(!renameOK, "rename is off with several items selected");
-    CHECK([copy.title isEqualToString:@"拷贝 4 个路径"], "copy path title: %s", copy.title.UTF8String);
+    CHECK([copy.title isEqualToString:@"Copy 4 Paths"], "copy path title: %s", copy.title.UTF8String);
 
     [d copyItemPath:nil];
     CHECK([[pb stringForType:NSPasteboardTypeString] componentsSeparatedByString:@"\n"].count == 4, "copy path puts one path per line");
@@ -298,7 +299,7 @@ static void multiSelectActions(NSString *dir) {
     CHECK(d->_content.tabCount == 0, "tabs of trashed files are closed (%lu left)", (unsigned long)d->_content.tabCount);
 
     [d->_tree revealPaths:@[keep]];
-    CHECK([d validateMenuItem:rename] && [d validateMenuItem:trash] && [trash.title isEqualToString:@"移到废纸篓"], "one item: rename back on, plain title");
+    CHECK([d validateMenuItem:rename] && [d validateMenuItem:trash] && [trash.title isEqualToString:@"Move to Trash"], "one item: rename back on, plain title");
     [pb releaseGlobally];
     [d->_content closeAllWithoutAsking];
     for (NSString *k in @[@"lastRoot", @"sessions", @"recentRoots", @"NSWindow Frame FeatherMain"]) [ud removeObjectForKey:k];
@@ -617,7 +618,7 @@ static void readmeIssues(NSString *dir) {
     NSUInteger api = [s rangeOfString:@"API documentation"].location;
     CHECK(api != NSNotFound && [ts attribute:NSStrikethroughStyleAttributeName atIndex:api effectiveRange:NULL], "link to a missing file is marked");
     [mv.textView activateLinkAtIndex:api];
-    spinUntil(^BOOL { return [t.statusText containsString:@"不存在"]; }, 2);
+    spinUntil(^BOOL { return [t.statusText containsString:@"no longer exists"]; }, 2);
     CHECK([t.statusText containsString:@"docs/api.md"] && t.tabCount == 2, "clicking it says the file is missing: %s", t.statusText.UTF8String);
     // 4b) existing link: real mouse down/up on the text view opens a new tab and keeps README
     NSUInteger mit = [s rangeOfString:@"MIT" options:NSBackwardsSearch].location;
@@ -803,7 +804,7 @@ static void svgAndTypeScript(NSString *dir) {
 
     NSString *ts = mkfile(dir, @"db.ts", @"import { Database } from './x';\nexport const db = new Database();\n");
     [t openPath:ts preview:NO focus:NO];
-    CHECK(t.editor && [t.statusText containsString:@"行 1"], ".ts opens in the editor, not as MPEG-2 video");
+    CHECK(t.editor && [t.statusText containsString:@"Ln 1"], ".ts opens in the editor, not as MPEG-2 video");
     [t closeAllWithoutAsking];
 }
 
@@ -814,12 +815,12 @@ static void pdfViewer(NSString *dir) {
     [t openPath:pdf preview:NO focus:NO];
     PDFPreview *pv = t.activePDF;
     CHECK(pv && pv.pageCount == 3, "PDF opens in the PDF viewer (%lu pages)", (unsigned long)pv.pageCount);
-    CHECK([t.statusText containsString:@"第 1 / 3 页"], "status shows the page: %s", t.statusText.UTF8String);
+    CHECK([t.statusText containsString:@"Page 1 of 3"], "status shows the page: %s", t.statusText.UTF8String);
     CHECK(pv.toolsView.superview != nil, "PDF tools in the status bar");
     [pv nextPage];
     CHECK(pv.currentPage == 1, "next page");
     [t goToPage:2];
-    CHECK(pv.currentPage == 2 && [t.statusText containsString:@"第 3 / 3 页"], "go to page 3: %s", t.statusText.UTF8String);
+    CHECK(pv.currentPage == 2 && [t.statusText containsString:@"Page 3 of 3"], "go to page 3: %s", t.statusText.UTF8String);
     [t goToPage:0];
 
     CGFloat z0 = pv.zoomPercent;
@@ -838,7 +839,7 @@ static void pdfViewer(NSString *dir) {
     [t showFindBar];
     NSButton *replaceAll = nil;
     NSMutableArray *q = [NSMutableArray arrayWithObject:t.view];
-    while (q.count) { NSView *v = q[0]; [q removeObjectAtIndex:0]; if ([v isKindOfClass:NSButton.class] && [[(NSButton *)v title] isEqualToString:@"全部替换"]) replaceAll = (id)v; [q addObjectsFromArray:v.subviews]; }
+    while (q.count) { NSView *v = q[0]; [q removeObjectAtIndex:0]; if ([v isKindOfClass:NSButton.class] && [[(NSButton *)v title] isEqualToString:@"Replace All"]) replaceAll = (id)v; [q addObjectsFromArray:v.subviews]; }
     CHECK(replaceAll && replaceAll.hidden, "PDF find bar has no replace");
 
     pv.showsThumbnails = YES;
@@ -878,7 +879,7 @@ static void zoomOtherViews(NSString *dir) {
     [t openPath:txt preview:NO focus:NO];
     CGFloat f0 = t.editor.fontSize;
     [t zoomIn]; [t zoomIn];
-    CHECK(t.editor.fontSize == f0 + 2 && [t.statusText containsString:@"字号"], "⌘+ grows the editor font (%.0f → %.0f)", f0, t.editor.fontSize);
+    CHECK(t.editor.fontSize == f0 + 2 && [t.statusText containsString:@"font size"], "⌘+ grows the editor font (%.0f → %.0f)", f0, t.editor.fontSize);
     NSString *txt2 = mkfile(dir, @"z2.txt", @"x\n");
     [t openPath:txt2 preview:NO focus:NO];
     CHECK(t.editor.fontSize == f0 + 2, "new editors use the same size");
@@ -969,7 +970,7 @@ static void defaultApps(NSString *dir) {
     err = @"?";
     [a setGroup:txt toFeather:NO done:^(NSString *e) { err = e; }];
     spinUntil(settled, 2);
-    CHECK([err containsString:@"显示简介"] && [a featherIsDefaultFor:txt], "missing previous app is reported: %s", err.UTF8String);
+    CHECK([err containsString:@"Get Info"] && [a featherIsDefaultFor:txt], "missing previous app is reported: %s", err.UTF8String);
 
     for (NSString *t in md.contentTypes) ls[t] = vscode;
     DefaultAppsPanel *p = [DefaultAppsPanel new];
@@ -990,7 +991,7 @@ static void defaultApps(NSString *dir) {
     err = @"?";
     [a setGroup:html toFeather:YES done:^(NSString *e) { err = e; }];
     spinUntil(settled, 2);
-    CHECK(html.unsupportedReason.length && [err containsString:@"浏览器"] && calls == before2, "HTML is not offered: %s", err.UTF8String);
+    CHECK(html.unsupportedReason.length && [err containsString:@"browser"] && calls == before2, "HTML is not offered: %s", err.UTF8String);
     [p buildSheet];
     CHECK(!p.checkboxes[htmlIndex].enabled, "the HTML checkbox is disabled, with the reason next to it");
 
@@ -1007,7 +1008,7 @@ static void defaultApps(NSString *dir) {
     err = @"?";
     [refusing setGroup:pdf toFeather:YES done:^(NSString *e) { err = e; }];
     spinUntil(settled, 2);
-    CHECK([err containsString:@"没有权限"] && ![store dictionaryForKey:@"previousDefaultApps"][pdf.contentTypes.firstObject],
+    CHECK([err containsString:@"Not permitted"] && ![store dictionaryForKey:@"previousDefaultApps"][pdf.contentTypes.firstObject],
           "a refused change is explained and remembers nothing: %s", err.UTF8String);
     [store removePersistentDomainForName:@"feather.tests.defaultapps"];
 }
@@ -1109,8 +1110,8 @@ static void autosave(NSString *dir) {
 
     mkfile(ad, @"a.txt", @"changed elsewhere\n");
     [t.editor insertText:@"2" replacementRange:NSMakeRange(NSNotFound, 0)];
-    spinUntil(^BOOL { return [t.statusText containsString:@"外部修改"]; }, 3);
-    CHECK([t.statusText containsString:@"外部修改"] && t.editor.isDirty, "never overwrites an externally changed file: %s", t.statusText.UTF8String);
+    spinUntil(^BOOL { return [t.statusText containsString:@"Changed on disk"]; }, 3);
+    CHECK([t.statusText containsString:@"changed on disk"] && t.editor.isDirty, "never overwrites an externally changed file: %s", t.statusText.UTF8String);
     CHECK([fileText(a, NSUTF8StringEncoding) isEqualToString:@"changed elsewhere\n"] && asked == 0, "disk content kept, still no prompt");
 
     t.autoSaveMode = AutoSaveOnFocusChange;
@@ -1121,7 +1122,7 @@ static void autosave(NSString *dir) {
     chmod(ad.fileSystemRepresentation, 0555);
     [t openPath:c preview:NO focus:NO];
     [t selectTabAtIndex:1];
-    CHECK([t.statusText containsString:@"自动保存失败"] && t.editor.isDirty && asked == 0, "failed auto-save is reported in the status bar: %s", t.statusText.UTF8String);
+    CHECK([t.statusText containsString:@"Auto-save failed"] && t.editor.isDirty && asked == 0, "failed auto-save is reported in the status bar: %s", t.statusText.UTF8String);
     chmod(ad.fileSystemRepresentation, 0755);
     [t openPath:c preview:NO focus:NO];
     CHECK([fileText(b, NSUTF8StringEncoding) isEqualToString:@"3b\n"], "switching tabs saves the one you leave");
@@ -1165,7 +1166,7 @@ static void layoutAndWorkspaces(NSString *dir) {
         if ([i.representedObject isEqual:r1]) ws1 = i;
         if ([i.representedObject isEqual:r2]) ws2 = i;
     }
-    CHECK(remove1 && remove1.keyEquivalentModifierMask == NSEventModifierFlagOption && [remove1.title containsString:@"移除"],
+    CHECK(remove1 && remove1.keyEquivalentModifierMask == NSEventModifierFlagOption && [remove1.title containsString:@"Remove"],
           "holding ⌥ turns another workspace's item into 从列表中移除");
     CHECK(ws1 && ws2 && ws2.state == NSControlStateValueOn && ws1.state == NSControlStateValueOff, "dropdown lists workspaces, current checked");
     [NSApp sendAction:ws1.action to:d from:ws1];
@@ -1195,7 +1196,7 @@ static void dataViews(NSString *dir) {
     [tp sortByColumn:0 ascending:YES];
     CHECK([[tp displayedCellAtRow:0 column:0] isEqual:@"adam"], "text sorts ignoring case");
     tp.filterText = @"city:o";
-    CHECK(tp.visibleRowCount == 2 && [tp.infoText containsString:@"2 / 3 行"], "filter on one column: %s", tp.infoText.UTF8String);
+    CHECK(tp.visibleRowCount == 2 && [tp.infoText containsString:@"2 of 3 rows"], "filter on one column: %s", tp.infoText.UTF8String);
     tp.filterText = @"";
     [tp sortByColumn:-1 ascending:YES];
     [t.editor gotoLine:5];
@@ -1227,7 +1228,7 @@ static void dataViews(NSString *dir) {
     [t.editor gotoLine:2];
     [t.editor insertText:@"oops " replacementRange:NSMakeRange(NSNotFound, 0)];
     spinUntil(^BOOL { return tree.errorText != nil; }, 3);
-    CHECK([tree.errorText containsString:@"第 2 行"] && tree.root.children.count == 3, "a typo shows where, and keeps the last good tree: %s", tree.errorText.UTF8String);
+    CHECK([tree.errorText containsString:@"Line 2,"] && tree.root.children.count == 3, "a typo shows where, and keeps the last good tree: %s", tree.errorText.UTF8String);
     [t.editor undo:nil];
     spinUntil(^BOOL { return tree.errorText == nil; }, 3);
     CHECK(!tree.errorText, "fixing it clears the error");
@@ -1256,7 +1257,7 @@ static void binaryViews(NSString *dir) {
     [bin writeToFile:bplist atomically:YES];
     [t openPath:bplist preview:NO focus:NO];
     TreePreview *tree = findView(t.view, TreePreview.class);
-    CHECK(tree && !t.editor && tree.root.children.count == 2 && [t.statusText containsString:@"二进制属性列表"], "a binary plist shows as a tree (was hex)");
+    CHECK(tree && !t.editor && tree.root.children.count == 2 && [t.statusText containsString:@"Binary property list"], "a binary plist shows as a tree (was hex)");
 
     NSString *dbp = [dir stringByAppendingPathComponent:@"app.db"];
     sqlite3 *db = NULL;
@@ -1268,7 +1269,7 @@ static void binaryViews(NSString *dir) {
     SQLitePreview *sp = findView(t.view, SQLitePreview.class);
     CHECK(sp && [sp.tableNames isEqualToArray:(@[@"users", @"v"])], "SQLite: tables and views (%s)", [sp.tableNames componentsJoinedByString:@","].UTF8String);
     spinUntil(^BOOL { return sp.grid.model.rowCount == 2; }, 3);
-    CHECK(sp.grid.model.rowCount == 2 && [[sp.grid.model cellAtRow:0 column:2] isEqual:@"<BLOB 2 字节>"] && [[sp.grid.model cellAtRow:1 column:1] isEqual:@"NULL"],
+    CHECK(sp.grid.model.rowCount == 2 && [[sp.grid.model cellAtRow:0 column:2] isEqual:@"<BLOB 2 bytes>"] && [[sp.grid.model cellAtRow:1 column:1] isEqual:@"NULL"],
           "rows, BLOB and NULL shown readably");
     [sp runQuery:@"DELETE FROM users"];
     spinUntil(^BOOL { return [sp.grid.infoText containsString:@"⚠️"]; }, 3);
@@ -1381,13 +1382,13 @@ static void untitledDocuments(NSString *dir) {
     NSUInteger (^backupCount)(void) = ^NSUInteger { return [NSFileManager.defaultManager contentsOfDirectoryAtPath:backups error:nil].count; };
 
     [t newUntitledDocument];
-    CHECK(t.tabCount == 1 && t.activeIsUntitled && [t.currentTitle isEqual:@"未命名-1"] && !t.currentPath && t.editor,
+    CHECK(t.tabCount == 1 && t.activeIsUntitled && [t.currentTitle isEqual:@"Untitled-1"] && !t.currentPath && t.editor,
           "⌘N opens an editable 未命名-1 tab with no file behind it");
     CHECK(t.dirtyCount == 0, "an empty untitled tab is not unsaved");
     [t.editor insertText:@"# Shopping list\nmilk\n" replacementRange:NSMakeRange(NSNotFound, 0)];
     CHECK(t.dirtyCount == 1, "with text it counts as unsaved");
     [t newUntitledDocument];
-    CHECK([t.currentTitle isEqual:@"未命名-2"], "the next one is 未命名-2");
+    CHECK([t.currentTitle isEqual:@"Untitled-2"], "the next one is Untitled-2");
     [t.editor insertText:@"second" replacementRange:NSMakeRange(NSNotFound, 0)];
     [t backupUntitled];
     NSMutableSet *texts = [NSMutableSet set];
@@ -1403,7 +1404,7 @@ static void untitledDocuments(NSString *dir) {
     [t closeAllWithoutAsking];
     CHECK(backupCount() == 2, "closing the workspace keeps the backups");
     [t restoreSession:session];
-    CHECK(t.tabCount == 2 && t.activeIsUntitled && [t.currentTitle isEqual:@"未命名-2"] && [text(t.editor) isEqualToString:@"second"],
+    CHECK(t.tabCount == 2 && t.activeIsUntitled && [t.currentTitle isEqual:@"Untitled-2"] && [text(t.editor) isEqualToString:@"second"],
           "restored with titles and text: %s", t.currentTitle.UTF8String);
 
     answer = NSAlertSecondButtonReturn;
@@ -1424,7 +1425,7 @@ static void untitledDocuments(NSString *dir) {
     [t newUntitledDocument];
     [t.editor insertText:@"draft" replacementRange:NSMakeRange(NSNotFound, 0)];
     saveTo = nil;
-    CHECK(![t save] && t.activeIsUntitled && [t.currentTitle isEqual:@"未命名-1"], "cancelling the save panel keeps it untitled (number reused)");
+    CHECK(![t save] && t.activeIsUntitled && [t.currentTitle isEqual:@"Untitled-1"], "cancelling the save panel keeps it untitled (number reused)");
     answer = NSAlertFirstButtonReturn;
     CHECK(![t closeActive] && t.tabCount == 2, "保存… then cancelling the panel keeps it open");
 
@@ -1450,7 +1451,7 @@ static void recentAndAppearance(NSString *dir) {
     [d->_content newUntitledDocument];
     [d->_content.editor insertText:@"keep me" replacementRange:NSMakeRange(NSNotFound, 0)];
     [d updateTitle];
-    CHECK([d->_win.title isEqualToString:@"未命名-1"] && !d->_win.representedURL && d->_win.isDocumentEdited, "window title: %s", d->_win.title.UTF8String);
+    CHECK([d->_win.title isEqualToString:@"Untitled-1"] && !d->_win.representedURL && d->_win.isDocumentEdited, "window title: %s", d->_win.title.UTF8String);
     CHECK([d targetPathsFrom:nil].count == 0, "file actions (trash, rename, reveal) have no target on an untitled tab");
     CHECK([d switchToRoot:b], "switching workspace with an untitled tab doesn't ask");
     [d openRoot:c];
@@ -1465,7 +1466,7 @@ static void recentAndAppearance(NSString *dir) {
     CHECK([d.recentRoots isEqualToArray:@[c]], "the welcome page's × removes one too");
     CHECK([ud dictionaryForKey:@"sessions"][a] != nil, "a removed workspace keeps its untitled documents");
     [d openRoot:a];
-    CHECK(d->_content.tabCount == 1 && [d->_content.currentTitle isEqual:@"未命名-1"] && [text(d->_content.editor) isEqualToString:@"keep me"],
+    CHECK(d->_content.tabCount == 1 && [d->_content.currentTitle isEqual:@"Untitled-1"] && [text(d->_content.editor) isEqualToString:@"keep me"],
           "opening it again brings them back");
 
     NSMenuItem *dark = [[NSMenuItem alloc] initWithTitle:@"深色" action:@selector(setAppearanceMode:) keyEquivalent:@""];
@@ -1518,7 +1519,7 @@ static void searchPanel(NSString *dir) {
     run(@".svg");
     CHECK(sp.nameCount == 2 && sp.contentFileCount == 3 && sp.hitCount == 4, "“.svg” finds 2 file names and 4 lines in 3 files (%lu / %lu / %lu)",
           (unsigned long)sp.nameCount, (unsigned long)sp.contentFileCount, (unsigned long)sp.hitCount);
-    CHECK([sp.statusText containsString:@"2 个文件名"] && [sp.statusText containsString:@"3 个文件中 4 处"], "status: %s", sp.statusText.UTF8String);
+    CHECK([sp.statusText containsString:@"2 names"] && [sp.statusText containsString:@"4 matches in 3 files"], "status: %s", sp.statusText.UTF8String);
     NSOutlineView *ov = sp.resultsView;
     CHECK(ov.numberOfRows >= 2 + 2 + 3 + 4, "sections, names, files and lines are all listed (%ld rows)", (long)ov.numberOfRows);
 
@@ -1548,7 +1549,7 @@ static void searchPanel(NSString *dir) {
     run(@"logo\\.(svg|png)'");
     CHECK(sp.hitCount == 3, ".*: regex (%lu)", (unsigned long)sp.hitCount);
     run(@"(unclosed");
-    CHECK([sp.statusText containsString:@"正则"] && !sp.hasResults, "bad regex shown in the status: %s", sp.statusText.UTF8String);
+    CHECK([sp.statusText containsString:@"regular expression"] && !sp.hasResults, "bad regex shown in the status: %s", sp.statusText.UTF8String);
     sp.regex = NO;
     CHECK([ud integerForKey:@"searchScope"] == SearchScopeContents && ![ud boolForKey:@"searchRegex"], "options are remembered");
 
@@ -1560,7 +1561,7 @@ static void searchPanel(NSString *dir) {
     CHECK(opened.count == 3 && [opened[0] isEqual:opened[2]] && ![opened[0] isEqual:opened[1]], "F4 / ⇧F4 step through the matches: %s",
           [opened componentsJoinedByString:@" "].UTF8String);
     run(@"no-such-text-anywhere");
-    CHECK(!sp.hasResults && [sp.statusText containsString:@"没有找到"], "no results: %s", sp.statusText.UTF8String);
+    CHECK(!sp.hasResults && [sp.statusText containsString:@"No results"], "no results: %s", sp.statusText.UTF8String);
     run(@"");
     CHECK(!sp.hasResults && ov.numberOfRows == 0, "clearing the query clears the list");
     for (NSString *k in @[@"searchScope", @"searchCase", @"searchWord", @"searchRegex", @"searchFilter"]) [ud removeObjectForKey:k];
@@ -1847,8 +1848,55 @@ static void wordWrap(NSString *dir) {
     NSString *mp = [dir stringByAppendingPathComponent:@"many.txt"];
     [many writeToFile:mp atomically:NO];
     [t openPath:mp preview:NO focus:NO];
-    CHECK(t.editor.wordWrap && !t.editor.wrapsLines && [t.editor.statusText containsString:@"未自动换行"], "a million lines: no wrap, noted in the status bar");
+    CHECK(t.editor.wordWrap && !t.editor.wrapsLines && [t.editor.statusText containsString:@"not wrapped"], "a million lines: no wrap, noted in the status bar");
     [t closeAllWithoutAsking];
+}
+
+#pragma mark Localization
+
+static NSArray<NSString *> *menuTitles(NSMenu *m) {
+    NSMutableArray *t = [NSMutableArray array];
+    for (NSMenuItem *i in m.itemArray) if (i.submenu.title.length) [t addObject:i.submenu.title];   // top-level items show the submenu's title
+    return t;
+}
+
+// English is the development language; zh-Hans comes from Resources/zh-Hans.lproj (scripts/l10n.py checks coverage).
+static void localization(NSString *dir) {
+    NSString *p = mkfile(dir, @"l10n.txt", @"hello\n");
+    CHECK([FTLP(1, @"%lu file", @"%lu files") isEqual:@"%lu file"] && [FTLP(2, @"%lu file", @"%lu files") isEqual:@"%lu files"], "English plural forms");
+
+    AppDelegate *en = [AppDelegate new];
+    [en buildMenu];
+    NSArray *top = menuTitles(NSApp.mainMenu);
+    CHECK([top containsObject:@"File"] && [top containsObject:@"Edit"] && [top containsObject:@"View"] && [top containsObject:@"Tabs"],
+          "English menus: %s", [top componentsJoinedByString:@", "].UTF8String);
+    NSWindow *w; ContentController *t = offscreenController(&w);
+    [t openPath:p preview:NO focus:NO];
+    CHECK([t.statusText hasPrefix:@"Ln 1, Col 1"], "English status bar: %s", t.statusText.UTF8String);
+    [t closeAllWithoutAsking];
+
+    FTSetLocalizationFolder(@"Resources/zh-Hans.lproj");
+    CHECK([FTL(@"Save All") isEqual:@"全部保存"] && [FTL(@"Not in the table") isEqual:@"Not in the table"], "zh-Hans table loaded, unknown keys fall back to English");
+    CHECK([FTLP(1, @"%lu file", @"%lu files") isEqual:FTLP(2, @"%lu file", @"%lu files")], "Chinese has one form for any count");
+    AppDelegate *zh = [AppDelegate new];
+    [zh buildMenu];
+    top = menuTitles(NSApp.mainMenu);
+    CHECK([top containsObject:@"文件"] && [top containsObject:@"编辑"] && [top containsObject:@"显示"] && [top containsObject:@"标签页"],
+          "Chinese menus: %s", [top componentsJoinedByString:@", "].UTF8String);
+    NSMenu *view = nil;
+    for (NSMenuItem *i in NSApp.mainMenu.itemArray) if ([i.submenu.title isEqual:@"显示"]) view = i.submenu;
+    BOOL plus = NO;
+    for (NSMenuItem *i in view.itemArray) if ([i.keyEquivalent isEqual:@"+"]) plus = YES;
+    CHECK(plus, "the hidden ⌘+ item is still added to the localized View menu");
+    t = offscreenController(&w);
+    [t openPath:p preview:NO focus:NO];
+    CHECK([t.statusText hasPrefix:@"行 1，列 1"], "Chinese status bar: %s", t.statusText.UTF8String);
+    NSString *err = nil;
+    JSONParse([@"{\"a\" 1}" dataUsingEncoding:NSUTF8StringEncoding], &err);
+    CHECK([err isEqual:@"第 1 行第 6 列：属性名后面缺少 :"], "parser messages are translated too: %s", err.UTF8String);
+    [t closeAllWithoutAsking];
+    FTSetLocalizationFolder(nil);
+    [en buildMenu];
 }
 
 int main(void) {
@@ -1890,6 +1938,7 @@ int main(void) {
         binaryViews(dir);
         hiddenFileSettings(dir);
         recentAndAppearance(dir);
+        localization(dir);
         [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     }
     if (failures) { printf("%d editor failure(s)\n", failures); return 1; }

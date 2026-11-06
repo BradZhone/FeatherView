@@ -1,4 +1,5 @@
 #import "MarkdownRender+Private.h"
+#import "Localization.h"
 #import <ImageIO/ImageIO.h>
 #import "SVGImage.h"
 
@@ -53,7 +54,7 @@ static NSString *tagName(NSString *raw, BOOL *closing) {
     BOOL missing = target && ![NSFileManager.defaultManager fileExistsAtPath:target];
     d[NSForegroundColorAttributeName] = missing ? NSColor.tertiaryLabelColor : NSColor.linkColor;
     if (missing) d[NSStrikethroughStyleAttributeName] = @(NSUnderlineStyleSingle);
-    d[NSToolTipAttributeName] = missing ? [NSString stringWithFormat:@"文件不存在：%@", target.lastPathComponent]
+    d[NSToolTipAttributeName] = missing ? [NSString stringWithFormat:FTL(@"File not found: %@"), target.lastPathComponent]
                               : title.length ? title : (href ?: @"");
 }
 
@@ -190,7 +191,7 @@ static NSImage *decode(CGImageSourceRef src, CGFloat maxPx) {
     if (!img) {
         NSMutableDictionary *d = [attrs mutableCopy];
         d[NSForegroundColorAttributeName] = NSColor.secondaryLabelColor;
-        NSString *label = alt.length ? alt : src.lastPathComponent ?: @"图片";
+        NSString *label = alt.length ? alt : src.lastPathComponent ?: FTL(@"image");
         return [[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"[%@]", label] attributes:d];
     }
     CGFloat iw = img.size.width, ih = img.size.height, dw = iw, dh = ih;
@@ -215,7 +216,7 @@ static NSImage *decode(CGImageSourceRef src, CGFloat maxPx) {
         configurationByApplyingConfiguration:[NSImageSymbolConfiguration configurationWithPaletteColors:
             @[done ? NSColor.controlAccentColor : NSColor.secondaryLabelColor]]];
     NSImage *img = [[NSImage imageWithSystemSymbolName:done ? @"checkmark.square.fill" : @"square"
-                                accessibilityDescription:done ? @"已完成" : @"未完成"] imageWithSymbolConfiguration:cfg];
+                                accessibilityDescription:done ? FTL(@"done") : FTL(@"not done")] imageWithSymbolConfiguration:cfg];
     NSTextAttachment *att = [NSTextAttachment new];
     att.image = img;
     att.bounds = NSMakeRect(0, -2, img.size.width, img.size.height);

@@ -3,7 +3,7 @@ APP      := build/$(NAME).app
 BIN      := $(APP)/Contents/MacOS/$(NAME)
 ICNS     := $(APP)/Contents/Resources/$(NAME).icns
 
-MODULES  := App Editor Files Search Preview Viewers
+MODULES  := Support App Editor Files Search Preview Viewers
 SRC      := $(foreach m,$(MODULES),$(wildcard src/$(m)/*.m))
 HDR      := $(foreach m,$(MODULES),$(wildcard src/$(m)/*.h))
 LIB_SRC  := $(filter-out src/App/main.m,$(SRC))
@@ -15,13 +15,15 @@ FRAMEWORKS := -framework Cocoa -framework CoreText -framework ImageIO -framework
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 # Foundation-only code, tested without AppKit
-CORE_SRC := src/Editor/PieceTable.m src/Editor/PieceTable+Search.m src/Files/FileKind.m src/Files/FileWalker.m \
+CORE_SRC := src/Support/Localization.m src/Editor/PieceTable.m src/Editor/PieceTable+Search.m src/Files/FileKind.m src/Files/FileWalker.m \
             src/Files/FileOps.m src/Search/WorkspaceSearch.m src/Preview/TableModel.m src/Preview/JSONTree.m src/Preview/Notebook.m
 MD_SRC   := src/Preview/Markdown.m src/Preview/MarkdownInline.m
 
 .PHONY: all run test clean install release
 
-all: $(BIN) $(ICNS) $(APP)/Contents/Info.plist
+RES      := $(patsubst Resources/%,$(APP)/Contents/Resources/%,$(wildcard Resources/*.lproj/*.strings))
+
+all: $(BIN) $(ICNS) $(APP)/Contents/Info.plist $(RES)
 	codesign --force --sign - $(APP) >/dev/null 2>&1 || true
 	@# keep Finder's "Open With" pointing at the installed copy, not this build folder
 	@$(LSREGISTER) -u "$(CURDIR)/$(APP)" >/dev/null 2>&1 || true
@@ -33,6 +35,11 @@ $(BIN): $(SRC) $(HDR)
 $(APP)/Contents/Info.plist: Info.plist
 	@mkdir -p $(dir $@)
 	cp $< $@
+
+# .strings are compiled to binary plists, as Xcode does
+$(APP)/Contents/Resources/%.strings: Resources/%.strings
+	@mkdir -p $(dir $@)
+	plutil -convert binary1 -o $@ $<
 
 build/make_icon: tools/make_icon.m
 	@mkdir -p build
@@ -57,6 +64,7 @@ build/markdown_tests: tests/markdown_tests.m $(MD_SRC) src/Preview/Markdown.h
 	clang $(CFLAGS) -framework Foundation -o $@ tests/markdown_tests.m $(MD_SRC)
 
 test: build/tests build/markdown_tests build/editor_tests
+	python3 scripts/l10n.py
 	./build/tests
 	./build/markdown_tests
 	./build/editor_tests

@@ -1,4 +1,5 @@
 #import "FileIcons.h"
+#import "Localization.h"
 
 typedef NS_ENUM(NSInteger, FTFileFamily) { FamDir, FamImage, FamPDF, FamMedia, FamArchive, FamDoc, FamData, FamWeb, FamShell, FamCode, FamTable, FamDB, FamNotebook, FamOther };
 
@@ -72,5 +73,5 @@ NSColor *FTFileTint(NSString *name, BOOL isDir) {
 }
 
 NSImage *FTFileIcon(NSString *name, BOOL isDir) {
-    return [NSImage imageWithSystemSymbolName:FTFileSymbol(name, isDir) accessibilityDescription:isDir ? @"文件夹" : @"文件"];
+    return [NSImage imageWithSystemSymbolName:FTFileSymbol(name, isDir) accessibilityDescription:isDir ? FTL(@"Folder") : FTL(@"File")];
 }

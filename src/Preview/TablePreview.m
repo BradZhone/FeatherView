@@ -1,4 +1,5 @@
 #import "TablePreview+Private.h"
+#import "Localization.h"
 #import "CanvasView.h"
 
 static const NSUInteger kMaxRows = 500000, kSyncBytes = 4u << 20;
@@ -16,19 +17,19 @@ static const NSUInteger kMaxRows = 500000, kSyncBytes = 4u << 20;
     _numeric = [NSMutableDictionary dictionary];
 
     _filter = [NSSearchField new];
-    _filter.placeholderString = @"筛选行（列名:文字 只看一列）";
+    _filter.placeholderString = FTL(@"Filter rows (column:text)");
     _filter.delegate = self;
     _filter.controlSize = NSControlSizeSmall;
     _filter.font = [NSFont systemFontOfSize:11.5];
     _filter.translatesAutoresizingMaskIntoConstraints = NO;
-    _headerBox = [NSButton checkboxWithTitle:@"首行是表头" target:self action:@selector(headerToggled:)];
+    _headerBox = [NSButton checkboxWithTitle:FTL(@"First row is header") target:self action:@selector(headerToggled:)];
     _headerBox.controlSize = NSControlSizeSmall;
     _headerBox.font = [NSFont systemFontOfSize:11.5];
     _headerBox.translatesAutoresizingMaskIntoConstraints = NO;
     _delimPopup = [NSPopUpButton new];
     _delimPopup.controlSize = NSControlSizeSmall;
     _delimPopup.font = [NSFont systemFontOfSize:11.5];
-    NSArray *titles = @[@"自动识别分隔符", @"逗号 ,", @"制表符 Tab", @"分号 ;", @"竖线 |"];
+    NSArray *titles = @[FTL(@"Detect delimiter"), FTL(@"Comma ,"), FTL(@"Tab"), FTL(@"Semicolon ;"), FTL(@"Pipe |")];
     unichar tags[] = {0, ',', '\t', ';', '|'};
     for (NSUInteger i = 0; i < titles.count; i++) { [_delimPopup addItemWithTitle:titles[i]]; _delimPopup.lastItem.tag = tags[i]; }
     _delimPopup.target = self; _delimPopup.action = @selector(delimiterChosen:);
@@ -129,7 +130,7 @@ static id<TableModel> parse(NSData *d, BOOL jsonl, unichar delim, NSInteger head
     NSInteger header = _headerChoice;
     NSUInteger gen = ++_parseGen;
     if (utf8.length <= kSyncBytes) { [self install:parse(utf8, jsonl, delim, header)]; return; }
-    _info.stringValue = @"正在读取表格…";
+    _info.stringValue = FTL(@"Reading table…");
     __weak TablePreview *weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         id<TableModel> m = parse(utf8, jsonl, delim, header);
@@ -158,7 +159,7 @@ static id<TableModel> parse(NSData *d, BOOL jsonl, unichar delim, NSInteger head
         CSVTable *t = (CSVTable *)m;
         _headerBox.state = t.hasHeader;
         [_delimPopup selectItemWithTag:_delimChoice];
-        _delimPopup.itemArray.firstObject.title = [NSString stringWithFormat:@"自动（%@）", t.delimiter == '\t' ? @"Tab" : [NSString stringWithFormat:@"%C", t.delimiter]];
+        _delimPopup.itemArray.firstObject.title = [NSString stringWithFormat:FTL(@"Auto (%@)"), t.delimiter == '\t' ? @"Tab" : [NSString stringWithFormat:@"%C", t.delimiter]];
     }
     if (_sortColumn >= (NSInteger)m.columnCount) _sortColumn = -1;
     if (!sameShape) [self rebuildColumns]; else [_table reloadData];

@@ -1,4 +1,5 @@
 #import "DefaultApps.h"
+#import "Localization.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static NSString *const kPreviousKey = @"previousDefaultApps";     // uti → path of the app that was default before
@@ -24,7 +25,7 @@ static FileTypeGroup *group(NSString *key, NSString *title, NSString *exts) {
 // couldn't be opened") for an app that isn't a browser. Listed so the user knows why, never applied.
 static FileTypeGroup *html(void) {
     FileTypeGroup *g = group(@"html", @"HTML", @"html htm");
-    g.unsupportedReason = @"macOS 把 .html 交给默认浏览器管理，编辑器设置不了。可以在 FeatherView 里直接打开 HTML 文件。";
+    g.unsupportedReason = FTL(@"macOS ties .html to the default web browser, so another app can’t become its default. You can still open HTML files in FeatherView directly.");
     return g;
 }
 
@@ -32,10 +33,10 @@ static FileTypeGroup *html(void) {
 static NSString *describe(NSError *e) {
     NSError *u = e.userInfo[NSUnderlyingErrorKey];
     NSInteger code = u ? u.code : e.code;
-    if (code == -128 || code == NSUserCancelledError) return @"已取消";
-    if (code == -54 || code == -5000) return @"没有权限更改（macOS 拒绝了）";
-    if ([e.domain isEqualToString:NSCocoaErrorDomain] && e.code == NSFileReadUnknownError) return @"macOS 拒绝了这个更改";
-    return e.localizedDescription ?: @"未知错误";
+    if (code == -128 || code == NSUserCancelledError) return FTL(@"Cancelled");
+    if (code == -54 || code == -5000) return FTL(@"Not permitted (macOS refused the change)");
+    if ([e.domain isEqualToString:NSCocoaErrorDomain] && e.code == NSFileReadUnknownError) return FTL(@"macOS refused this change");
+    return e.localizedDescription ?: FTL(@"Unknown error");
 }
 
 @implementation DefaultApps
@@ -43,12 +44,12 @@ static NSString *describe(NSError *e) {
 + (NSArray<FileTypeGroup *> *)groups {
     // .ts / .mts are separate: macOS also uses them for MPEG-2 video (FeatherView hands real video to Quick Look).
     return @[group(@"markdown", @"Markdown", @"md markdown mdown mkd"),
-             group(@"text", @"纯文本、日志", @"txt text log"),
-             group(@"code", @"源代码", @"c h m mm cc cpp hpp swift py rb go rs js mjs cjs jsx tsx java kt kts scala cs php lua pl sh bash zsh fish sql css scss less"),
-             group(@"typescript", @"TypeScript（.ts 同时是视频格式）", @"ts mts cts"),
-             group(@"config", @"配置与数据", @"json jsonc yaml yml toml ini conf cfg xml plist csv tsv"),
+             group(@"text", FTL(@"Text and logs"), @"txt text log"),
+             group(@"code", FTL(@"Source code"), @"c h m mm cc cpp hpp swift py rb go rs js mjs cjs jsx tsx java kt kts scala cs php lua pl sh bash zsh fish sql css scss less"),
+             group(@"typescript", FTL(@"TypeScript"), @"ts mts cts"),
+             group(@"config", FTL(@"Config and data"), @"json jsonc yaml yml toml ini conf cfg xml plist csv tsv"),
              html(),
-             group(@"image", @"图片", @"png jpg jpeg gif heic webp tiff tif bmp svg"),
+             group(@"image", FTL(@"Images"), @"png jpg jpeg gif heic webp tiff tif bmp svg"),
              group(@"pdf", @"PDF", @"pdf")];
 }
 
@@ -94,11 +95,11 @@ static NSString *describe(NSError *e) {
     NSMutableOrderedSet *names = [NSMutableOrderedSet orderedSet];
     for (NSString *t in g.contentTypes) {
         NSURL *u = self.lookup(t);
-        [names addObject:u ? [NSFileManager.defaultManager displayNameAtPath:u.path].stringByDeletingPathExtension : @"无"];
+        [names addObject:u ? [NSFileManager.defaultManager displayNameAtPath:u.path].stringByDeletingPathExtension : FTL(@"None")];
     }
-    if (!names.count) return @"无";
+    if (!names.count) return FTL(@"None");
     if (names.count == 1) return names.firstObject;
-    return [NSString stringWithFormat:@"%@ 等 %lu 个", names.firstObject, (unsigned long)names.count];
+    return [NSString stringWithFormat:FTL(@"%@ and %lu more"), names.firstObject, (unsigned long)names.count];
 }
 
 - (void)setGroup:(FileTypeGroup *)g toFeather:(BOOL)on done:(void (^)(NSString *))done {
@@ -118,7 +119,7 @@ static NSString *describe(NSError *e) {
             NSString *back = prev[t];
             if (!back || ![NSFileManager.defaultManager fileExistsAtPath:back]) {
                 NSString *ext = [UTType typeWithIdentifier:t].preferredFilenameExtension ?: t;
-                [errors addObject:[NSString stringWithFormat:@".%@ 原来的打开方式已不存在，请在访达“显示简介”里另选", ext]];
+                [errors addObject:[NSString stringWithFormat:FTL(@"The previous app for .%@ no longer exists; choose one in Finder’s Get Info window"), ext]];
                 continue;
             }
             target = [NSURL fileURLWithPath:back];
@@ -135,7 +136,7 @@ static NSString *describe(NSError *e) {
     }
     dispatch_group_notify(wait, dispatch_get_main_queue(), ^{
         [self.store setObject:prev forKey:kPreviousKey];
-        done(errors.count ? [[NSOrderedSet orderedSetWithArray:errors].array componentsJoinedByString:@"；"] : nil);
+        done(errors.count ? [[NSOrderedSet orderedSetWithArray:errors].array componentsJoinedByString:FTL(@"; ")] : nil);
     });
 }
 

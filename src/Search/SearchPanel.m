@@ -1,4 +1,5 @@
 #import "SearchPanel.h"
+#import "Localization.h"
 #import "WorkspaceSearch.h"
 #import "FileWalker.h"
 #import "FileIcons.h"
@@ -311,14 +312,14 @@ static NSButton *iconButton(NSString *symbol, NSString *tip, id target, SEL acti
 
     _view = [[SRFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 260, 600)];
     _field = [NSSearchField new];
-    _field.placeholderString = @"搜索文件名和内容";
+    _field.placeholderString = FTL(@"Search file names and contents");
     _field.delegate = self;
     _field.sendsSearchStringImmediately = YES;
     _field.target = self;
     _field.action = @selector(fieldAction:);
     _field.translatesAutoresizingMaskIntoConstraints = NO;
 
-    _scopeControl = [NSSegmentedControl segmentedControlWithLabels:@[@"全部", @"文件名", @"内容"]
+    _scopeControl = [NSSegmentedControl segmentedControlWithLabels:@[FTL(@"All"), FTL(@"Names"), FTL(@"Contents")]
         trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(optionChanged:)];
     _scopeControl.controlSize = NSControlSizeSmall;
     _scopeControl.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
@@ -326,14 +327,14 @@ static NSButton *iconButton(NSString *symbol, NSString *tip, id target, SEL acti
     _scopeControl.translatesAutoresizingMaskIntoConstraints = NO;
     _scopeControl.selectedSegment = MIN(2, MAX(0, [ud integerForKey:@"searchScope"]));
 
-    _caseButton = toggle(@"Aa", @"区分大小写", self, @selector(optionChanged:), NO);
-    _wordButton = toggle(@"ab", @"全词匹配", self, @selector(optionChanged:), YES);
-    _regexButton = toggle(@".*", @"正则表达式", self, @selector(optionChanged:), NO);
+    _caseButton = toggle(@"Aa", FTL(@"Match Case"), self, @selector(optionChanged:), NO);
+    _wordButton = toggle(@"ab", FTL(@"Whole Word"), self, @selector(optionChanged:), YES);
+    _regexButton = toggle(@".*", FTL(@"Regular Expression"), self, @selector(optionChanged:), NO);
     _caseButton.state = [ud boolForKey:@"searchCase"]; _wordButton.state = [ud boolForKey:@"searchWord"]; _regexButton.state = [ud boolForKey:@"searchRegex"];
 
     _filterField = [NSTextField textFieldWithString:[ud stringForKey:@"searchFilter"] ?: @""];
-    _filterField.placeholderString = @"范围：src, *.ts, !test";
-    _filterField.toolTip = @"只搜这些文件，逗号分隔；! 开头表示排除。\nts 或 .ts = 扩展名，src = 文件夹，src/app = 路径，*.test.ts = 通配符";
+    _filterField.placeholderString = FTL(@"Scope: src, *.ts, !test");
+    _filterField.toolTip = FTL(@"Search only these files, separated by commas; a leading ! excludes.\nts or .ts = extension, src = folder, src/app = path, *.test.ts = wildcard");
     _filterField.font = [NSFont systemFontOfSize:11.5];
     _filterField.controlSize = NSControlSizeSmall;
     _filterField.bezelStyle = NSTextFieldRoundedBezel;
@@ -348,8 +349,8 @@ static NSButton *iconButton(NSString *symbol, NSString *tip, id target, SEL acti
     _spinner.displayedWhenStopped = NO;
     _spinner.translatesAutoresizingMaskIntoConstraints = NO;
     _status = label([NSFont systemFontOfSize:11], NSColor.secondaryLabelColor, NSLineBreakByTruncatingTail);
-    _status.stringValue = @"输入文件名、扩展名（如 .svg）或要找的文字";
-    _collapseButton = iconButton(@"rectangle.compress.vertical", @"全部折叠", self, @selector(toggleCollapseAll:));
+    _status.stringValue = FTL(@"Type a name, an extension (.svg) or text");
+    _collapseButton = iconButton(@"rectangle.compress.vertical", FTL(@"Collapse All"), self, @selector(toggleCollapseAll:));
     _collapseButton.hidden = YES;
 
     NSBox *line = [NSBox new];
@@ -668,18 +669,21 @@ static NSArray<FWNameMatch *> *regexNames(NSRegularExpression *re, NSArray<NSStr
     _status.toolTip = nil;
     NSString *q = [_activeQuery stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (_error) { _status.stringValue = _error; _status.textColor = NSColor.systemRedColor; return; }
-    if (!_root) { _status.stringValue = @"先打开一个文件夹"; return; }
-    if (!q.length) { _status.stringValue = @"输入文件名、扩展名（如 .svg）或要找的文字"; return; }
+    if (!_root) { _status.stringValue = FTL(@"Open a folder first"); return; }
+    if (!q.length) { _status.stringValue = FTL(@"Type a name, an extension (.svg) or text"); return; }
     NSMutableArray *parts = [NSMutableArray array];
     if (_searchedNames && (_nameTotal || !busy))
-        [parts addObject:[NSString stringWithFormat:@"%lu 个文件名%@", (unsigned long)_nameTotal, _nameTotal > kNamesMax ? [NSString stringWithFormat:@"（列出前 %lu）", (unsigned long)kNamesMax] : @""]];
+        [parts addObject:[NSString stringWithFormat:FTLP(_nameTotal, @"%lu name%@", @"%lu names%@"), (unsigned long)_nameTotal, _nameTotal > kNamesMax ? [NSString stringWithFormat:FTL(@" (first %lu listed)"), (unsigned long)kNamesMax] : @""]];
     if (_searchedContent && (_hitCount || !busy))
-        [parts addObject:[NSString stringWithFormat:@"%lu 个文件中 %lu 处%@", (unsigned long)_files.count, (unsigned long)_hitCount, _truncated ? @"（已达上限）" : @""]];
-    if (busy) { _status.stringValue = [@"搜索中… " stringByAppendingString:[parts componentsJoinedByString:@" · "]]; return; }
-    if (!_nameTotal && !_hitCount) { _status.stringValue = [NSString stringWithFormat:@"没有找到“%@”", q]; return; }
+        [parts addObject:[NSString stringWithFormat:FTL(@"%2$@ in %1$@%3$@"),
+            [NSString stringWithFormat:FTLP(_files.count, @"%lu file", @"%lu files"), (unsigned long)_files.count],
+            [NSString stringWithFormat:FTLP(_hitCount, @"%lu match", @"%lu matches"), (unsigned long)_hitCount],
+            _truncated ? FTL(@" (limit reached)") : @""]];
+    if (busy) { _status.stringValue = [FTL(@"Searching… ") stringByAppendingString:[parts componentsJoinedByString:@" · "]]; return; }
+    if (!_nameTotal && !_hitCount) { _status.stringValue = [NSString stringWithFormat:FTL(@"No results for “%@”"), q]; return; }
     _status.stringValue = [parts componentsJoinedByString:@" · "];
-    _status.toolTip = [NSString stringWithFormat:@"用时 %.2f 秒%@%@", CFAbsoluteTimeGetCurrent() - _started, _globOnly ? @"\n通配符只匹配文件名" : @"",
-                       _searchedContent ? (_engine.usedRipgrep ? @"\n内容由 ripgrep 搜索" : @"\n内容由内置扫描器搜索") : @""];
+    _status.toolTip = [NSString stringWithFormat:FTL(@"Took %.2f s%@%@"), CFAbsoluteTimeGetCurrent() - _started, _globOnly ? FTL(@"\nWildcards match file names only") : @"",
+                       _searchedContent ? (_engine.usedRipgrep ? FTL(@"\nContents searched with ripgrep") : FTL(@"\nContents searched with the built-in scanner")) : @""];
 }
 
 #pragma mark Results list
@@ -765,9 +769,10 @@ static NSArray<FWNameMatch *> *regexNames(NSRegularExpression *re, NSArray<NSStr
                                                       [t.centerYAnchor constraintEqualToAnchor:c.centerYAnchor]]];
         }
         BOOL names = [(SRSection *)item kind] == SectionNames;
-        NSString *title = names ? @"文件名" : @"内容";
+        NSString *title = names ? FTL(@"Names") : FTL(@"Contents");
         NSString *count = names ? [NSString stringWithFormat:@"%lu", (unsigned long)_nameTotal]
-                                : [NSString stringWithFormat:@"%lu 处 · %lu 个文件", (unsigned long)_hitCount, (unsigned long)_files.count];
+                                : [NSString stringWithFormat:@"%@ · %@", [NSString stringWithFormat:FTLP(_hitCount, @"%lu match", @"%lu matches"), (unsigned long)_hitCount],
+                                   [NSString stringWithFormat:FTLP(_files.count, @"%lu file", @"%lu files"), (unsigned long)_files.count]];
         NSMutableAttributedString *s = [[NSMutableAttributedString alloc] initWithString:title attributes:@{
             NSFontAttributeName: [NSFont systemFontOfSize:11 weight:NSFontWeightBold], NSForegroundColorAttributeName: NSColor.secondaryLabelColor,
             NSKernAttributeName: @0.4}];
@@ -804,8 +809,8 @@ static NSArray<FWNameMatch *> *regexNames(NSRegularExpression *re, NSArray<NSStr
                                                       [t.centerYAnchor constraintEqualToAnchor:c.centerYAnchor]]];
         }
         c.textField.stringValue = _nameTotal > kNamesMax
-            ? [NSString stringWithFormat:@"还有 %lu 个文件名，显示前 %lu 个…", (unsigned long)(_nameTotal - kNamesInAll), (unsigned long)kNamesMax]
-            : [NSString stringWithFormat:@"还有 %lu 个文件名，全部显示…", (unsigned long)(_nameTotal - kNamesInAll)];
+            ? [NSString stringWithFormat:FTL(@"%lu more names, show the first %lu…"), (unsigned long)(_nameTotal - kNamesInAll), (unsigned long)kNamesMax]
+            : [NSString stringWithFormat:FTLP(_nameTotal - kNamesInAll, @"%lu more name, show it…", @"%lu more names, show all…"), (unsigned long)(_nameTotal - kNamesInAll)];
         return c;
     }
     SRHitCell *c = [ov makeViewWithIdentifier:@"hit" owner:self];
@@ -939,17 +944,17 @@ static NSArray<FWNameMatch *> *regexNames(NSRegularExpression *re, NSArray<NSStr
         return m;
     };
     if (path) {
-        add(@"打开", @selector(menuOpen:));
-        add(@"在文件树中显示", @selector(menuReveal:));
-        add(@"在访达中显示", @selector(menuFinder:));
+        add(FTL(@"Open"), @selector(menuOpen:));
+        add(FTL(@"Reveal in File Tree"), @selector(menuReveal:));
+        add(FTL(@"Show in Finder"), @selector(menuFinder:));
         [menu addItem:NSMenuItem.separatorItem];
-        add(@"拷贝路径", @selector(copyPaths:));
-        add(@"拷贝相对路径", @selector(copyRelative:));
-        if ([item isKindOfClass:SearchHit.class]) add(@"拷贝这一行", @selector(copyLine:));
+        add(FTL(@"Copy Path"), @selector(copyPaths:));
+        add(FTL(@"Copy Relative Path"), @selector(copyRelative:));
+        if ([item isKindOfClass:SearchHit.class]) add(FTL(@"Copy Line"), @selector(copyLine:));
     }
     if (_files.count > 1) {
         if (menu.numberOfItems) [menu addItem:NSMenuItem.separatorItem];
-        add(self.anyFileExpanded ? @"全部折叠" : @"全部展开", @selector(toggleCollapseAll:));
+        add(self.anyFileExpanded ? FTL(@"Collapse All") : FTL(@"Expand All"), @selector(toggleCollapseAll:));
     }
 }
 
@@ -990,8 +995,8 @@ static NSArray<FWNameMatch *> *regexNames(NSRegularExpression *re, NSArray<NSStr
         else { [_collapsed removeObject:f.path]; [_ov expandItem:f]; }
     }
     _collapseButton.image = [NSImage imageWithSystemSymbolName:collapse ? @"rectangle.expand.vertical" : @"rectangle.compress.vertical"
-                                      accessibilityDescription:collapse ? @"全部展开" : @"全部折叠"];
-    _collapseButton.toolTip = collapse ? @"全部展开" : @"全部折叠";
+                                      accessibilityDescription:collapse ? FTL(@"Expand All") : FTL(@"Collapse All")];
+    _collapseButton.toolTip = collapse ? FTL(@"Expand All") : FTL(@"Collapse All");
 }
 
 @end

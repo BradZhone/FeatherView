@@ -1,37 +1,58 @@
-# 更新记录
+# Changelog
 
-版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。1.0 之前，次版本号变化可能包含不兼容的改动。
+[简体中文](CHANGELOG.zh-Hans.md)
 
-## 0.15.0 — 2026-11-06
+All notable changes to FeatherView are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may contain incompatible changes.
 
-首个对外打包的版本，项目更名为 **FeatherView**。
+## [0.16.0] — Unreleased
 
-新增
-- 编辑器自动换行：随窗口宽度实时重排，按词断行，中文按字断行且标点不出现在行首，续行保持缩进；⌥Z 或设置里切换，默认开启。超过 100 万行或 32 MB 的文件不换行，状态栏会注明。
-- 制表符按 4 列对齐（之前约 3.6 列）。
-- 命令行可传多个 `--open <文件>`。
-- 发布脚本 `scripts/release.sh`（arm64 + x86_64 通用包）和对比测试脚本 `scripts/bench.sh`。
-- 文档：README、资源占用对比（`docs/benchmark.md`）、架构说明（`docs/architecture.md`）、贡献指南、MIT 许可。
+### Added
 
-变更
-- 应用名、菜单和安装位置改为 FeatherView.app。bundle id 仍是 `local.feather.editor`，原有的设置、会话、最近工作区和默认打开方式都会保留。`make install` 会把旧的 Feather.app 移到废纸篓。
-- 源码按模块拆分到 `src/App`、`Editor`、`Files`、`Search`、`Preview`、`Viewers`。
+- English user interface. English is now the development language, with a Simplified Chinese translation; macOS selects the language from the system's preferred-language order. A language can be set for FeatherView alone under System Settings → General → Language & Region → Applications.
+- Correct singular and plural forms for counts in English ("1 file", "2 files").
+- `scripts/l10n.py`, run by `make test`, which checks that every user-interface string is translated with matching format specifiers.
+- English documentation as the default, with Simplified Chinese versions of the README, benchmark, architecture and contributing documents.
 
-## 0.14 — 2026-11-06
+### Changed
 
-- CSV / TSV / JSON Lines 显示为可排序、可筛选的表格。
-- JSON、plist（含二进制 plist）显示为可折叠的树，Jupyter Notebook 渲染为文档。
-- 只读 SQLite 浏览器，压缩包内容列表（双击解压并打开）。
-- 设置窗口（⌘,）：外观、显示隐藏文件、始终隐藏列表、搜索跳过列表、.gitignore、自动保存、小地图。
+- Documentation rewritten in a more formal style.
+- English labels were fitted to the existing layouts: the Settings window now has proper margins, and the Default Apps panel has a wider name column.
 
-## 0.13
+## [0.15.0] — 2026-11-06
 
-- ⌘N 新建未命名文档，像 VS Code 一样暂存，关闭时才询问保存位置。
-- 浅色 / 深色 / 跟随系统；最近工作区可单个删除。
-- 默认打开方式面板说明 .html 只能由浏览器做默认应用。
+First packaged release. The project was renamed **FeatherView**.
 
-## 0.12 及更早
+### Added
 
-- 工作区搜索（全部 / 文件名 / 内容，大小写、全词、正则，包含 / 排除路径）。
-- 文件树多选与批量操作，SVG、TypeScript 文件识别，新图标与配色。
-- 原生 Markdown 渲染、HTML 预览、图片、PDF、十六进制查看，小地图，自动保存，会话恢复。
+- Soft wrap in the editor that follows the window width. Breaks occur at word boundaries, between CJK characters (closing punctuation never starts a row), and continuation rows keep the line's indentation. Toggle with ⌥Z or in Settings; on by default. Files over one million lines or 32 MB are not wrapped, as noted in the status bar.
+- Tab stops every four columns (previously about 3.6).
+- Multiple `--open <file>` arguments on the command line.
+- `scripts/release.sh` for universal (arm64 + x86_64) packages and `scripts/bench.sh` for the resource comparison.
+- README, benchmark, architecture notes, contributing guide and MIT license.
+
+### Changed
+
+- The application, its menus and its install location are now FeatherView.app. The bundle identifier remains `local.feather.editor`, so existing settings, sessions, recent workspaces and default-app choices are kept. `make install` moves an old Feather.app to the Trash.
+- Sources split into the modules `src/App`, `Editor`, `Files`, `Search`, `Preview` and `Viewers`.
+
+## [0.14] — 2026-11-06
+
+- CSV, TSV and JSON Lines shown as sortable, filterable tables.
+- JSON and property lists (including binary) shown as collapsible trees; Jupyter notebooks rendered as documents.
+- Read-only SQLite browser; archive listing with double-click to extract and open.
+- Settings window (⌘,): appearance, hidden files, always-hidden names, search exclusions, `.gitignore`, auto-save, minimap.
+
+## [0.13]
+
+- Untitled documents (⌘N) kept as drafts until closed, as in VS Code.
+- Light, dark and system appearance; recent workspaces can be removed individually.
+- The Default Apps panel explains that only a web browser can be the default for `.html`.
+
+## [0.12] and earlier
+
+- Workspace search (all, file names, contents; match case, whole word, regular expressions; include and exclude paths).
+- Multi-selection and batch operations in the file tree; SVG and TypeScript detection; new icon and colour scheme.
+- Native Markdown rendering, HTML preview, image, PDF and hex viewers, minimap, auto-save, session restore.
+
+[0.16.0]: https://github.com/BradZhone/feather/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/BradZhone/feather/releases/tag/v0.15.0

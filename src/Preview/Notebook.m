@@ -1,4 +1,5 @@
 #import "Notebook.h"
+#import "Localization.h"
 
 static const NSUInteger kMaxOutputChars = 20000, kMaxImages = 200;
 
@@ -25,7 +26,7 @@ static void fenced(NSMutableString *md, NSString *text, NSString *lang) {
         if ([text characterAtIndex:i] == '`') longest = MAX(longest, ++run); else run = 0;
     }
     NSString *fence = [@"" stringByPaddingToLength:MAX(3, longest + 1) withString:@"`" startingAtIndex:0];
-    if (text.length > kMaxOutputChars) text = [[text substringToIndex:kMaxOutputChars] stringByAppendingString:@"\n… （输出太长，已截断）"];
+    if (text.length > kMaxOutputChars) text = [[text substringToIndex:kMaxOutputChars] stringByAppendingString:FTL(@"\n… (output truncated)")];
     while ([text hasSuffix:@"\n"]) text = [text substringToIndex:text.length - 1];
     [md appendFormat:@"%@%@\n%@\n%@\n\n", fence, lang ?: @"", text, fence];
 }
@@ -78,9 +79,9 @@ NSString *NotebookToMarkdown(NSData *json, NSString *imageDir, NSUInteger *cellC
     id nb = json.length ? [NSJSONSerialization JSONObjectWithData:json options:0 error:&e] : nil;
     NSArray *cells = [nb isKindOfClass:NSDictionary.class] ? nb[@"cells"] : nil;
     if (![cells isKindOfClass:NSArray.class]) {
-        if (!json.length) return @"> 空的 notebook。";
-        return [NSString stringWithFormat:@"> 无法解析这个 notebook：%@\n>\n> 可以切换到源码视图查看。",
-                e.localizedDescription ?: @"不是 Jupyter 格式（没有 cells）"];
+        if (!json.length) return FTL(@"> Empty notebook.");
+        return [NSString stringWithFormat:FTL(@"> Couldn’t read this notebook: %@\n>\n> Switch to the source view to see it."),
+                e.localizedDescription ?: FTL(@"Not a Jupyter notebook (no cells)")];
     }
     NSDictionary *meta = [nb[@"metadata"] isKindOfClass:NSDictionary.class] ? nb[@"metadata"] : @{};
     NSString *lang = meta[@"language_info"][@"name"] ?: meta[@"kernelspec"][@"language"] ?: @"python";
@@ -88,7 +89,7 @@ NSString *NotebookToMarkdown(NSData *json, NSString *imageDir, NSUInteger *cellC
     NSMutableString *md = [NSMutableString string];
     NSUInteger images = 0;
     NSString *kernel = meta[@"kernelspec"][@"display_name"];
-    if ([kernel isKindOfClass:NSString.class]) [md appendFormat:@"<small>%@ · %lu 个单元格</small>\n\n", kernel, (unsigned long)cells.count];
+    if ([kernel isKindOfClass:NSString.class]) [md appendFormat:FTLP(cells.count, @"<small>%@ · %lu cell</small>\n\n", @"<small>%@ · %lu cells</small>\n\n"), kernel, (unsigned long)cells.count];
     for (NSDictionary *c in cells) {
         if (![c isKindOfClass:NSDictionary.class]) continue;
         if (cellCount) (*cellCount)++;

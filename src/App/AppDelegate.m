@@ -1,4 +1,5 @@
 #import "AppDelegate.h"
+#import "Localization.h"
 #import "TextEditorView.h"
 #import "WorkspaceSearch.h"
 #import "FileOps.h"
@@ -178,8 +179,8 @@ static const CGFloat kSidebarW = 260;
 - (void)refreshWorkspaceUI {
     NSString *root = _tree.rootPath;
     NSMenuItem *title = _rootPopup.menu.itemArray.firstObject;
-    title.title = root.lastPathComponent ?: @"未打开文件夹";
-    _rootPopup.toolTip = root ? [NSString stringWithFormat:@"%@\n点击切换工作区", root.stringByAbbreviatingWithTildeInPath] : nil;
+    title.title = root.lastPathComponent ?: FTL(@"No Folder Open");
+    _rootPopup.toolTip = root ? [NSString stringWithFormat:FTL(@"%@\nClick to switch workspaces"), root.stringByAbbreviatingWithTildeInPath] : nil;
     [_welcome reloadWithRoot:root recent:self.recentRoots];
 }
 
@@ -218,14 +219,14 @@ static const CGFloat kSidebarW = 260;
     _rootPopup.autoresizingMask = NSViewWidthSizable;
     [_rootPopup.cell setArrowPosition:NSPopUpArrowAtBottom];
     [_rootPopup.cell setLineBreakMode:NSLineBreakByTruncatingMiddle];
-    NSMenuItem *titleItem = [[NSMenuItem alloc] initWithTitle:@"未打开文件夹" action:NULL keyEquivalent:@""];
+    NSMenuItem *titleItem = [[NSMenuItem alloc] initWithTitle:FTL(@"No Folder Open") action:NULL keyEquivalent:@""];
     titleItem.image = [NSImage imageWithSystemSymbolName:@"folder" accessibilityDescription:nil];
     [_rootPopup.menu addItem:titleItem];
     _rootPopup.menu.delegate = self;
-    _rootPopup.accessibilityLabel = @"切换工作区";
+    _rootPopup.accessibilityLabel = FTL(@"Switch Workspace");
     [_sidebar addSubview:_rootPopup];
 
-    _tabs = [NSSegmentedControl segmentedControlWithLabels:@[@"文件", @"搜索"] trackingMode:NSSegmentSwitchTrackingSelectOne
+    _tabs = [NSSegmentedControl segmentedControlWithLabels:@[FTL(@"Files"), FTL(@"Search")] trackingMode:NSSegmentSwitchTrackingSelectOne
                                                     target:self action:@selector(tabChanged:)];
     _tabs.segmentDistribution = NSSegmentDistributionFillEqually;
     _tabs.controlSize = NSControlSizeSmall;

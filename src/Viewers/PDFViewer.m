@@ -1,4 +1,5 @@
 #import "PDFViewer.h"
+#import "Localization.h"
 #import "CanvasView.h"
 #import <PDFKit/PDFKit.h>
 
@@ -142,9 +143,9 @@ static const CGFloat kThumbW = 132;
 - (void)pdfChanged:(NSNotification *)n { [self notify]; }
 
 - (NSString *)info {
-    NSString *mode = _pdf.autoScales ? @"适合宽度 " : @"";
-    return [NSString stringWithFormat:@"第 %lu / %lu 页   %@%.0f%%%@", (unsigned long)self.currentPage + 1, (unsigned long)self.pageCount,
-            mode, self.zoomPercent, _pdf.document.isEncrypted ? @"   已加密" : @""];
+    NSString *mode = _pdf.autoScales ? FTL(@"Fit width ") : @"";
+    return [NSString stringWithFormat:FTL(@"Page %lu of %lu   %@%.0f%%%@"), (unsigned long)self.currentPage + 1, (unsigned long)self.pageCount,
+            mode, self.zoomPercent, _pdf.document.isEncrypted ? FTL(@"   Encrypted") : @""];
 }
 
 - (void)notify {
@@ -157,16 +158,16 @@ static const CGFloat kThumbW = 132;
     if (_tools) return _tools;
     _pageLabel = FTToolLabel(58);
     _percent = FTToolLabel(44);
-    _tools = FTToolStrip(@[FTToolButton(@"chevron.up", @"上一页", self, @selector(previousPage)),
+    _tools = FTToolStrip(@[FTToolButton(@"chevron.up", FTL(@"Previous Page"), self, @selector(previousPage)),
                            _pageLabel,
-                           FTToolButton(@"chevron.down", @"下一页", self, @selector(nextPage)),
-                           FTToolButton(@"minus.magnifyingglass", @"缩小（⌘-）", self, @selector(ftZoomOut)),
+                           FTToolButton(@"chevron.down", FTL(@"Next Page"), self, @selector(nextPage)),
+                           FTToolButton(@"minus.magnifyingglass", FTL(@"Zoom Out (⌘-)"), self, @selector(ftZoomOut)),
                            _percent,
-                           FTToolButton(@"plus.magnifyingglass", @"放大（⌘+）", self, @selector(ftZoomIn)),
-                           FTToolButton(@"arrow.left.and.right", @"适合宽度（⌘0）", self, @selector(ftZoomToFit)),
-                           FTToolButton(@"arrow.up.and.down.and.arrow.left.and.right", @"适合整页", self, @selector(ftZoomToFitPage)),
-                           FTToolButton(@"rotate.right", @"旋转当前页", self, @selector(rotatePage:)),
-                           FTToolButton(@"sidebar.left", @"缩略图（⌥⌘T）", self, @selector(toggleThumbs:))]);
+                           FTToolButton(@"plus.magnifyingglass", FTL(@"Zoom In (⌘+)"), self, @selector(ftZoomIn)),
+                           FTToolButton(@"arrow.left.and.right", FTL(@"Fit Width (⌘0)"), self, @selector(ftZoomToFit)),
+                           FTToolButton(@"arrow.up.and.down.and.arrow.left.and.right", FTL(@"Fit Page"), self, @selector(ftZoomToFitPage)),
+                           FTToolButton(@"rotate.right", FTL(@"Rotate Page"), self, @selector(rotatePage:)),
+                           FTToolButton(@"sidebar.left", FTL(@"Thumbnails (⌥⌘T)"), self, @selector(toggleThumbs:))]);
     [self notify];
     return _tools;
 }

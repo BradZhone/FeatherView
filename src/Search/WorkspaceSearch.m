@@ -1,4 +1,5 @@
 #import "WorkspaceSearch.h"
+#import "Localization.h"
 #import "FileWalker.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -27,7 +28,7 @@ static const NSUInteger kMaxLineBytes = 4096;           // longer lines (minifie
     NSError *e = nil;
     NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:p
         options:_caseSensitive ? 0 : NSRegularExpressionCaseInsensitive error:&e];
-    if (!re && error) *error = @"正则表达式有误";
+    if (!re && error) *error = FTL(@"Invalid regular expression");
     return re;
 }
 @end
