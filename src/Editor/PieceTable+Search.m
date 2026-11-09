@@ -50,6 +50,51 @@ static BOOL matchAt(const uint8_t *h, const uint8_t *n, NSUInteger len) {
                 : [self scan:needle lo:0 hi:off backward:NO];
 }
 
+- (NSData *)dataReplacingAll:(NSData *)needle with:(NSData *)repl count:(NSUInteger *)count offset:(NSUInteger *)offset {
+    NSUInteger nl = needle.length, len = self.length, rl = repl.length, at = offset ? *offset : 0, moved = at, n = 0;
+    *count = 0;
+    if (!nl || nl > len) return nil;
+    const NSUInteger chunk = 1 << 18;
+    uint8_t *buf = malloc(chunk + nl);
+    const uint8_t *nb = needle.bytes;
+    NSMutableData *out = [NSMutableData dataWithCapacity:len];
+    NSUInteger pos = 0;                                   // everything before pos is in out
+    for (NSUInteger w = 0; w < len; w += chunk) {
+        NSUInteger got = [self read:NSMakeRange(w, chunk + nl - 1) into:buf], end = MIN(chunk, got);
+        for (NSUInteger i = pos - w; i < end && i + nl <= got; ) {
+            if (!matchAt(buf + i, nb, nl)) { i++; continue; }
+            NSUInteger hit = w + i;
+            [out appendBytes:buf + (pos - w) length:hit - pos];
+            [out appendData:repl];
+            if (at >= hit + nl) moved = moved - nl + rl;
+            else if (at > hit) moved = moved - (at - hit) + rl;
+            pos = hit + nl; i += nl; n++;
+        }
+        if (pos < w + end) { [out appendBytes:buf + (pos - w) length:w + end - pos]; pos = w + end; }
+    }
+    free(buf);
+    *count = n;
+    if (offset) *offset = moved;
+    return n ? out : nil;
+}
+
+- (NSData *)dataReplacingRanges:(NSArray<NSValue *> *)ranges with:(NSData *)repl offset:(NSUInteger *)offset {
+    NSUInteger pos = 0, at = offset ? *offset : 0, moved = at, len = self.length;
+    NSMutableData *out = [NSMutableData dataWithCapacity:len];
+    for (NSValue *v in ranges) {
+        NSRange r = v.rangeValue;
+        if (r.location < pos || NSMaxRange(r) > len) continue;
+        [out appendData:[self dataInRange:NSMakeRange(pos, r.location - pos)]];
+        [out appendData:repl];
+        if (at >= NSMaxRange(r)) moved = moved - r.length + repl.length;
+        else if (at > r.location) moved = moved - (at - r.location) + repl.length;
+        pos = NSMaxRange(r);
+    }
+    [out appendData:[self dataInRange:NSMakeRange(pos, len - pos)]];
+    if (offset) *offset = moved;
+    return out;
+}
+
 - (BOOL)writeToFD:(int)fd {
     const NSUInteger chunk = 1 << 18;
     uint8_t *buf = malloc(chunk);
@@ -64,6 +109,84 @@ static BOOL matchAt(const uint8_t *h, const uint8_t *n, NSUInteger len) {
     }
     free(buf);
     return ok;
+}
+
+@end
+
+static const NSUInteger kUnicodeMaxBytes = 64u << 20, kStep = 4096;
+
+@implementation PTUnicodeIndex {
+    NSString *_text;
+    NSData *_bytes;
+    NSMutableData *_marks;                  // UTF-16 index at every kStep-th byte (on a character start)
+}
+
++ (BOOL)needsUnicode:(NSString *)n {
+    for (NSUInteger i = 0; i < n.length; i++) if ([n characterAtIndex:i] >= 0x80) return ![n.lowercaseString isEqualToString:n.uppercaseString];
+    return NO;
+}
+
+- (instancetype)initWithTable:(PieceTable *)t {
+    if (t.length > kUnicodeMaxBytes || !(self = [super init])) return nil;
+    _bytes = [t dataInRange:NSMakeRange(0, t.length)];
+    _text = [[NSString alloc] initWithData:_bytes encoding:NSUTF8StringEncoding];
+    if (!_text) return nil;
+    const uint8_t *b = _bytes.bytes;
+    _marks = [NSMutableData dataWithLength:(_bytes.length / kStep + 1) * sizeof(NSUInteger)];
+    NSUInteger *m = _marks.mutableBytes, u = 0;
+    for (NSUInteger i = 0; i < _bytes.length; i++) {
+        if (i % kStep == 0) m[i / kStep] = u;
+        uint8_t c = b[i];
+        if ((c & 0xC0) != 0x80) u += c >= 0xF0 ? 2 : 1;
+    }
+    return self;
+}
+
+// kStep-aligned positions may fall inside a character; continuation bytes add no UTF-16 units, so the count holds.
+- (NSUInteger)utf16For:(NSUInteger)byte {
+    byte = MIN(byte, _bytes.length);
+    const uint8_t *b = _bytes.bytes;
+    NSUInteger k = byte / kStep, u = ((NSUInteger *)_marks.bytes)[k];
+    for (NSUInteger i = k * kStep; i < byte; i++) if ((b[i] & 0xC0) != 0x80) u += b[i] >= 0xF0 ? 2 : 1;
+    return u;
+}
+
+- (NSUInteger)byteFor:(NSUInteger)u16 {
+    const NSUInteger *m = _marks.bytes;
+    NSUInteger lo = 0, hi = _marks.length / sizeof(NSUInteger) - 1;
+    while (lo < hi) { NSUInteger mid = (lo + hi + 1) / 2; if (m[mid] <= u16) lo = mid; else hi = mid - 1; }
+    const uint8_t *b = _bytes.bytes;
+    NSUInteger i = lo * kStep, u = m[lo];
+    while (i < _bytes.length && (u < u16 || (b[i] & 0xC0) == 0x80)) { if ((b[i] & 0xC0) != 0x80) u += b[i] >= 0xF0 ? 2 : 1; i++; }
+    return i;
+}
+
+- (NSRange)bytesOf:(NSRange)r { NSUInteger a = [self byteFor:r.location]; return NSMakeRange(a, [self byteFor:NSMaxRange(r)] - a); }
+
+- (NSRange)find:(NSString *)n from:(NSUInteger)off backward:(BOOL)back {
+    NSUInteger u = [self utf16For:off], len = _text.length;
+    NSStringCompareOptions o = NSCaseInsensitiveSearch | (back ? NSBackwardsSearch : 0);
+    NSRange r = back ? [_text rangeOfString:n options:o range:NSMakeRange(0, u)] : [_text rangeOfString:n options:o range:NSMakeRange(u, len - u)];
+    if (r.location == NSNotFound) r = back ? [_text rangeOfString:n options:o range:NSMakeRange(u, len - u)] : [_text rangeOfString:n options:o range:NSMakeRange(0, u)];
+    return r.location == NSNotFound ? r : [self bytesOf:r];
+}
+
+- (NSArray<NSValue *> *)allMatches:(NSString *)n {
+    NSMutableArray *out = [NSMutableArray array];
+    NSUInteger u = 0, len = _text.length;
+    while (u < len) {
+        NSRange r = [_text rangeOfString:n options:NSCaseInsensitiveSearch range:NSMakeRange(u, len - u)];
+        if (r.location == NSNotFound || !r.length) break;
+        [out addObject:[NSValue valueWithRange:[self bytesOf:r]]];
+        u = NSMaxRange(r);
+    }
+    return out;
+}
+
+- (BOOL)range:(NSRange)bytes matches:(NSString *)n {
+    if (NSMaxRange(bytes) > _bytes.length || !bytes.length) return NO;
+    NSUInteger a = [self utf16For:bytes.location], b = [self utf16For:NSMaxRange(bytes)];
+    return [[_text substringWithRange:NSMakeRange(a, b - a)] compare:n options:NSCaseInsensitiveSearch] == NSOrderedSame;
 }
 
 @end

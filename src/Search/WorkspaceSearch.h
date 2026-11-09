@@ -25,6 +25,7 @@
 @property (nonatomic) NSUInteger maxHits;        // default 2000
 @property (nonatomic) BOOL disableRipgrep;       // for tests
 @property (nonatomic, readonly) BOOL usedRipgrep;
+@property (nonatomic, readonly, copy) NSString *lastError;   // set before onDone when the search itself failed
 
 + (NSString *)ripgrepPath;
 - (void)search:(NSString *)query root:(NSString *)root options:(SearchOptions *)options

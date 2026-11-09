@@ -67,7 +67,7 @@ Measured on the same workspace with the same files; median of three runs. Memory
 
 | Area | Capabilities |
 |---|---|
-| Text and code | Editing with undo/redo, find and replace, go to line; soft wrap that follows the window width (word-aware, CJK-aware, indentation-preserving); minimap; highlighting for more than 40 languages; UTF-8, UTF-16 and GB18030; CRLF line endings preserved |
+| Text and code | Editing with undo/redo, find and replace, go to line; soft wrap that follows the window width (word-aware, CJK-aware, indentation-preserving); minimap; highlighting for more than 40 languages; UTF-8, UTF-16, GB18030, Big5, Shift-JIS, EUC-KR and Windows-1252 detected and saved back unchanged; CRLF line endings preserved; Unicode-aware find |
 | Markdown | Native rendering (tables, task lists, highlighted code, images, badges); source, side-by-side and preview layouts with synchronized scrolling |
 | HTML | WebKit rendering with scripts and local resources; side-by-side source view |
 | CSV, TSV, JSON Lines | Table view with sorting, per-column filtering, copy as TSV and jump to source; up to 500,000 rows |
@@ -75,7 +75,7 @@ Measured on the same workspace with the same files; median of three runs. Memory
 | Images, SVG, PDF | Zoom and rotation; vector SVG rendering; PDF thumbnails, two-page layout and search |
 | SQLite | Read-only browsing of tables and views, schema display, ad-hoc SQL queries |
 | Archives | Listing of zip, tar.gz, 7z, rar, jar, apk, whl, deb, iso and other formats; double-click to extract and open a single entry |
-| Workspace | File tree with multi-selection and batch operations, untitled drafts, session restore, light/dark/system appearance, auto-save |
+| Workspace | File tree that follows changes made outside the app, multi-selection and batch operations, drag and drop, untitled drafts, session restore, light/dark/system appearance, auto-save |
 | Languages | English and Simplified Chinese, selected automatically from the system language |
 
 ## Installation
@@ -104,7 +104,7 @@ FeatherView requires macOS 12 or later. Installing [ripgrep](https://github.com/
 
 ## Usage
 
-Open a folder with **File → Open Folder…** (⌘O), by dropping it on the Dock icon, or from the command line:
+Open a folder with **File → Open Folder…** (⌘O), by dropping it on the Dock icon or the window, or from the command line:
 
 ```bash
 open -a FeatherView ~/projects/my-app
@@ -122,13 +122,13 @@ Each file opens in the view that suits it. Use **View → Preview** (⇧⌘V), *
 | New document (draft) | ⌘N | Find / Find and replace | ⌘F / ⌥⌘F |
 | Save / Save all | ⌘S / ⌥⌘S | Go to line | ⌘L |
 | Close tab / Reopen closed tab | ⌘W / ⇧⌘T | Preview / Side-by-side preview | ⇧⌘V / ⌥⌘V |
-| Word wrap | ⌥Z | Minimap | ⌥⌘M |
+| Word wrap | ⌥⌘Z | Minimap | ⌥⌘M |
 | Show hidden files | ⇧⌘. | Zoom in / out / reset | ⌘= / ⌘- / ⌘0 |
 | Open as text / hex | ⌥⌘1 / ⌥⌘2 | Settings | ⌘, |
 
 ## Configuration
 
-**Settings** (⌘,) controls the appearance (light, dark or system), whether hidden files are shown, names that are always hidden (for example `.git` and `.DS_Store`, wildcards allowed), folders skipped by search (for example `node_modules`), whether `.gitignore` is respected, auto-save, word wrap and the minimap.
+**Settings** (⌘,) controls the appearance (light, dark or system), whether hidden files are shown, names that are always hidden (for example `.git` and `.DS_Store`, wildcards allowed), folders skipped by search (for example `node_modules`), whether `.gitignore` is respected, auto-save, word wrap, the minimap, and whether the Markdown preview loads images from the web.
 
 **FeatherView → Default Apps…** lets you choose which file types open in FeatherView when double-clicked in Finder; deselecting a type restores the previous application. Installing FeatherView never changes a default by itself.
 
@@ -140,7 +140,7 @@ Each file opens in the view that suits it. Use **View → Preview** (⇧⌘V), *
 src/Support   Localization
 src/App       Application delegate, window, menus, tabs and document management, settings
 src/Editor    Text buffer (piece table), editor view, syntax highlighting
-src/Files     File tree, traversal and filtering, file operations, type detection
+src/Files     File tree, folder watching, traversal and filtering, file operations, type detection
 src/Search    Workspace search, Quick Open
 src/Preview   Markdown, HTML, table, tree and notebook views
 src/Viewers   Image, SVG, PDF, hex, SQLite and archive viewers
@@ -155,7 +155,7 @@ Design decisions are described in [docs/architecture.md](docs/architecture.md). 
 
 - The application is not notarized; the first launch must be allowed manually (see [Installation](#installation)).
 - There is no language server support (go to definition, completion, diagnostics) and no Git integration.
-- Characters beyond 32 KB on a single line are not displayed (an issue only for extreme minified code). Files larger than one million lines or 32 MB are not soft-wrapped.
+- Characters beyond 32 KB on a single line are not displayed, though they are kept and edited correctly (an issue only for extreme minified code). Files larger than one million lines or 32 MB are not soft-wrapped.
 - `.html` cannot be made the default for FeatherView, because macOS ties it to the default web browser.
 
 ## License

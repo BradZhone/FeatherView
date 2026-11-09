@@ -8,7 +8,7 @@
     [self.window makeFirstResponder:self];
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
     if ([self minimapPressAt:p]) return;
-    if (_markedText) { [self.inputContext discardMarkedText]; [self unmarkText]; }
+    if (_markedText) { [self unmarkText]; [self.inputContext discardMarkedText]; }      // a click commits the composition
     NSUInteger off = [self offsetAtPoint:p];
     _desiredX = -1;
     if (e.clickCount == 2) {
@@ -28,17 +28,34 @@
 }
 
 - (void)mouseUp:(NSEvent *)e {
+    [_dragScroll invalidate]; _dragScroll = nil;
     if (_mapDragging) { _mapDragging = NO; self.needsDisplay = YES; }
     [super mouseUp:e];
+}
+
+// Dragging a selection above or below the view keeps scrolling while the mouse is held still there.
+- (void)dragTo:(NSPoint)p {
+    NSRect b = self.bounds;
+    CGFloat over = p.y < 0 ? p.y : p.y > b.size.height ? p.y - b.size.height : 0;
+    if (over) self.scrollY += (over < 0 ? -1 : 1) * _lineHeight * MIN(5, 1 + fabs(over) / 40);
+    _caret = [self offsetAtPoint:NSMakePoint(p.x, MIN(MAX(p.y, 0), b.size.height - 1))];
+    [self scrollCaretVisible];
+    [self notifyChange];
+    if (over && !_dragScroll) {
+        __weak TextEditorView *weakSelf = self;
+        _dragScroll = [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *t) {
+            TextEditorView *me = weakSelf;
+            if (!me || !(NSEvent.pressedMouseButtons & 1)) { [t invalidate]; if (me) me->_dragScroll = nil; return; }
+            [me dragTo:me->_dragPoint];
+        }];
+    } else if (!over) { [_dragScroll invalidate]; _dragScroll = nil; }
 }
 
 - (void)canvasMouseDragged:(NSEvent *)e {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
     if (_mapDragging) { [self minimapDragTo:p]; return; }
-    if (p.y < 0) self.scrollY -= _lineHeight;
-    else if (p.y > self.bounds.size.height) self.scrollY += _lineHeight;
-    _caret = [self offsetAtPoint:p];
-    [self notifyChange];
+    _dragPoint = p;
+    [self dragTo:p];
 }
 
 #pragma mark Keys
@@ -125,6 +142,54 @@
     if (sel.length) [self replaceRange:sel withString:@"" kind:GroupOther];
 }
 
+// Emacs keys that AppKit's standard key bindings send (⌃A ⌃E ⌃K ⌃Y ⌃T ⌃O …).
+- (void)moveForward:(id)s  { [self moveRight:s]; }
+- (void)moveBackward:(id)s { [self moveLeft:s]; }
+- (void)moveForwardAndModifySelection:(id)s  { [self moveRightAndModifySelection:s]; }
+- (void)moveBackwardAndModifySelection:(id)s { [self moveLeftAndModifySelection:s]; }
+- (void)moveToBeginningOfParagraph:(id)s { [self moveToLeftEndOfLine:s]; }
+- (void)moveToEndOfParagraph:(id)s { [self moveToRightEndOfLine:s]; }
+- (void)moveToBeginningOfParagraphAndModifySelection:(id)s { [self moveToLeftEndOfLineAndModifySelection:s]; }
+- (void)moveToEndOfParagraphAndModifySelection:(id)s { [self moveToRightEndOfLineAndModifySelection:s]; }
+- (void)moveParagraphBackwardAndModifySelection:(id)s { [self moveToLeftEndOfLineAndModifySelection:s]; }
+- (void)moveParagraphForwardAndModifySelection:(id)s { [self moveToRightEndOfLineAndModifySelection:s]; }
+- (void)deleteForwardByDecomposingPreviousCharacter:(id)s { [self deleteForward:s]; }
+- (void)deleteBackwardByDecomposingPreviousCharacter:(id)s { [self deleteBackward:s]; }
+- (void)deleteWordForward:(id)s {
+    NSUInteger p = [self wordBoundary:_caret forward:YES];
+    if (p > _caret) [self replaceRange:NSMakeRange(_caret, p - _caret) withString:@"" kind:GroupOther];
+}
+- (void)deleteToEndOfParagraph:(id)s {                     // ⌃K: to the end of the line, or the line break
+    NSUInteger e = self.lineEndOff;
+    if (e == _caret) e = [self nextCharOffset:_caret];
+    if (e <= _caret) return;
+    NSRange r = NSMakeRange(_caret, e - _caret);
+    _killed = [[NSString alloc] initWithData:[_buf dataInRange:r] encoding:NSUTF8StringEncoding];
+    [self replaceRange:r withString:@"" kind:GroupOther];
+}
+- (void)deleteToEndOfLine:(id)s { [self deleteToEndOfParagraph:s]; }
+- (void)yank:(id)s { if (_killed.length) [self replaceRange:self.selection withString:_killed kind:GroupOther]; }
+- (void)insertNewlineIgnoringFieldEditor:(id)s {            // ⌃O: a line break after the caret
+    NSUInteger c = _caret;
+    [self replaceRange:self.selection withString:_buf.usesCRLF ? @"\r\n" : @"\n" kind:GroupOther];
+    [self moveCaretTo:c extend:NO];
+}
+- (void)transpose:(id)s {                                   // ⌃T: swap the characters around the caret
+    if (self.selection.length || _caret == 0) return;
+    NSUInteger L = [_buf lineForOffset:_caret], c = _caret;
+    if (c >= [_buf lineEnd:L]) c = [self prevCharOffset:c];
+    NSUInteger a = [self prevCharOffset:c], b = [self nextCharOffset:c];
+    if (a >= c || b <= c || a < [_buf lineStart:L]) return;
+    NSString *x = [[NSString alloc] initWithData:[_buf dataInRange:NSMakeRange(a, c - a)] encoding:NSUTF8StringEncoding];
+    NSString *y = [[NSString alloc] initWithData:[_buf dataInRange:NSMakeRange(c, b - c)] encoding:NSUTF8StringEncoding];
+    if (x && y) [self replaceRange:NSMakeRange(a, b - a) withString:[y stringByAppendingString:x] kind:GroupOther];
+}
+- (void)centerSelectionInVisibleArea:(id)s {
+    CGFloat x = 0;
+    NSUInteger row = [self rowOfOffset:_caret x:&x];
+    self.scrollY = MAX(0, 4 + row * _lineHeight - self.bounds.size.height / 2);
+}
+
 - (void)deleteWordBackward:(id)s {
     NSUInteger p = [self wordBoundary:_caret forward:NO];
     if (p < _caret) [self replaceRange:NSMakeRange(p, _caret - p) withString:@"" kind:GroupOther];
@@ -145,27 +210,83 @@
     _coalesceBroken = YES;
 }
 
-- (void)insertTab:(id)s { [self replaceRange:self.selection withString:_indentUnit kind:GroupTyping]; }
+// Tab / Shift-Tab with a selection over several lines indent / outdent each line, as one undo step.
+- (BOOL)rewriteSelectedLines:(NSString *(^)(NSString *line))f {
+    NSRange sel = self.selection;
+    NSUInteger L0 = [_buf lineForOffset:sel.location], L1 = [_buf lineForOffset:MAX(sel.location, NSMaxRange(sel) - (sel.length ? 1 : 0))];
+    NSUInteger a = [_buf lineStart:L0], b = [_buf lineEnd:L1];
+    NSString *block = [[NSString alloc] initWithData:[_buf dataInRange:NSMakeRange(a, b - a)] encoding:NSUTF8StringEncoding];
+    if (!block) return NO;
+    NSString *nl = _buf.usesCRLF ? @"\r\n" : @"\n";
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *l in [block componentsSeparatedByString:nl]) [out addObject:f(l)];
+    NSString *joined = [out componentsJoinedByString:nl];
+    if ([joined isEqualToString:block]) return YES;
+    [self replaceRange:NSMakeRange(a, b - a) withString:joined kind:GroupOther];
+    _anchor = a;                                               // keep the lines selected for the next Tab
+    _coalesceBroken = YES;
+    [self notifyChange];
+    return YES;
+}
+
+static NSString *outdented(NSString *l, NSString *unit) {
+    if ([l hasPrefix:@"\t"]) return [l substringFromIndex:1];
+    NSUInteger n = 0;
+    while (n < l.length && n < MAX(unit.length, (NSUInteger)1) && [l characterAtIndex:n] == ' ') n++;
+    if (n == 0 && [unit isEqualToString:@"\t"]) while (n < l.length && n < 4 && [l characterAtIndex:n] == ' ') n++;
+    return [l substringFromIndex:n];
+}
+
+- (BOOL)selectionSpansLines {
+    NSRange sel = self.selection;
+    return sel.length && [_buf lineForOffset:sel.location] != [_buf lineForOffset:NSMaxRange(sel) - 1];
+}
+
+- (void)insertTab:(id)s {
+    NSString *unit = _indentUnit;
+    if (self.selectionSpansLines) { [self rewriteSelectedLines:^NSString *(NSString *l) { return l.length ? [unit stringByAppendingString:l] : l; }]; return; }
+    [self replaceRange:self.selection withString:_indentUnit kind:GroupTyping];
+}
+
+- (void)insertBacktab:(id)s {
+    NSString *unit = _indentUnit;
+    [self rewriteSelectedLines:^NSString *(NSString *l) { return outdented(l, unit); }];
+}
 - (void)cancelOperation:(id)s { if (self.selection.length) [self moveCaretTo:_caret extend:NO]; }
 
 #pragma mark NSTextInputClient (ranges are UTF-16 indices within the caret line)
 
 static NSString *plain(id s) { return [s isKindOfClass:NSAttributedString.class] ? [s string] : s; }
 
+// A replacement range (UTF-16, caret line) as a byte range; NSNotFound means the selection.
+- (NSRange)bytesForReplacement:(NSRange)rr {
+    if (rr.location == NSNotFound) return self.selection;
+    NSUInteger L = [_buf lineForOffset:_caret];
+    NSUInteger a = [self byteOffsetForUTF16:rr.location inLine:L], b = [self byteOffsetForUTF16:NSMaxRange(rr) inLine:L];
+    return NSMakeRange(MIN(a, b), MAX(a, b) - MIN(a, b));
+}
+
 - (void)insertText:(id)string replacementRange:(NSRange)rr {
     NSString *s = plain(string);
     BOOL wasMarked = _markedText != nil;
     _markedText = nil;
     if (wasMarked) [self refreshRowsOfLine:[_buf lineForOffset:_caret]];
-    if (!s.length) { [self notifyChange]; return; }
-    BOOL single = !wasMarked && s.length <= 2 && ![s containsString:@"\n"];
-    [self replaceRange:self.selection withString:s kind:single ? GroupTyping : GroupOther];
+    if (!s.length && rr.location == NSNotFound) { [self notifyChange]; return; }
+    if ([s containsString:@"\n"] || [s containsString:@"\r"]) {        // dictation, services: the file's line endings
+        s = [[s stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"] stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+        if (_buf.usesCRLF) s = [s stringByReplacingOccurrencesOfString:@"\n" withString:@"\r\n"];
+    }
+    // press-and-hold accents and reconversion replace text before the caret
+    NSRange target = wasMarked ? self.selection : [self bytesForReplacement:rr];
+    BOOL single = !wasMarked && rr.location == NSNotFound && s.length <= 2 && ![s containsString:@"\n"];
+    [self replaceRange:target withString:s kind:single ? GroupTyping : GroupOther];
     if (!single) _coalesceBroken = YES;
 }
 
 - (void)setMarkedText:(id)string selectedRange:(NSRange)sel replacementRange:(NSRange)rr {
     NSString *s = plain(string);
-    if (!_markedText && self.selection.length) [self replaceRange:self.selection withString:@"" kind:GroupOther];
+    NSRange target = _markedText ? NSMakeRange(NSNotFound, 0) : [self bytesForReplacement:rr];
+    if (target.location != NSNotFound && target.length) [self replaceRange:target withString:@"" kind:GroupOther];
     _markedText = s.length ? [s copy] : nil;
     _markedSel = sel;
     [self refreshRowsOfLine:[_buf lineForOffset:_caret]];

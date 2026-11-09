@@ -55,7 +55,8 @@ static inline uint8_t lcb(uint8_t c) { return (c >= 'A' && c <= 'Z') ? c + 32 : 
     NSData *f = [find dataUsingEncoding:NSUTF8StringEncoding];
     if (!f.length) return NO;
     BOOL replaced = NO;
-    if ([self selectionEquals:f]) {
+    PTUnicodeIndex *ui = [self unicodeIndexFor:find];
+    if (ui ? [ui range:self.selection matches:find] : [self selectionEquals:f]) {
         [self replaceRange:self.selection withString:repl kind:GroupOther];
         _coalesceBroken = YES;
         replaced = YES;
@@ -64,39 +65,28 @@ static inline uint8_t lcb(uint8_t c) { return (c >= 'A' && c <= 'Z') ? c + 32 : 
     return replaced;
 }
 
+// One pass over the text, then the buffer is swapped: per-match edits made this quadratic.
 - (NSUInteger)replaceAll:(NSString *)find with:(NSString *)repl {
     NSData *f = [find dataUsingEncoding:NSUTF8StringEncoding];
     NSData *r = [repl dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
     if (!f.length) return 0;
+    NSUInteger count = 0, caret = _caret;
+    PTUnicodeIndex *ui = [self unicodeIndexFor:find];
+    NSArray *hits = ui ? [ui allMatches:find] : nil;
+    if (ui) count = hits.count;
+    NSData *out = ui ? (count ? [_buf dataReplacingRanges:hits with:r offset:&caret] : nil)
+                     : [_buf dataReplacingAll:f with:r count:&count offset:&caret];
+    if (!count) return 0;
     EditGroup *g = [EditGroup new];
     g.ops = [NSMutableArray array];
     g.caretBefore = _caret;
     g.kind = GroupOther;
-    NSUInteger off = 0, count = 0;
-    CGFloat top = [self beginBulkEdit];
-    while (off <= _buf.length) {
-        NSUInteger hit = [_buf find:f from:off backward:NO];
-        if (hit == NSNotFound || hit < off) break;          // wrapped around: done
-        EditOp *d = [EditOp new];
-        d.isInsert = NO; d.offset = hit; d.bytes = [_buf dataInRange:NSMakeRange(hit, f.length)];
-        [_buf deleteRange:NSMakeRange(hit, f.length)];
-        [g.ops addObject:d];
-        if (r.length) {
-            EditOp *i = [EditOp new];
-            i.isInsert = YES; i.offset = hit; i.bytes = r;
-            [_buf insertBytes:r.bytes length:r.length at:hit];
-            [g.ops addObject:i];
-        }
-        off = hit + r.length;
-        count++;
-    }
-    [self endBulkEdit:top];
-    if (!count) return 0;
-    _editCount++;
+    g.swapBuffer = [[PieceTable alloc] initWithData:out];
+    [self applyGroup:g inverse:NO];                    // g.swapBuffer now holds the text before
     g.serial = ++_serial;
-    _caret = _anchor = MIN(_caret, _buf.length);
+    _caret = _anchor = MIN(caret, _buf.length);
     g.caretAfter = _caret;
-    [_undo addObject:g];
+    [self pushUndo:g];
     [_redo removeAllObjects];
     _coalesceBroken = YES;
     [self scrollCaretVisible];

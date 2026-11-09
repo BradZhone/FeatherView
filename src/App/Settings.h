@@ -13,6 +13,7 @@ extern NSNotificationName const FTSettingsDidChange;
 @property (nonatomic) NSInteger autoSaveMode;                     // AutoSaveMode
 @property (nonatomic) BOOL showsMinimap;
 @property (nonatomic) BOOL wordWrap;                              // soft wrap in the editor (default YES)
+@property (nonatomic) BOOL remoteImages;                          // Markdown preview loads https images (default YES)
 - (void)resetFileLists;
 - (void)apply;                    // pushes the lists to the file walker; call once at launch
 + (NSArray<NSString *> *)listFromString:(NSString *)s;            // "a, b  c" → [a, b, c]

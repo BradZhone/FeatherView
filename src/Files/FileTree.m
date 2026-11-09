@@ -35,6 +35,7 @@
     __weak NSOutlineView *_ov;
     FileNode *_root;
     NSInteger _suppressSelect;
+    NSUInteger _refreshGen;
 }
 
 - (instancetype)initWithOutlineView:(NSOutlineView *)ov {
@@ -69,17 +70,15 @@
 
 - (void)setShowHidden:(BOOL)h { _showHidden = h; [self reload]; }
 
-- (NSArray<FileNode *> *)scan:(FileNode *)node reuse:(NSArray<FileNode *> *)old {
-    NSMutableDictionary *byName = [NSMutableDictionary dictionary];
-    for (FileNode *n in old) byName[n.name] = n;
-    NSString *dirPath = node.path;
-    NSMutableArray *out = [NSMutableArray array];
+// One folder's entries as name → is a folder; safe on any thread.
+static NSDictionary<NSString *, NSNumber *> *listFolder(NSString *dirPath, BOOL showHidden) {
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
     DIR *d = opendir(dirPath.fileSystemRepresentation);
     if (!d) return out;
     struct dirent *e;
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (!_showHidden && e->d_name[0] == '.') continue;
+        if (!showHidden && e->d_name[0] == '.') continue;
         if (FWIsAlwaysHidden(@(e->d_name))) continue;
         NSString *name = [NSFileManager.defaultManager stringWithFileSystemRepresentation:e->d_name length:strlen(e->d_name)];
         BOOL dir = e->d_type == DT_DIR;
@@ -87,12 +86,27 @@
             struct stat st;
             dir = stat([dirPath stringByAppendingPathComponent:name].fileSystemRepresentation, &st) == 0 && S_ISDIR(st.st_mode);
         }
+        out[name] = @(dir);
+    }
+    closedir(d);
+    return out;
+}
+
+- (NSArray<FileNode *> *)scan:(FileNode *)node reuse:(NSArray<FileNode *> *)old {
+    return [self nodesFor:listFolder(node.path, _showHidden) parent:node reuse:old];
+}
+
+- (NSArray<FileNode *> *)nodesFor:(NSDictionary<NSString *, NSNumber *> *)entries parent:(FileNode *)node reuse:(NSArray<FileNode *> *)old {
+    NSMutableDictionary *byName = [NSMutableDictionary dictionary];
+    for (FileNode *n in old) byName[n.name] = n;
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *name in entries) {
+        BOOL dir = entries[name].boolValue;
         FileNode *n = byName[name];
         if (!n || n.isDir != dir) { n = [FileNode new]; n.name = name; n.isDir = dir; }
         n.parent = node;
         [out addObject:n];
     }
-    closedir(d);
     [out sortUsingComparator:^NSComparisonResult(FileNode *a, FileNode *b) {
         if (a.isDir != b.isDir) return a.isDir ? NSOrderedAscending : NSOrderedDescending;
         return [a.name localizedStandardCompare:b.name];
@@ -109,6 +123,51 @@
     if (!n || !n->_children) return;
     n->_children = [self scan:n reuse:n->_children];
     for (FileNode *c in n->_children) if (c.isDir) [self rescan:c];
+}
+
+// Folders already shown are re-read on a background queue; the outline only reloads if something changed.
+- (void)refreshInBackground {
+    if (!_root) return;
+    NSMutableArray<FileNode *> *dirs = [NSMutableArray array], *stack = [NSMutableArray arrayWithObject:_root];
+    while (stack.count) {
+        FileNode *n = stack.lastObject; [stack removeLastObject];
+        if (!n->_children) continue;
+        [dirs addObject:n];
+        for (FileNode *c in n->_children) if (c.isDir) [stack addObject:c];
+    }
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    for (FileNode *n in dirs) [paths addObject:n.path];
+    NSUInteger gen = ++_refreshGen;
+    BOOL hidden = _showHidden;
+    FileNode *root = _root;
+    __weak FileTree *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSMutableArray *lists = [NSMutableArray array];
+        for (NSString *p in paths) [lists addObject:listFolder(p, hidden)];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FileTree *me = weakSelf;
+            if (!me || me->_refreshGen != gen || me->_root != root) return;
+            BOOL changed = NO;
+            for (NSUInteger i = 0; i < dirs.count; i++) {
+                FileNode *n = dirs[i];
+                NSDictionary *now = lists[i];
+                if (now.count == n->_children.count) {
+                    BOOL same = YES;
+                    for (FileNode *c in n->_children) if (![now[c.name] isEqual:@(c.isDir)]) { same = NO; break; }
+                    if (same) continue;
+                }
+                n->_children = [me nodesFor:now parent:n reuse:n->_children];
+                changed = YES;
+            }
+            if (!changed) return;
+            NSArray *sel = me.selectedPaths;
+            me->_suppressSelect++;
+            [me->_ov reloadData];
+            me->_suppressSelect--;
+            if (sel.count) [me revealPaths:sel];
+            if (me.onRefreshed) me.onRefreshed();
+        });
+    });
 }
 
 - (void)reload {

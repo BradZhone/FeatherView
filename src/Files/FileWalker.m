@@ -70,7 +70,7 @@ void FWWalkFiltered(NSString *root, BOOL includeHidden, FWPathFilter *filter, BO
     size_t rootLen = strlen(rootC);
     while (rootLen > 1 && rootC[rootLen - 1] == '/') rootC[--rootLen] = 0;
     char *argv[] = {rootC, NULL};
-    FTS *fts = fts_open(argv, FTS_PHYSICAL | FTS_NOCHDIR, NULL);
+    FTS *fts = fts_open(argv, FTS_PHYSICAL | FTS_COMFOLLOW | FTS_NOCHDIR, NULL);      // a symlinked workspace folder is followed
     if (!fts) { free(rootC); return; }
     NSSet *skip = FWSkippedDirs();
     NSArray *never = FWAlwaysHidden();
@@ -319,33 +319,39 @@ static BOOL tokenMatches(FWFilterToken *k, NSString *rel, NSArray<NSString *> *c
     return NO;
 }
 
-// rg applies globs without "/" to the base name at any depth, like our component rules. Excludes rg can't
-// express are left to us; if one include can't be expressed, rg gets none (it must never skip a file we keep).
+// What rg can apply itself without changing which files it may see. An include glob would override
+// .gitignore and hidden-file rules, so includes are only passed when they are all extensions, as a file
+// type (types respect ignore files); everything else is checked on rg's output.
+static NSString *caseless(NSString *t) {
+    NSMutableString *out = [NSMutableString string];
+    for (NSUInteger i = 0; i < t.length; i++) {
+        unichar c = [t characterAtIndex:i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) [out appendFormat:@"[%C%C]", (unichar)(c | 32), (unichar)(c & ~32)];
+        else if ((c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '+') [out appendFormat:@"%C", c];
+        else return nil;
+    }
+    return out;
+}
+
 - (NSArray<NSString *> *)ripgrepArguments {
-    NSMutableArray *args = [NSMutableArray array], *includes = [NSMutableArray array];
-    BOOL includesOK = YES;
+    NSMutableArray *args = [NSMutableArray array], *types = [NSMutableArray array];
+    BOOL onlyExtensions = YES;
     for (FWFilterToken *k in _tokens) {
+        if (!k.exclude) {
+            NSString *g = k.kind == FTokDotExt ? caseless(k.text) : nil;
+            if (g) [types addObjectsFromArray:@[@"--type-add", [@"fvinclude:*" stringByAppendingString:g]]];
+            else onlyExtensions = NO;
+            continue;
+        }
         NSMutableArray *globs = [NSMutableArray array];
         switch (k.kind) {
-            case FTokWord:
-                [globs addObject:k.text];
-                if (!k.exclude) [globs addObjectsFromArray:@[[@"*." stringByAppendingString:k.text], [NSString stringWithFormat:@"**/%@/**", k.text]]];
-                break;
+            case FTokWord: case FTokName: case FTokCompGlob: [globs addObject:k.text]; break;
             case FTokDotExt: [globs addObject:[@"*" stringByAppendingString:k.text]]; break;
-            case FTokName: case FTokCompGlob:
-                [globs addObject:k.text];
-                if (!k.exclude) [globs addObject:[NSString stringWithFormat:@"**/%@/**", k.text]];
-                break;
-            case FTokPrefix: case FTokPathGlob:
-                if (!k.exclude) includesOK = NO;
-                break;
+            case FTokPrefix: case FTokPathGlob: break;
         }
-        for (NSString *g in globs) {
-            if (k.exclude) [args addObjectsFromArray:@[@"--iglob", [@"!" stringByAppendingString:g]]];
-            else [includes addObjectsFromArray:@[@"--iglob", g]];
-        }
+        for (NSString *g in globs) [args addObjectsFromArray:@[@"--iglob", [@"!" stringByAppendingString:g]]];
     }
-    if (includesOK) [args addObjectsFromArray:includes];
+    if (onlyExtensions && types.count) { [args addObjectsFromArray:types]; [args addObjectsFromArray:@[@"--type", @"fvinclude"]]; }
     return args;
 }
 

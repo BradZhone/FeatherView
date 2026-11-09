@@ -22,6 +22,7 @@
 #include <sqlite3.h>
 #import <PDFKit/PDFKit.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 
 static int failures = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
@@ -33,6 +34,7 @@ static NSString *fileText(NSString *p, NSStringEncoding enc) {
     return [NSString stringWithContentsOfFile:p encoding:enc error:nil];
 }
 
+static NSString *mkfile(NSString *dir, NSString *name, NSString *content);
 static ContentController *cc;
 static NSWindow *win;
 
@@ -125,6 +127,62 @@ static void crlfAndEncodings(NSString *dir) {
     [ed insertText:@"追加" replacementRange:NSMakeRange(NSNotFound, 0)];
     CHECK([ed save:nil], "save GB18030");
     CHECK([fileText(g, gb) isEqualToString:@"中文内容\n第二行\n追加"], "GB18030 round-trip");
+
+    // Other legacy encodings are recognised, not decoded as (garbled) GB18030.
+    struct { CFStringEncoding cf; NSString *text; } legacy[] = {
+        {kCFStringEncodingShiftJIS, @"日本語のテキストです。東京都、こんにちは。カタカナ\n"},
+        {kCFStringEncodingEUC_KR, @"한국어 텍스트입니다. 안녕하세요 서울\n"},
+        {kCFStringEncodingBig5, @"繁體中文的文字。台北市，你好，這是一個測試。\n"},
+        {kCFStringEncodingWindowsLatin1, @"Café “quoted” – naïve résumé €5\n"},
+    };
+    for (size_t k = 0; k < sizeof legacy / sizeof *legacy; k++) {
+        NSStringEncoding e = CFStringConvertEncodingToNSStringEncoding(legacy[k].cf);
+        NSString *lp = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"legacy%zu.txt", k]];
+        [[legacy[k].text dataUsingEncoding:e] writeToFile:lp atomically:YES];
+        ed = openEditor(lp);
+        CHECK([text(ed) isEqualToString:legacy[k].text], "%s decoded correctly: %s", FKEncodingName(e).UTF8String, text(ed).UTF8String);
+        [ed insertText:@"x" replacementRange:NSMakeRange(NSNotFound, 0)];
+        CHECK([ed save:nil] && [fileText(lp, e) isEqualToString:[@"x" stringByAppendingString:legacy[k].text]], "%s saved back in the same encoding", FKEncodingName(e).UTF8String);
+        [cc closeActive];
+    }
+
+    // UTF-16 keeps its byte order and BOM.
+    for (int be = 0; be < 2; be++) {
+        NSString *up = [dir stringByAppendingPathComponent:be ? @"be.txt" : @"le.txt"];
+        NSMutableData *raw = [NSMutableData dataWithBytes:be ? "\xFE\xFF" : "\xFF\xFE" length:2];
+        [raw appendData:[@"hi 中\n" dataUsingEncoding:be ? NSUTF16BigEndianStringEncoding : NSUTF16LittleEndianStringEncoding]];
+        [raw writeToFile:up atomically:YES];
+        ed = openEditor(up);
+        [ed insertText:@"!" replacementRange:NSMakeRange(NSNotFound, 0)];
+        CHECK([ed save:nil], "save UTF-16");
+        NSData *back = [NSData dataWithContentsOfFile:up];
+        NSMutableData *want = [NSMutableData dataWithBytes:be ? "\xFE\xFF" : "\xFF\xFE" length:2];
+        [want appendData:[@"!hi 中\n" dataUsingEncoding:be ? NSUTF16BigEndianStringEncoding : NSUTF16LittleEndianStringEncoding]];
+        CHECK([back isEqualToData:want], "UTF-16 %s saved in the same byte order: %s", be ? "BE" : "LE", back.description.UTF8String);
+        CHECK([ed.statusText containsString:be ? @"UTF-16 BE" : @"UTF-16 LE"], "status names it: %s", ed.statusText.UTF8String);
+        [cc closeActive];
+    }
+
+    // Saving keeps the file's extended attributes (Finder tags) and its other hard links.
+    NSString *tagged = mkfile(dir, @"tagged.txt", @"t\n");
+    setxattr(tagged.fileSystemRepresentation, "com.example.feather-test", "tag", 3, 0, 0);
+    ed = openEditor(tagged);
+    [ed insertText:@"x" replacementRange:NSMakeRange(NSNotFound, 0)];
+    char xv[8] = {0};
+    CHECK([ed save:nil] && getxattr(tagged.fileSystemRepresentation, "com.example.feather-test", xv, sizeof xv, 0, 0) == 3 && !strcmp(xv, "tag"),
+          "an extended attribute survives saving");
+    [cc closeActive];
+    NSString *linkA = mkfile(dir, @"linkA.txt", @"shared\n"), *linkB = [dir stringByAppendingPathComponent:@"linkB.txt"];
+    link(linkA.fileSystemRepresentation, linkB.fileSystemRepresentation);
+    ed = openEditor(linkA);
+    [ed insertText:@"edited " replacementRange:NSMakeRange(NSNotFound, 0)];
+    struct stat sa, sb;
+    CHECK([ed save:nil] && [fileText(linkB, NSUTF8StringEncoding) isEqualToString:@"edited shared\n"] &&
+          stat(linkA.fileSystemRepresentation, &sa) == 0 && stat(linkB.fileSystemRepresentation, &sb) == 0 && sa.st_ino == sb.st_ino,
+          "a hard-linked file is saved in place, so the other link sees the change");
+    [ed insertText:@"again " replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK([ed save:nil] && [fileText(linkB, NSUTF8StringEncoding) isEqualToString:@"edited again shared\n"], "and again");
+    [cc closeActive];
 }
 
 static void replaceAndJump(NSString *dir) {
@@ -1090,6 +1148,25 @@ static void htmlPreviewAndAutosave(NSString *dir) {
     spinUntil(^BOOL { return h1 != nil; }, 5);
     CHECK([h1 isEqual:@"Hello"], "reloaded page shows the edit (%s)", [h1 description].UTF8String);
     [t closeAllWithoutAsking];
+
+    // A page script can't open links or windows by itself; a click right before can.
+    NSString *pushy = mkfile(hd, @"pushy.html",
+        @"<html><body><a id=l href=\"https://example.com/clicked\">x</a><script>"
+         "setTimeout(function(){document.getElementById('l').click(); window.open('https://example.com/popup');}, 10);"
+         "</script></body></html>");
+    HTMLPreview *pv = [[HTMLPreview alloc] initWithFrame:NSMakeRect(0, 0, 400, 300) path:pushy root:dir];
+    __block NSMutableArray<NSURL *> *external = [NSMutableArray array];
+    pv.onOpenExternal = ^(NSURL *u) { [external addObject:u]; };
+    __block BOOL pl = NO;
+    pv.onLoad = ^{ pl = YES; };
+    spinUntil(^BOOL { return pl; }, 15);
+    spinUntil(^BOOL { return external.count > 0; }, 1);
+    CHECK(pl && external.count == 0, "script-driven link and window.open are ignored (%lu opened)", (unsigned long)external.count);
+    [pv noteUserGesture];
+    [pv evaluate:@"setTimeout(function(){document.getElementById('l').click()}, 0); 1" done:nil];
+    spinUntil(^BOOL { return external.count > 0; }, 5);
+    CHECK(external.count == 1 && [external[0].absoluteString isEqualToString:@"https://example.com/clicked"],
+          "a link right after a click opens once (%s)", external.description.UTF8String);
     [NSUserDefaults.standardUserDefaults removeObjectForKey:@"htmlLayout"];
 }
 
@@ -1119,13 +1196,15 @@ static void autosave(NSString *dir) {
     [t.editor insertText:@"3" replacementRange:NSMakeRange(NSNotFound, 0)];
     [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.4]];
     CHECK(t.editor.isDirty, "focus-change mode does not save while typing");
-    chmod(ad.fileSystemRepresentation, 0555);
+    chmod(b.fileSystemRepresentation, 0444);
     [t openPath:c preview:NO focus:NO];
     [t selectTabAtIndex:1];
     CHECK([t.statusText containsString:@"Auto-save failed"] && t.editor.isDirty && asked == 0, "failed auto-save is reported in the status bar: %s", t.statusText.UTF8String);
-    chmod(ad.fileSystemRepresentation, 0755);
+    chmod(b.fileSystemRepresentation, 0644);
+    chmod(ad.fileSystemRepresentation, 0555);                   // a read-only folder: the writable file is saved in place
     [t openPath:c preview:NO focus:NO];
-    CHECK([fileText(b, NSUTF8StringEncoding) isEqualToString:@"3b\n"], "switching tabs saves the one you leave");
+    chmod(ad.fileSystemRepresentation, 0755);
+    CHECK([fileText(b, NSUTF8StringEncoding) isEqualToString:@"3b\n"], "switching tabs saves the one you leave, even in a read-only folder");
     [t.editor insertText:@"4" replacementRange:NSMakeRange(NSNotFound, 0)];
     CHECK([t closeActive] && asked == 0 && [fileText(c, NSUTF8StringEncoding) isEqualToString:@"4c\n"], "closing a tab saves silently");
     CHECK([t flushAutoSave] == NO, "flush reports the file it could not save (a.txt)");
@@ -1214,6 +1293,20 @@ static void dataViews(NSString *dir) {
     tp = findView(t.view, TablePreview.class);
     CHECK(tp.tableView.numberOfColumns == 3 && [[tp displayedCellAtRow:0 column:1] isEqual:@"2"], "TSV");
 
+    // A very wide CSV shows its first columns instead of building one table column per field.
+    NSMutableString *wide = [NSMutableString string];
+    for (int r = 0; r < 2; r++) { for (int c = 0; c < 200000; c++) [wide appendString:c ? @",1" : @"1"]; [wide appendString:@"\n"]; }
+    NSString *wp = [dir stringByAppendingPathComponent:@"wide.csv"];
+    [wide writeToFile:wp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    CFAbsoluteTime w0 = CFAbsoluteTimeGetCurrent();
+    [t openPath:wp preview:NO focus:NO];
+    t.activeMarkupLayout = MarkupPreview;
+    tp = findView(t.view, TablePreview.class);
+    spinUntil(^BOOL { return tp.model.columnCount == 200000; }, 10);
+    CHECK(tp.model.columnCount == 200000 && tp.tableView.numberOfColumns <= 1001 && [tp.infoText containsString:@"first 1,000 shown"] &&
+          CFAbsoluteTimeGetCurrent() - w0 < 5, "200 000 columns: %ld shown in %.1f s (%s)", (long)tp.tableView.numberOfColumns,
+          CFAbsoluteTimeGetCurrent() - w0, tp.infoText.UTF8String);
+
     NSString *json = mkfile(dir, @"package.json", @"{\n  \"name\": \"demo\",\n  // comment\n  \"deps\": {\"b\": \"^1\", \"a\": \"^2\"},\n  \"n\": [1, 2, 3]\n}\n");
     [t openPath:json preview:NO focus:NO];
     CHECK(t.activeMarkupKind == MarkupJSON && t.activeMarkupLayout == MarkupSource, "JSON opens as source by default");
@@ -1282,6 +1375,33 @@ static void binaryViews(NSString *dir) {
     [sp runQuery:@"SELECT name FROM users WHERE id = 1"];
     spinUntil(^BOOL { return sp.grid.model.rowCount == 1 && sp.grid.model.columnCount == 1; }, 3);
     CHECK([[sp.grid.model cellAtRow:0 column:0] isEqual:@"ann"], "a SELECT runs");
+    NSString *vac = [dir stringByAppendingPathComponent:@"vacuum-copy.db"];
+    [sp runQuery:[NSString stringWithFormat:@"VACUUM INTO '%@'", vac]];
+    spinUntil(^BOOL { return [sp.grid.infoText containsString:@"⚠️"]; }, 3);
+    CHECK(![NSFileManager.defaultManager fileExistsAtPath:vac] && [sp.grid.infoText containsString:@"⚠️"], "VACUUM INTO writes no file: %s", sp.grid.infoText.UTF8String);
+    [sp runQuery:@"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT count(*) FROM n"];   // never ends
+    CFAbsoluteTime q0 = CFAbsoluteTimeGetCurrent();
+    [sp runQuery:@"SELECT 42 AS answer"];
+    spinUntil(^BOOL { return [[sp.grid.model headerForColumn:0] isEqual:@"answer"]; }, 5);
+    CHECK([[sp.grid.model cellAtRow:0 column:0] isEqual:@"42"] && CFAbsoluteTimeGetCurrent() - q0 < 3, "a new query stops a runaway one (%.1f s)", CFAbsoluteTimeGetCurrent() - q0);
+
+    // A WAL database in a read-only folder: read from a copy, including changes not yet checkpointed.
+    NSString *wd = [dir stringByAppendingPathComponent:@"walsrc"], *rod = [dir stringByAppendingPathComponent:@"walro"];
+    [NSFileManager.defaultManager createDirectoryAtPath:wd withIntermediateDirectories:YES attributes:nil error:nil];
+    [NSFileManager.defaultManager createDirectoryAtPath:rod withIntermediateDirectories:YES attributes:nil error:nil];
+    sqlite3 *wdb = NULL;
+    sqlite3_open([wd stringByAppendingPathComponent:@"w.db"].fileSystemRepresentation, &wdb);
+    sqlite3_exec(wdb, "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE notes(t); INSERT INTO notes VALUES('in the wal');", NULL, NULL, NULL);
+    for (NSString *f in @[@"w.db", @"w.db-wal"])
+        [NSFileManager.defaultManager copyItemAtPath:[wd stringByAppendingPathComponent:f] toPath:[rod stringByAppendingPathComponent:f] error:nil];
+    sqlite3_close(wdb);
+    chmod(rod.fileSystemRepresentation, 0555);
+    SQLitePreview *wp = [[SQLitePreview alloc] initWithFrame:NSMakeRect(0, 0, 600, 400) path:[rod stringByAppendingPathComponent:@"w.db"]];
+    spinUntil(^BOOL { return wp.grid.model.rowCount == 1; }, 3);
+    CHECK(wp && [wp.tableNames isEqualToArray:@[@"notes"]] && [[wp.grid.model cellAtRow:0 column:0] isEqual:@"in the wal"] && [wp.status containsString:@"copy"],
+          "WAL database in a read-only folder shows its tables and recent rows: %s", wp.status.UTF8String);
+    wp = nil;
+    chmod(rod.fileSystemRepresentation, 0755);
 
     NSString *src = [dir stringByAppendingPathComponent:@"zipsrc"];
     [NSFileManager.defaultManager createDirectoryAtPath:[src stringByAppendingPathComponent:@"docs"] withIntermediateDirectories:YES attributes:nil error:nil];
@@ -1312,6 +1432,44 @@ static void binaryViews(NSString *dir) {
     spinUntil(^BOOL { return opened != nil; }, 5);
     CHECK([fileText(opened, NSUTF8StringEncoding) isEqualToString:@"# spaced name\n"], "double-click extracts and opens the entry");
     [t closeAllWithoutAsking];
+
+    // An archive entry that is a link to a file outside the archive is not opened (saving would write through it).
+    NSString *tsrc = [dir stringByAppendingPathComponent:@"tarsrc"];
+    [NSFileManager.defaultManager createDirectoryAtPath:tsrc withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *victim = mkfile(dir, @"victim.txt", @"do not touch\n");
+    symlink(victim.fileSystemRepresentation, [tsrc stringByAppendingPathComponent:@"readme.md"].fileSystemRepresentation);
+    mkfile(tsrc, @"a*.txt", @"star\n");
+    mkfile(tsrc, @"ab.txt", @"plain\n");
+    mkfile(tsrc, @"中文.txt", @"汉字\n");
+    NSString *tar = [dir stringByAppendingPathComponent:@"pack.tar"];
+    NSTask *tt = [NSTask new];
+    tt.executableURL = [NSURL fileURLWithPath:@"/usr/bin/tar"];
+    tt.arguments = @[@"-cf", tar, @"readme.md", @"a*.txt", @"ab.txt", @"中文.txt"];
+    tt.currentDirectoryURL = [NSURL fileURLWithPath:tsrc];
+    [tt launchAndReturnError:nil];
+    [tt waitUntilExit];
+    ArchivePreview *tp = [[ArchivePreview alloc] initWithFrame:NSMakeRect(0, 0, 600, 400) path:tar];
+    spinUntil(^BOOL { return tp.loaded; }, 5);
+    NSMutableDictionary<NSString *, NSNumber *> *rowOf = [NSMutableDictionary dictionary];
+    for (NSUInteger r = 0; r < tp.grid.model.rowCount; r++) rowOf[[tp.grid.model cellAtRow:r column:0]] = @(r);
+    CHECK(rowOf[@"中文.txt"] && rowOf[@"a*.txt"], "names are listed as UTF-8: %s", rowOf.allKeys.description.UTF8String);
+    __block NSString *got = nil, *msg = nil;
+    tp.onOpenFile = ^(NSString *p) { got = p; };
+    tp.onMessage = ^(NSString *m) { msg = m; };
+    if (rowOf[@"readme.md"]) tp.grid.onActivateRow(rowOf[@"readme.md"].unsignedIntegerValue);
+    spinUntil(^BOOL { return got || msg; }, 5);
+    CHECK(!got && msg.length, "a link entry is refused: %s", msg.UTF8String);
+    got = nil;
+    if (rowOf[@"a*.txt"]) tp.grid.onActivateRow(rowOf[@"a*.txt"].unsignedIntegerValue);
+    spinUntil(^BOOL { return got != nil; }, 5);
+    CHECK([fileText(got, NSUTF8StringEncoding) isEqualToString:@"star\n"] &&
+          ![NSFileManager.defaultManager fileExistsAtPath:[got.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"ab.txt"]],
+          "a name with * extracts only that entry");
+    got = nil;
+    if (rowOf[@"中文.txt"]) tp.grid.onActivateRow(rowOf[@"中文.txt"].unsignedIntegerValue);
+    spinUntil(^BOOL { return got != nil; }, 5);
+    CHECK([fileText(got, NSUTF8StringEncoding) isEqualToString:@"汉字\n"], "a CJK name extracts");
+    CHECK([fileText(victim, NSUTF8StringEncoding) isEqualToString:@"do not touch\n"], "the linked file is untouched");
 }
 
 static void hiddenFileSettings(NSString *dir) {
@@ -1355,6 +1513,14 @@ static void hiddenFileSettings(NSString *dir) {
     [sw commitFields];
     [tree reload];
     CHECK([names() containsObject:@".git"] && [names() containsObject:@".DS_Store"], "an empty list shows everything");
+    sw.alwaysHiddenField.stringValue = @".git, *.log";                // typed, Return not pressed
+    [sw windowWillClose:[NSNotification notificationWithName:NSWindowWillCloseNotification object:sw.window]];
+    CHECK([st.alwaysHidden isEqualToArray:(@[@".git", @"*.log"])], "closing Settings keeps a list typed without Return: %s", st.alwaysHidden.description.UTF8String);
+    CHECK(st.remoteImages && MarkdownRenderer.loadsRemoteImages, "web images load by default");
+    [sw.remoteImagesBox performClick:nil];
+    CHECK(!st.remoteImages && !MarkdownRenderer.loadsRemoteImages, "the Previews checkbox turns web images off");
+    [sw.remoteImagesBox performClick:nil];
+    [ud removeObjectForKey:@"remoteImages"];
     [sw.showHiddenBox performClick:nil];
     CHECK(!st.showHidden, "the checkbox in 设置 changes the setting");
     [st resetFileLists];
@@ -1435,6 +1601,10 @@ static void untitledDocuments(NSString *dir) {
     answer = NSAlertThirdButtonReturn;
     asked = 0;
     CHECK([t closeAll] && asked == 1 && t.tabCount == 0 && backupCount() == 0, "全部关闭 → 不保存 drops them");
+    for (int k = 0; k < 6; k++) [t openPath:mkfile(ws, [NSString stringWithFormat:@"tab%d.txt", k], @"x\n") preview:NO focus:NO];
+    [t selectTabAtIndex:0];
+    NSUInteger loads = t.viewerLoads;
+    CHECK([t closeAll] && t.tabCount == 0 && t.viewerLoads == loads, "Close All doesn't load each next tab (%lu loads)", (unsigned long)(t.viewerLoads - loads));
     [NSFileManager.defaultManager removeItemAtPath:backups error:nil];
 }
 
@@ -1449,7 +1619,16 @@ static void recentAndAppearance(NSString *dir) {
     d->_content.alertHandler = ^NSModalResponse(NSAlert *al) { return NSAlertThirdButtonReturn; };
     [d openRoot:a];
     [d->_content newUntitledDocument];
+    NSMenuItem *saveItem = [[NSMenuItem alloc] initWithTitle:@"Save" action:@selector(saveDocument:) keyEquivalent:@"s"];
+    CHECK([d validateMenuItem:saveItem], "⌘S is enabled on a new, empty document");
     [d->_content.editor insertText:@"keep me" replacementRange:NSMakeRange(NSNotFound, 0)];
+    [d->_content backupUntitled];                              // what auto-save does a second after typing stops
+    CHECK(!d->_content.editor.isDirty && [d validateMenuItem:saveItem], "⌘S stays enabled after the draft was backed up");
+    __block NSUInteger asked = 0;
+    d->_content.savePathHandler = ^NSString *(NSString *name, NSString *folder) { asked++; return nil; };
+    [NSApp sendAction:@selector(saveDocument:) to:d from:saveItem];
+    CHECK(asked == 1 && d->_content.activeIsUntitled, "⌘S on a backed-up draft asks where to save it");
+    d->_content.savePathHandler = nil;
     [d updateTitle];
     CHECK([d->_win.title isEqualToString:@"Untitled-1"] && !d->_win.representedURL && d->_win.isDocumentEdited, "window title: %s", d->_win.title.UTF8String);
     CHECK([d targetPathsFrom:nil].count == 0, "file actions (trash, rename, reveal) have no target on an untitled tab");
@@ -1488,6 +1667,326 @@ static void recentAndAppearance(NSString *dir) {
     [d->_content closeAll];
     [NSFileManager.defaultManager removeItemAtPath:d->_content.untitledDirectory error:nil];
     for (NSString *k in @[@"lastRoot", @"recentRoots", @"sessions", @"appearance", @"NSWindow Frame FeatherMain"]) [ud removeObjectForKey:k];
+}
+
+#pragma mark Data safety
+
+static void dataSafety(NSString *dir) {
+    // Backspace / Delete past the 32 KB drawing limit of a line remove one character, not the hidden text.
+    NSString *lp = [dir stringByAppendingPathComponent:@"longline.txt"];
+    NSMutableString *lng = [NSMutableString string];
+    for (int i = 0; i < 40000; i++) [lng appendString:i % 7 ? @"a" : @"é"];
+    [lng appendString:@"\nend\n"];
+    [lng writeToFile:lp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    TextEditorView *ed = openEditor(lp);
+    NSUInteger len = ed->_buf.length, e0 = [ed->_buf lineEnd:0];
+    [ed moveCaretTo:e0 extend:NO];
+    [ed doCommandBySelector:@selector(deleteBackward:)];
+    CHECK(ed->_buf.length == len - 1 && ed->_caret == e0 - 1, "Backspace at the end of a 40 000-char line deletes one character (%lu bytes gone)", (unsigned long)(len - ed->_buf.length));
+    [ed undo:nil];
+    [ed moveCaretTo:35000 extend:NO];
+    while (([ed->_buf byteAt:ed->_caret] & 0xC0) == 0x80) [ed moveCaretTo:ed->_caret + 1 extend:NO];
+    [ed doCommandBySelector:@selector(deleteForward:)];
+    CHECK(ed->_buf.length == len - 1 || ed->_buf.length == len - 2, "Delete in the hidden part deletes one character (%lu bytes gone)", (unsigned long)(len - ed->_buf.length));
+    [ed undo:nil];
+    NSUInteger at = 35002;
+    while ([ed->_buf byteAt:at] != 0xC3) at++;                          // on an "é"
+    [ed moveCaretTo:at + 2 extend:NO];
+    [ed doCommandBySelector:@selector(deleteBackward:)];
+    CHECK(ed->_buf.length == len - 2 && ed->_caret == at, "a two-byte character there is deleted whole");
+    [ed undo:nil];
+    [ed moveCaretTo:at extend:NO];
+    [ed doCommandBySelector:@selector(moveRight:)];
+    CHECK(ed->_caret == at + 2, "moving right in the hidden part steps one character");
+
+    // Input: press-and-hold accents, multi-line Tab / Shift-Tab, line endings, the remembered column.
+    NSString *ip = [dir stringByAppendingPathComponent:@"input.txt"];
+    [@"cafe\none\ntwo\nthree\n" writeToFile:ip atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ed = openEditor(ip);
+    [ed moveCaretTo:4 extend:NO];
+    [ed insertText:@"é" replacementRange:NSMakeRange(3, 1)];                 // the accent popup replaces the "e"
+    CHECK([text(ed) hasPrefix:@"café\n"] && ed->_caret == 5, "an accent from the press-and-hold popup replaces the letter: %s", text(ed).UTF8String);
+    [ed moveCaretTo:[ed->_buf lineStart:1] extend:NO];
+    [ed moveCaretTo:[ed->_buf lineStart:3] + 2 extend:YES];
+    [ed doCommandBySelector:@selector(insertTab:)];
+    CHECK([text(ed) isEqualToString:@"café\n    one\n    two\n    three\n"], "Tab indents every selected line: %s", text(ed).UTF8String);
+    CHECK([ed->_buf lineForOffset:ed.selection.location] == 1 && [ed->_buf lineForOffset:NSMaxRange(ed.selection)] == 3, "and they stay selected");
+    [ed doCommandBySelector:@selector(insertBacktab:)];
+    CHECK([text(ed) isEqualToString:@"café\none\ntwo\nthree\n"], "Shift-Tab outdents them: %s", text(ed).UTF8String);
+    [ed undo:nil];
+    [ed undo:nil];
+    CHECK([text(ed) isEqualToString:@"café\none\ntwo\nthree\n"], "each is one undo step");
+    [ed moveCaretTo:[ed->_buf lineEnd:3] extend:NO];
+    [ed doCommandBySelector:@selector(moveToBeginningOfLine:)];
+    [ed doCommandBySelector:@selector(moveUp:)];
+    CHECK(ed->_caret == [ed->_buf lineStart:2], "after Home, Up stays in the first column (at %lu)", (unsigned long)ed->_caret);
+    [cc closeAll];
+    NSString *crp = [dir stringByAppendingPathComponent:@"crlf-in.txt"];
+    [@"a\r\nb\r\n" writeToFile:crp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ed = openEditor(crp);
+    [ed insertText:@"x\ny\n" replacementRange:NSMakeRange(NSNotFound, 0)];      // e.g. dictation
+    CHECK([text(ed) isEqualToString:@"x\r\ny\r\na\r\nb\r\n"], "inserted text gets the file's CRLF line endings");
+    [ed undo:nil];
+
+    // Find with Unicode case folding, CJK word steps, Emacs keys.
+    NSString *up = [dir stringByAppendingPathComponent:@"unicode.txt"];
+    [@"Ärger und ärger\n我们今天去北京天安门\nhello world\n" writeToFile:up atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ed = openEditor(up);
+    [ed moveCaretTo:0 extend:NO];
+    CHECK([ed findString:@"ÄRGER" backward:NO] && ed.selection.location == 0, "Unicode find, case-insensitive");
+    CHECK([ed findString:@"ÄRGER" backward:NO] && ed.selection.location == 11 && [ed.selectedText isEqualToString:@"ärger"], "finds the lower-case one next (%lu)", (unsigned long)ed.selection.location);
+    CHECK([ed replaceAll:@"äRGER" with:@"Wut"] == 2 && [text(ed) hasPrefix:@"Wut und Wut\n"], "Replace All with Unicode case folding: %s", text(ed).UTF8String);
+    [ed undo:nil];
+    NSUInteger cj = [ed->_buf lineStart:1];
+    [ed moveCaretTo:cj extend:NO];
+    [ed doCommandBySelector:@selector(moveWordRight:)];
+    CHECK(ed->_caret > cj && ed->_caret < [ed->_buf lineEnd:1], "⌥→ in Chinese stops at a word, not the end of the line (%lu of %lu..%lu)",
+          (unsigned long)ed->_caret, (unsigned long)cj, (unsigned long)[ed->_buf lineEnd:1]);
+    NSRange wr = [ed wordRangeAt:cj + 3 * 5];
+    CHECK(wr.location >= cj && NSMaxRange(wr) <= [ed->_buf lineEnd:1] && wr.length < [ed->_buf lineEnd:1] - cj, "double-click selects a Chinese word, not the run");
+    NSUInteger h = [ed->_buf lineStart:2];
+    [ed moveCaretTo:h + 5 extend:NO];
+    [ed doCommandBySelector:@selector(deleteToEndOfParagraph:)];
+    CHECK([text(ed) hasSuffix:@"\nhello\n"], "⌃K deletes to the end of the line: %s", text(ed).UTF8String);
+    [ed doCommandBySelector:@selector(moveToBeginningOfParagraph:)];
+    [ed doCommandBySelector:@selector(yank:)];
+    CHECK([text(ed) hasSuffix:@"\n worldhello\n"], "⌃Y puts it back");
+    [ed doCommandBySelector:@selector(transpose:)];
+    CHECK([text(ed) hasSuffix:@"\n worlhdello\n"], "⌃T swaps the characters around the caret: %s", text(ed).UTF8String);
+    NSRange ax = ed.accessibilitySelectedTextRange;
+    CHECK(ax.location <= [ed.accessibilityValue length] && ed.accessibilityInsertionPointLineNumber == 2, "VoiceOver gets the caret line and position");
+    [cc closeAll];
+
+    // Dragging a selection below the view keeps scrolling while the mouse stays there.
+    NSString *dp = [dir stringByAppendingPathComponent:@"drag.txt"];
+    NSMutableString *dl = [NSMutableString string];
+    for (int i = 0; i < 400; i++) [dl appendFormat:@"line %d\n", i];
+    [dl writeToFile:dp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ed = openEditor(dp);
+    ed.frame = NSMakeRect(0, 0, 600, 300);
+    [ed moveCaretTo:0 extend:NO];
+    ed->_dragPoint = NSMakePoint(100, 400);
+    [ed dragTo:ed->_dragPoint];
+    CGFloat y0 = ed.scrollY;
+    for (int i = 0; i < 5; i++) [ed dragTo:ed->_dragPoint];               // what the timer does while the button is held
+    CHECK(ed.scrollY > y0 && ed->_caret > 0 && ed->_anchor == 0, "selection drag below the view scrolls on (%.0f → %.0f)", y0, ed.scrollY);
+    [ed->_dragScroll invalidate]; ed->_dragScroll = nil;
+    [cc closeAll];
+
+    // The undo limit: after 2000+ edits, undoing all the way back must not claim the file is saved.
+    [ed moveCaretTo:0 extend:NO];
+    for (int i = 0; i < 2005; i++) { [ed insertText:@"z" replacementRange:NSMakeRange(NSNotFound, 0)]; ed->_coalesceBroken = YES; }
+    while (ed->_undo.count) [ed undo:nil];
+    CHECK(ed.isDirty && [text(ed) hasPrefix:@"zzzzz"], "undoing past the limit still shows unsaved changes");
+    while (ed->_redo.count) [ed redo:nil];
+    [cc closeAll];
+
+    // Replace All keeps the caret on the same text, never inside a character.
+    NSString *rp = [dir stringByAppendingPathComponent:@"caret.txt"];
+    [@"a中b\nxyz\n" writeToFile:rp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ed = openEditor(rp);
+    [ed moveCaretTo:4 extend:NO];                                     // before "b"
+    [ed replaceAll:@"a" with:@"aa"];
+    CHECK(ed->_caret == 5 && [ed->_buf byteAt:ed->_caret] == 'b', "caret follows Replace All (at %lu)", (unsigned long)ed->_caret);
+    [ed undo:nil];
+    [ed moveCaretTo:5 extend:NO];                                     // end of line 1
+    [ed replaceAll:@"中" with:@"x"];
+    CHECK(ed->_caret == 3, "a shorter replacement moves the caret back (at %lu)", (unsigned long)ed->_caret);
+    [ed undo:nil];
+
+    // Replace All and its undo stay fast with many matches (each edit used to rewrite the piece and line lists).
+    NSString *bp = [dir stringByAppendingPathComponent:@"many.txt"];
+    NSMutableString *many = [NSMutableString string];
+    for (int i = 0; i < 100000; i++) [many appendString:@"foo bar\n"];
+    [many writeToFile:bp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ed = openEditor(bp);
+    CFAbsoluteTime r0 = CFAbsoluteTimeGetCurrent();
+    NSUInteger rn = [ed replaceAll:@"foo" with:@"x"];
+    double rt = CFAbsoluteTimeGetCurrent() - r0;
+    CHECK(rn == 100000 && ed->_buf.length == 100000 * 6 && [text(ed) hasPrefix:@"x bar\nx bar\n"], "Replace All of 100 000 matches");
+    r0 = CFAbsoluteTimeGetCurrent();
+    [ed undo:nil];
+    double ut = CFAbsoluteTimeGetCurrent() - r0;
+    CHECK([text(ed) isEqualToString:many] && !ed.isDirty, "its undo restores the text");
+    r0 = CFAbsoluteTimeGetCurrent();
+    [ed redo:nil];
+    double dt = CFAbsoluteTimeGetCurrent() - r0;
+    CHECK(ed->_buf.length == 100000 * 6 && ed->_buf.lineCount == 100001, "redo");
+    printf("   replace all 100 000 matches: %.2f s, undo %.2f s, redo %.2f s\n", rt, ut, dt);
+    CHECK(rt < 1 && ut < 1 && dt < 1, "Replace All, undo and redo each take under a second");
+    [ed undo:nil];
+
+    // Read-only files are not overwritten by ⌘S or auto-save.
+    NSString *ro = [dir stringByAppendingPathComponent:@"readonly.txt"];
+    [@"locked\n" writeToFile:ro atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    chmod(ro.fileSystemRepresentation, 0444);
+    ed = openEditor(ro);
+    [ed insertText:@"changed " replacementRange:NSMakeRange(NSNotFound, 0)];
+    NSString *err = nil;
+    CHECK(![ed save:&err] && err.length && [fileText(ro, NSUTF8StringEncoding) isEqualToString:@"locked\n"],
+          "saving a read-only file fails and leaves it alone (%s)", err.UTF8String);
+    cc.autoSaveMode = AutoSaveOnFocusChange;
+    CHECK(![cc flushAutoSave] && [fileText(ro, NSUTF8StringEncoding) isEqualToString:@"locked\n"] && [cc.statusText containsString:@"read-only"],
+          "auto-save skips it and says why: %s", cc.statusText.UTF8String);
+    cc.autoSaveMode = AutoSaveOff;
+    [ed undo:nil];
+    chmod(ro.fileSystemRepresentation, 0644);
+
+    // Saving a draft over a file that is open in another tab.
+    NSWindow *w; ContentController *t = offscreenController(&w);
+    t.untitledDirectory = [dir stringByAppendingPathComponent:@"untitled-ds"];
+    t.workspaceRoot = dir;
+    __block NSUInteger asked = 0;
+    __block NSModalResponse answer = NSAlertSecondButtonReturn;
+    t.alertHandler = ^NSModalResponse(NSAlert *a) { asked++; return answer; };
+    NSString *target = [dir stringByAppendingPathComponent:@"target.txt"];
+    [@"old\n" writeToFile:target atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [t openPath:target preview:NO focus:YES];
+    [t.editor insertText:@"unsaved " replacementRange:NSMakeRange(NSNotFound, 0)];
+    [t newUntitledDocument];
+    [t.editor insertText:@"draft\n" replacementRange:NSMakeRange(NSNotFound, 0)];
+    t.savePathHandler = ^NSString *(NSString *name, NSString *folder) { return target; };
+    CHECK(![t save] && asked == 1 && t.activeIsUntitled && [fileText(target, NSUTF8StringEncoding) isEqualToString:@"old\n"],
+          "it asks first when that tab has unsaved changes, and Cancel writes nothing");
+    answer = NSAlertFirstButtonReturn;
+    CHECK([t save] && [fileText(target, NSUTF8StringEncoding) isEqualToString:@"draft\n"], "Replace saves the draft there");
+    NSUInteger same = 0;
+    for (NSString *p in t.openPaths) if ([p isEqualToString:target]) same++;
+    CHECK(same == 1 && t.tabCount == 1 && [text(t.editor) isEqualToString:@"draft\n"], "and leaves one tab for the file (%lu)", (unsigned long)same);
+
+    // A draft that contains a NUL byte comes back as text, not hex.
+    [t newUntitledDocument];
+    [t.editor insertText:[NSString stringWithCharacters:(unichar[]){'a', 0, 'b'} length:3] replacementRange:NSMakeRange(NSNotFound, 0)];
+    [t backupUntitled];
+    NSDictionary *session = t.sessionState;
+    [t closeAllWithoutAsking];
+    [t restoreSession:session];
+    [t selectTabAtIndex:-1];
+    CHECK(t.activeIsUntitled && t.editor && t.editor.contentLength == 3, "a draft with a NUL byte restores as text");
+
+    // Drafts no session mentions (a crash before the session was written) come back as tabs.
+    NSString *lost = [t.untitledDirectory stringByAppendingPathComponent:@"lost.txt"];
+    NSString *empty = [t.untitledDirectory stringByAppendingPathComponent:@"empty.txt"];
+    [@"recovered text" writeToFile:lost atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [NSData.data writeToFile:empty atomically:YES];
+    NSUInteger before = t.tabCount;
+    [t adoptUntitledBackups:@[lost, empty]];
+    [t selectTabAtIndex:-1];
+    CHECK(t.tabCount == before + 1 && t.activeIsUntitled && [text(t.editor) isEqualToString:@"recovered text"] &&
+          ![NSFileManager.defaultManager fileExistsAtPath:empty], "a lost draft is reopened, an empty one removed");
+    [t closeAllWithoutAsking];
+    [NSFileManager.defaultManager removeItemAtPath:t.untitledDirectory error:nil];
+}
+
+static void appLifecycle(NSString *dir) {
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    for (NSString *k in @[@"lastRoot", @"recentRoots", @"sessions"]) [ud removeObjectForKey:k];
+    NSString *ws = [dir stringByAppendingPathComponent:@"ws_life"];
+    [NSFileManager.defaultManager createDirectoryAtPath:ws withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *f = mkfile(ws, @"notes.txt", @"hello\n");
+    AppDelegate *d = [AppDelegate new];
+    [d applicationWillFinishLaunching:[NSNotification notificationWithName:NSApplicationWillFinishLaunchingNotification object:NSApp]];
+    d->_content.untitledDirectory = [dir stringByAppendingPathComponent:@"untitled-life"];
+    d->_content.autoSaveMode = AutoSaveOff;
+    __block NSModalResponse answer = NSAlertThirdButtonReturn;
+    __block NSUInteger asked = 0;
+    d->_content.alertHandler = ^NSModalResponse(NSAlert *al) { asked++; return answer; };
+    [d openRoot:ws];
+    [d openFile:f];
+    [d->_content.editor insertText:@"x" replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK([d windowShouldClose:d->_win] && asked == 1 && d->_content.tabCount == 0, "closing the window asks once");
+    [d mainWindowWillReappear];
+    CHECK(d->_content.tabCount == 1 && [d->_content.currentPath isEqualToString:f], "reopening the window brings its tabs back");
+    [d->_content.editor insertText:@"y" replacementRange:NSMakeRange(NSNotFound, 0)];
+    asked = 0;
+    answer = NSAlertSecondButtonReturn;
+    CHECK([d applicationShouldTerminate:NSApp] == NSTerminateCancel && asked == 1, "⌘Q after reopening still asks about unsaved changes");
+    [d->_content.editor undo:nil];
+
+    // Word wrap is ⌥⌘Z: a plain ⌥ letter is how many keyboards type characters (⌥Z is Ω, or ż in Polish).
+    NSMenuItem *wrapItem = nil;
+    for (NSMenuItem *top in NSApp.mainMenu.itemArray) for (NSMenuItem *i in top.submenu.itemArray) if (i.action == @selector(toggleWordWrap:)) wrapItem = i;
+    CHECK(wrapItem && (wrapItem.keyEquivalentModifierMask & NSEventModifierFlagCommand), "Word Wrap uses ⌘ (%lx)", (unsigned long)wrapItem.keyEquivalentModifierMask);
+
+    // ⌘W in another window closes that window, not a tab behind it.
+    NSWindow *other = [[NSWindow alloc] initWithContentRect:NSMakeRect(-20000, -20000, 200, 100) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                                                    backing:NSBackingStoreBuffered defer:YES];
+    other.releasedWhenClosed = NO;
+    [other orderBack:nil];
+    d->_keyWindowOverride = other;
+    NSMenuItem *closeItem = [[NSMenuItem alloc] initWithTitle:@"Close Tab" action:@selector(closeTab:) keyEquivalent:@"w"];
+    [NSApp sendAction:@selector(closeTab:) to:d from:closeItem];
+    CHECK(!other.isVisible && d->_content.tabCount == 1, "⌘W with Settings in front closes Settings and keeps the tab");
+    d->_keyWindowOverride = nil;
+    [d->_content closeAllWithoutAsking];
+    CHECK([d validateMenuItem:closeItem], "⌘W is enabled in an empty main window (it closes the window)");
+
+    // Save All carries on past a draft whose save panel was cancelled.
+    NSString *g = mkfile(ws, @"g.txt", @"g\n");
+    [d->_content newUntitledDocument];
+    [d->_content.editor insertText:@"draft" replacementRange:NSMakeRange(NSNotFound, 0)];
+    [d openFile:g];
+    [d->_content.editor insertText:@"edit " replacementRange:NSMakeRange(NSNotFound, 0)];
+    d->_content.savePathHandler = ^NSString *(NSString *name, NSString *folder) { return nil; };
+    CHECK(![d->_content saveAll] && [fileText(g, NSUTF8StringEncoding) isEqualToString:@"edit g\n"], "Save All saves the file even after the draft's panel is cancelled");
+    d->_content.savePathHandler = nil;
+    answer = NSAlertThirdButtonReturn;
+    [d->_content closeAll];
+
+    // Reopen Closed Tab doesn't bring back a tab from the previous workspace.
+    NSString *ws2 = [dir stringByAppendingPathComponent:@"ws_life2"];
+    [NSFileManager.defaultManager createDirectoryAtPath:ws2 withIntermediateDirectories:YES attributes:nil error:nil];
+    [d openFile:f];
+    [d->_content closeActive];
+    [d openRoot:ws2];
+    CHECK(![d->_content reopenClosed] && d->_content.tabCount == 0, "Reopen Closed Tab stays within the workspace");
+    [d openRoot:ws];
+
+    // The workspace is watched: a file created outside the app shows up in the tree without a manual refresh.
+    __block NSUInteger fired = 0;
+    FileWatcher *fw = [[FileWatcher alloc] initWithRoot:ws onChange:^{ fired++; }];
+    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.3]];
+    mkfile(ws, @"from-outside.txt", @"new\n");
+    CHECK(fw && spinUntil(^BOOL { return fired > 0; }, 5), "the watcher notices a new file");
+    [fw stop];
+    CHECK(![FileWatcher pathIsInteresting:[ws stringByAppendingPathComponent:@"node_modules/x/y.js"] root:ws] &&
+          ![FileWatcher pathIsInteresting:[ws stringByAppendingPathComponent:@".git/index"] root:ws] &&
+          ![FileWatcher pathIsInteresting:[ws stringByAppendingPathComponent:@".feather-Ab12Cd"] root:ws] &&
+          [FileWatcher pathIsInteresting:[ws stringByAppendingPathComponent:@"src/a.c"] root:ws], "changes in skipped folders and our own temp files are ignored");
+    __block BOOL refreshed = NO;
+    d->_tree.onRefreshed = ^{ refreshed = YES; };
+    mkfile(ws, @"bg-new.txt", @"x\n");
+    [d->_tree refreshInBackground];
+    BOOL listed = NO;
+    if (spinUntil(^BOOL { return refreshed; }, 5))
+        for (NSInteger r = 0; r < d->_outline.numberOfRows; r++) if ([[(FileNode *)[d->_outline itemAtRow:r] name] isEqual:@"bg-new.txt"]) listed = YES;
+    CHECK(listed, "a background refresh adds it to the tree");
+    d->_tree.onRefreshed = nil;
+
+    // Dropping onto the window: files open as tabs, a folder becomes the workspace.
+    [d->_content closeAllWithoutAsking];
+    NSString *dropped = mkfile(ws, @"dropped.md", @"# hi\n");
+    CHECK([d openDroppedURLs:@[[NSURL fileURLWithPath:dropped]]] && [d->_content.currentPath isEqualToString:dropped], "a dropped file opens");
+    NSString *ws3 = [dir stringByAppendingPathComponent:@"ws_dropped"];
+    [NSFileManager.defaultManager createDirectoryAtPath:ws3 withIntermediateDirectories:YES attributes:nil error:nil];
+    CHECK([d openDroppedURLs:@[[NSURL fileURLWithPath:ws3]]] && [d->_tree.rootPath isEqualToString:ws3], "a dropped folder becomes the workspace");
+    CHECK(![d openDroppedURLs:@[[NSURL URLWithString:@"https://example.com"]]], "a web link is not a drop target");
+    [d openRoot:ws];
+
+    // A workspace on a volume that is not mounted keeps its saved session.
+    NSString *gone = @"/Volumes/FeatherView-not-mounted/project";
+    NSMutableDictionary *all = [[ud dictionaryForKey:@"sessions"] mutableCopy];
+    all[gone] = @{@"tabs": @[@{@"path": [gone stringByAppendingPathComponent:@"a.txt"], @"line": @0}], @"active": @0};
+    [ud setObject:all forKey:@"sessions"];
+    [ud setObject:@[ws, gone] forKey:@"recentRoots"];
+    [d saveSession];
+    CHECK([ud dictionaryForKey:@"sessions"][gone] != nil, "an unmounted workspace's session is kept");
+    [d noteRecentRoot:ws];
+    CHECK([[ud stringArrayForKey:@"recentRoots"] containsObject:gone] && ![d.recentRoots containsObject:gone],
+          "it stays in the stored recent list but is not shown");
+    [d->_content closeAllWithoutAsking];
+    [NSFileManager.defaultManager removeItemAtPath:d->_content.untitledDirectory error:nil];
+    for (NSString *k in @[@"lastRoot", @"recentRoots", @"sessions"]) [ud removeObjectForKey:k];
 }
 
 #pragma mark Search panel
@@ -1938,6 +2437,8 @@ int main(void) {
         binaryViews(dir);
         hiddenFileSettings(dir);
         recentAndAppearance(dir);
+        dataSafety(dir);
+        appLifecycle(dir);
         localization(dir);
         [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     }

@@ -9,7 +9,9 @@
 static const NSUInteger kMaxFileBytes = 16u << 20;
 static const NSUInteger kMaxHitsPerFile = 200;
 static const NSUInteger kPreviewBytes = 160;
-static const NSUInteger kMaxLineBytes = 4096;           // longer lines (minified files) are matched only up to here
+static const NSUInteger kMaxLineBytes = 4096;           // a preview shows at most this much of a line
+static const NSUInteger kMaxScanLine = 1u << 20;         // the built-in regex scan looks this far into a line
+static const NSTimeInterval kRegexBudget = 2;            // per line: a pathological regex gives up, not hangs
 
 @implementation SearchHit @end
 
@@ -33,14 +35,20 @@ static const NSUInteger kMaxLineBytes = 4096;           // longer lines (minifie
 }
 @end
 
-NSArray<NSValue *> *WSMatches(NSRegularExpression *re, NSString *s, NSUInteger limit) {
+// Matches with a time limit, checked while ICU is still matching (catastrophic backtracking).
+static NSArray<NSValue *> *boundedMatches(NSRegularExpression *re, NSString *s, NSRange r, NSUInteger limit, BOOL (^cancelled)(void)) {
     if (!re || !s.length) return @[];
     NSMutableArray *out = [NSMutableArray array];
-    [re enumerateMatchesInString:s options:0 range:NSMakeRange(0, s.length) usingBlock:^(NSTextCheckingResult *m, NSMatchingFlags f, BOOL *stop) {
-        if (m.range.length) [out addObject:[NSValue valueWithRange:m.range]];
-        if (out.count >= limit) *stop = YES;
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    [re enumerateMatchesInString:s options:NSMatchingReportProgress range:r usingBlock:^(NSTextCheckingResult *m, NSMatchingFlags f, BOOL *stop) {
+        if (m && m.range.length) [out addObject:[NSValue valueWithRange:m.range]];
+        if (out.count >= limit || CFAbsoluteTimeGetCurrent() - t0 > kRegexBudget || (cancelled && cancelled())) *stop = YES;
     }];
     return out;
+}
+
+NSArray<NSValue *> *WSMatches(NSRegularExpression *re, NSString *s, NSUInteger limit) {
+    return boundedMatches(re, s, NSMakeRange(0, s.length), limit, nil);
 }
 
 static NSString *decode(const uint8_t *p, NSUInteger n) {
@@ -60,10 +68,11 @@ static NSUInteger bytesOfPrefix(NSString *s, NSUInteger chars) {
 }
 
 // Builds a hit from one line (no trailing newline) and a match at byte offset m of mlen bytes.
-static SearchHit *makeHit(NSString *path, NSUInteger lineNo, const uint8_t *line, NSUInteger len,
-                          NSUInteger m, NSUInteger mlen, NSRegularExpression *re) {
+// For a long line, `line` may start part-way in: base is its byte offset in the real line.
+static SearchHit *makeHitAt(NSString *path, NSUInteger lineNo, NSUInteger base, const uint8_t *line, NSUInteger len,
+                            NSUInteger m, NSUInteger mlen, NSRegularExpression *re) {
     SearchHit *h = [SearchHit new];
-    h.path = path; h.line = lineNo; h.column = m + 1; h.matchBytes = mlen;
+    h.path = path; h.line = lineNo; h.column = base + m + 1; h.matchBytes = mlen;
     while (len && (line[len - 1] == '\r' || line[len - 1] == '\n')) len--;
     m = MIN(m, len); mlen = MIN(mlen, len - m);
     NSUInteger s = 0;
@@ -82,6 +91,19 @@ static SearchHit *makeHit(NSString *path, NSUInteger lineNo, const uint8_t *line
     h.previewMatches = all;
     h.previewMatch = all.count ? [all[0] rangeValue] : NSMakeRange(NSNotFound, 0);
     return h;
+}
+
+// A hit on a line of any length: the preview comes from a window around the match.
+static SearchHit *makeHit(NSString *path, NSUInteger lineNo, const uint8_t *line, NSUInteger len,
+                          NSUInteger m, NSUInteger mlen, NSRegularExpression *re) {
+    NSUInteger base = 0;
+    if (len > kMaxLineBytes && m + mlen > kMaxLineBytes - 64) {
+        base = backToBoundary(line, m > 64 ? m - 64 : 0, 0);
+        NSUInteger end = MIN(len, base + kMaxLineBytes);
+        if (end < len) end = backToBoundary(line, end, base);
+        return makeHitAt(path, lineNo, base, line + base, end - base, m - base, MIN(mlen, end - m), re);
+    }
+    return makeHitAt(path, lineNo, 0, line, MIN(len, kMaxLineBytes), m, mlen, re);
 }
 
 @interface WorkspaceSearch ()
@@ -152,15 +174,16 @@ static NSUInteger matchLength(NSRegularExpression *re, const uint8_t *text, NSUI
     NSString *line = decode(text, tlen);
     NSUInteger at = decode(text, MIN(col0, tlen)).length;
     if (at > line.length) return fallback;
-    NSTextCheckingResult *m = [re firstMatchInString:line options:0 range:NSMakeRange(at, line.length - at)];
-    if (!m || m.range.location != at) return fallback;
-    return bytesOfPrefix(line, NSMaxRange(m.range)) - bytesOfPrefix(line, at);
+    NSArray<NSValue *> *ms = boundedMatches(re, line, NSMakeRange(at, line.length - at), 1, nil);
+    if (!ms.count || ms[0].rangeValue.location != at) return fallback;
+    return bytesOfPrefix(line, NSMaxRange(ms[0].rangeValue)) - bytesOfPrefix(line, at);
 }
 
 - (void)runRipgrep:(NSString *)rg query:(NSString *)query root:(NSString *)root options:(SearchOptions *)o
            matcher:(NSRegularExpression *)re gen:(NSUInteger)gen batch:(void (^)(NSArray *, NSUInteger))batch done:(void (^)(BOOL))done {
-    NSMutableArray *args = [@[@"--null", @"--line-number", @"--column", @"--no-heading", @"--color", @"never",
-                              @"--max-columns", @"4000",
+    // --no-config: a user's RIPGREP_CONFIG_PATH must not change the output format. No --max-columns: a
+    // long line is replaced by "[Omitted long line]", which loses the match; makeHit windows it instead.
+    NSMutableArray *args = [@[@"--no-config", @"--null", @"--line-number", @"--column", @"--no-heading", @"--color", @"never",
                               @"--max-count", [NSString stringWithFormat:@"%lu", (unsigned long)kMaxHitsPerFile],
                               @"--max-filesize", @"16M", o.caseSensitive ? @"--case-sensitive" : @"--ignore-case"] mutableCopy];
     if (!o.regex) [args addObject:@"--fixed-strings"];
@@ -177,9 +200,9 @@ static NSUInteger matchLength(NSRegularExpression *re, const uint8_t *text, NSUI
     t.executableURL = [NSURL fileURLWithPath:rg];
     t.arguments = args;
     t.currentDirectoryURL = [NSURL fileURLWithPath:root];
-    NSPipe *out = [NSPipe pipe];
+    NSPipe *out = [NSPipe pipe], *errPipe = [NSPipe pipe];
     t.standardOutput = out;
-    t.standardError = [NSFileHandle fileHandleWithNullDevice];
+    t.standardError = errPipe;
     NSError *err = nil;
     if (![t launchAndReturnError:&err]) {
         _usedRipgrep = NO;
@@ -190,7 +213,14 @@ static NSUInteger matchLength(NSRegularExpression *re, const uint8_t *text, NSUI
     NSUInteger qBytes = o.regex ? 0 : [query lengthOfBytesUsingEncoding:NSUTF8StringEncoding], maxHits = self.maxHits;
     NSUInteger rootLen = root.length + ([root hasSuffix:@"/"] ? 0 : 1);
     FWPathFilter *filter = o.filter;
+    BOOL dropHidden = !o.includeHidden;              // an include type lets rg list dot files; drop them here
     NSFileHandle *fh = out.fileHandleForReading;
+    __block NSData *stderrData = nil;
+    dispatch_group_t errRead = dispatch_group_create();
+    dispatch_group_async(errRead, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{   // so a full stderr pipe can't stall rg
+        stderrData = [errPipe.fileHandleForReading readDataToEndOfFile];
+    });
+    _lastError = nil;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSMutableData *buf = [NSMutableData data];
         NSMutableArray *pending = [NSMutableArray array];
@@ -214,7 +244,9 @@ static NSUInteger matchLength(NSRegularExpression *re, const uint8_t *text, NSUI
                 if (!lastRaw || lastRaw.length != plen || memcmp(lastRaw.bytes, p, plen)) {
                     lastRaw = [NSData dataWithBytes:p length:plen];
                     lastPath = [NSFileManager.defaultManager stringWithFileSystemRepresentation:(const char *)p length:plen];
-                    lastAllowed = !filter || ([lastPath hasPrefix:root] && [filter allowsFile:[lastPath substringFromIndex:MIN(rootLen, lastPath.length)]]);
+                    NSString *rel = [lastPath hasPrefix:root] ? [lastPath substringFromIndex:MIN(rootLen, lastPath.length)] : nil;
+                    lastAllowed = rel && (!filter || [filter allowsFile:rel]) &&
+                                  !(dropHidden && ([rel hasPrefix:@"."] || [rel containsString:@"/."]));
                 }
                 if (!lastAllowed) continue;
                 const uint8_t *q = z + 1;
@@ -223,7 +255,7 @@ static NSUInteger matchLength(NSRegularExpression *re, const uint8_t *text, NSUI
                 if (q >= end || *q++ != ':') continue;
                 while (q < end && *q >= '0' && *q <= '9') col = col * 10 + (*q++ - '0');
                 if (q >= end || *q++ != ':' || !line || !col) continue;
-                NSUInteger tlen = MIN((NSUInteger)(end - q), kMaxLineBytes), c0 = MIN(col - 1, tlen);
+                NSUInteger tlen = (NSUInteger)(end - q), c0 = MIN(col - 1, tlen);
                 NSUInteger mlen = matchLength(re, q, tlen, c0, qBytes);
                 [pending addObject:makeHit(lastPath, line, q, tlen, c0, mlen, re)];
                 if (++total >= maxHits) { truncated = YES; break; }
@@ -234,9 +266,27 @@ static NSUInteger matchLength(NSRegularExpression *re, const uint8_t *text, NSUI
                 batch([pending copy], 0); [pending removeAllObjects]; tick = now;
             }
         }
+        BOOL stopped = self.generation != gen || truncated;
         if (t.isRunning) [t terminate];
         [t waitUntilExit];
+        dispatch_group_wait(errRead, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
         if (pending.count) batch([pending copy], 0);
+        // exit 2 with nothing found: rg itself failed (a regex it can't parse), not "no results".
+        // Per-file errors (permissions) also exit 2 but start with a path.
+        NSString *msg = [[NSString alloc] initWithData:stderrData ?: NSData.data encoding:NSUTF8StringEncoding] ?: @"";
+        msg = [msg stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (!stopped && !total && t.terminationStatus == 2 && msg.length && ![msg hasPrefix:root] && ![msg hasPrefix:@"rg: /"]) {
+            if (o.regex && [msg containsString:@"regex"]) {           // e.g. lookaround: the built-in scanner supports it
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (self.generation != gen) return;
+                    self->_usedRipgrep = NO;
+                    [self runBuiltin:query root:root options:o matcher:re gen:gen batch:batch done:done];
+                });
+                return;
+            }
+            NSString *first = [msg componentsSeparatedByString:@"\n"].lastObject;
+            self->_lastError = [FTL(@"ripgrep: ") stringByAppendingString:[first substringToIndex:MIN(first.length, (NSUInteger)200)]];
+        }
         done(truncated);
     });
 }
@@ -271,6 +321,8 @@ static const uint8_t *findBytes(const uint8_t *h, NSUInteger hn, const uint8_t *
     BOOL fast = !o.regex && !o.wholeWord && (o.caseSensitive || ascii);
     BOOL prefilter = !o.regex && (o.caseSensitive || ascii);                // the text must appear somewhere in the file
     NSUInteger maxHits = self.maxHits;
+    _lastError = nil;
+    BOOL (^cancelled)(void) = ^BOOL { return self.generation != gen; };
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         __block NSUInteger total = 0, files = 0;
         __block BOOL truncated = NO;
@@ -304,7 +356,7 @@ static const uint8_t *findBytes(const uint8_t *h, NSUInteger hn, const uint8_t *
                         while (ls > 0 && m[ls - 1] != '\n') ls--;
                         const uint8_t *nl = memchr(m + off, '\n', len - off);
                         NSUInteger le = nl ? (NSUInteger)(nl - m) : len;
-                        [pending addObject:makeHit(path, lineNo, m + ls, MIN(le - ls, kMaxLineBytes), off - ls, nn, re)];
+                        [pending addObject:makeHit(path, lineNo, m + ls, le - ls, off - ls, nn, re)];
                         total++; inFile++;
                         pos = le + 1;                                         // one hit per line, like rg
                         if (total >= maxHits) { truncated = YES; break; }
@@ -314,11 +366,14 @@ static const uint8_t *findBytes(const uint8_t *h, NSUInteger hn, const uint8_t *
                     NSUInteger ls = 0, lineNo = 1;
                     while (ls < len) {
                         const uint8_t *nl = memchr(m + ls, '\n', len - ls);
-                        NSUInteger le = nl ? (NSUInteger)(nl - m) : len, ll = MIN(le - ls, kMaxLineBytes);
+                        NSUInteger le = nl ? (NSUInteger)(nl - m) : len, ll = MIN(le - ls, kMaxScanLine);
+                        if (ll < le - ls) ll = backToBoundary(m + ls, ll, 0);
                         NSString *s = decode(m + ls, ll);
-                        NSTextCheckingResult *r = s.length ? [re firstMatchInString:s options:0 range:NSMakeRange(0, s.length)] : nil;
-                        if (r && r.range.length) {
-                            NSUInteger b0 = bytesOfPrefix(s, r.range.location), b1 = bytesOfPrefix(s, NSMaxRange(r.range));
+                        NSArray<NSValue *> *r = boundedMatches(re, s, NSMakeRange(0, s.length), 1, cancelled);
+                        if (cancelled()) break;
+                        if (r.count) {
+                            NSRange mr = r[0].rangeValue;
+                            NSUInteger b0 = bytesOfPrefix(s, mr.location), b1 = bytesOfPrefix(s, NSMaxRange(mr));
                             [pending addObject:makeHit(path, lineNo, m + ls, ll, b0, b1 - b0, re)];
                             total++; inFile++;
                             if (total >= maxHits) { truncated = YES; break; }

@@ -19,4 +19,6 @@
 @property (nonatomic, readonly) NSString *info;                      // "第 3 / 12 页   125%"
 @property (nonatomic, readonly) PDFView *pdfView;
 @property (nonatomic, copy) void (^onChange)(void);
+@property (nonatomic, copy) void (^onOpenFile)(NSString *path);   // a link to a local file
++ (BOOL)opensLink:(NSURL *)url;                                    // web and mail links only
 @end

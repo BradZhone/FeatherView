@@ -90,7 +90,7 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
                     item(FTL(@"Side-by-Side Preview"), @selector(splitPreview:), @"v", C | O),
                     item(FTL(@"Source Only"), @selector(sourceOnly:), nil, 0),
                     NSMenuItem.separatorItem,
-                    item(FTL(@"Word Wrap"), @selector(toggleWordWrap:), @"z", O),
+                    item(FTL(@"Word Wrap"), @selector(toggleWordWrap:), @"z", C | O),     // not ⌥Z: that types Ω, or ż on Polish keyboards
                     item(FTL(@"Show Minimap"), @selector(toggleMinimap:), @"m", NSEventModifierFlagCommand | NSEventModifierFlagOption),
                     [self appearanceMenuItem],
                     NSMenuItem.separatorItem,
@@ -104,6 +104,10 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
                     NSMenuItem.separatorItem,
                     item(FTL(@"Show Hidden Files"), @selector(toggleHidden:), @".", C | S)]],
         @[FTL(@"Tabs"), [self tabMenuItems]],
+        @[FTL(@"Window"), @[item(FTL(@"Minimize"), @selector(performMiniaturize:), @"m", C),
+                      item(FTL(@"Zoom"), @selector(performZoom:), nil, 0),
+                      NSMenuItem.separatorItem,
+                      item(FTL(@"Bring All to Front"), @selector(arrangeInFront:), nil, 0)]],
     ];
     NSMenu *bar = [NSMenu new];
     for (NSArray *m in spec) {
@@ -118,6 +122,7 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
         }
         top.submenu = sub;
         [bar addItem:top];
+        if ([m[0] isEqualToString:FTL(@"Window")]) NSApp.windowsMenu = sub;     // AppKit lists the open windows here
     }
     NSApp.mainMenu = bar;
 }
@@ -239,9 +244,11 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
     if (a == @selector(togglePreviewTabs:)) { mi.state = _content.previewEnabled ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
     if (a == @selector(toggleWordWrap:)) { mi.state = _content.wordWrap ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
     if (a == @selector(toggleMinimap:)) { mi.state = _content.showsMinimap ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
-    if (a == @selector(saveDocument:)) return _content.editor.isDirty;
+    // A draft is always savable (⌘S asks where): its edits go to a backup file, so the editor reads as clean.
+    if (a == @selector(saveDocument:)) return _content.tabCount > 0;     // a clean file: ⌘S does nothing, without a beep
     if (a == @selector(saveAllDocuments:)) return _content.dirtyCount > 0;
-    if (a == @selector(closeTab:) || a == @selector(closeAllTabs:)) return tabs > 0;
+    if (a == @selector(closeTab:)) return YES;               // a tab, else the key window (an empty main window too)
+    if (a == @selector(closeAllTabs:)) return tabs > 0;
     if (a == @selector(closeOtherTabs:) || a == @selector(nextTab:) || a == @selector(previousTab:)) return tabs > 1;
     if (a == @selector(selectTabByNumber:)) return mi.tag == 9 ? tabs > 0 : (NSUInteger)mi.tag <= tabs;
     if (a == @selector(pinTab:)) return tabs > 0;
@@ -265,7 +272,6 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
         mi.state = mi.tag == [NSUserDefaults.standardUserDefaults integerForKey:@"appearance"] ? NSControlStateValueOn : NSControlStateValueOff;
         return YES;
     }
-    if (a == @selector(saveDocument:) && _content.activeIsUntitled) return YES;      // ⌘S asks where to save it
     if (a == @selector(togglePreview:) || a == @selector(splitPreview:) || a == @selector(sourceOnly:)) {
         MarkupLayout l = _content.activeMarkupLayout;
         MarkupLayout mine = a == @selector(togglePreview:) ? MarkupPreview : a == @selector(splitPreview:) ? MarkupSplit : MarkupSource;
@@ -309,7 +315,11 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
 
 - (NSString *)targetPathFrom:(id)sender { return [self targetPathsFrom:sender].firstObject; }
 
-- (void)saveDocument:(id)s { [_content save]; [self updateTitle]; }
+- (void)saveDocument:(id)s {
+    if (!_content.activeIsUntitled && !_content.editor.isDirty) return;   // nothing to write; don't touch the file
+    [_content save];
+    [self updateTitle];
+}
 - (void)reloadTree:(id)s { [_tree reload]; }
 - (void)toggleHidden:(id)s { FTSettings.shared.showHidden = !FTSettings.shared.showHidden; }
 - (void)showSettings:(id)s { [SettingsWindow.shared reloadFromSettings]; [SettingsWindow.shared showWindow:nil]; [SettingsWindow.shared.window makeKeyAndOrderFront:nil]; }
@@ -386,7 +396,17 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
 }
 
 - (void)saveAllDocuments:(id)s { [_content saveAll]; [self updateTitle]; }
-- (void)closeTab:(id)s { if (_content.tabCount) [_content closeActive]; else [_win performClose:s]; }
+// ⌘W belongs to the key window: in Settings or a panel it closes that window, not a tab behind it.
+- (NSWindow *)windowForClose {
+    NSWindow *k = _keyWindowOverride ?: NSApp.keyWindow;
+    return k && k != _win && k.isVisible && (k.styleMask & NSWindowStyleMaskClosable) ? k : nil;
+}
+- (void)closeTab:(id)s {
+    NSWindow *other = self.windowForClose;
+    if (other) [other performClose:s];
+    else if (_content.tabCount) [_content closeActive];
+    else [_win performClose:s];
+}
 - (void)closeOtherTabs:(id)s { [_content closeOthers]; }
 - (void)closeAllTabs:(id)s { [_content closeAll]; }
 - (void)reopenClosedTab:(id)s { if (![_content reopenClosed]) NSBeep(); }

@@ -658,6 +658,7 @@ static NSArray<FWNameMatch *> *regexNames(NSRegularExpression *re, NSArray<NSStr
     if (gen != _gen) return;
     _contentRunning = NO;
     _truncated = truncated;
+    if (_engine.lastError) _error = _engine.lastError;
     [self reloadNow];
     [self updateStatus];
 }

@@ -99,7 +99,7 @@ static NSString *describe(NSError *e) {
     }
     if (!names.count) return FTL(@"None");
     if (names.count == 1) return names.firstObject;
-    return [NSString stringWithFormat:FTL(@"%@ and %lu more"), names.firstObject, (unsigned long)names.count];
+    return [NSString stringWithFormat:FTL(@"%@ and %lu more"), names.firstObject, (unsigned long)names.count - 1];
 }
 
 - (void)setGroup:(FileTypeGroup *)g toFeather:(BOOL)on done:(void (^)(NSString *))done {

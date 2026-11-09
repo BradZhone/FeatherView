@@ -4,6 +4,7 @@
 #import "SearchPanel.h"
 #import "QuickPicker.h"
 #import "WelcomeView.h"
+#import "FileWatcher.h"
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSSplitViewDelegate, NSMenuDelegate, NSMenuItemValidation> {
 @public
@@ -25,6 +26,8 @@
     id _defaultAppsPanel;
     NSString *(^_trashHandler)(NSString *path);         // tests: instead of the real Trash; returns an error
     NSPasteboard *_pasteboard;                          // tests: instead of the general pasteboard
+    FileWatcher *_watcher;                              // the workspace folder
+    __weak NSWindow *_keyWindowOverride;                // tests: stands in for NSApp.keyWindow
 }
 - (void)openRoot:(NSString *)root;
 - (BOOL)switchToRoot:(NSString *)root;     // asks about unsaved tabs first
@@ -32,6 +35,9 @@
 - (void)updateTitle;
 - (void)refreshWorkspaceUI;                // header popup + welcome page
 - (void)saveSession;
+- (void)mainWindowWillReappear;
+- (BOOL)openDroppedURLs:(NSArray<NSURL *> *)urls;       // files and folders dragged onto the window
+- (void)fileSystemChanged;                 // the workspace watcher fired           // after the window was closed: its session comes back, ⌘Q asks again
 - (void)showSidebarTab:(NSInteger)tab;     // 0 files, 1 search
 @end
 
@@ -43,6 +49,7 @@
 - (NSArray<NSString *> *)targetPathsFrom:(id)sender;   // context-menu paths, else the tree selection, else the open file
 - (void)copyItemPath:(id)sender;
 - (void)rebuildRootPopupMenu:(NSMenu *)menu;
+- (NSWindow *)windowForClose;                          // the key window when it isn't the main one
 @end
 
 @interface AppDelegate (Workspace)

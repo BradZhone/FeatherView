@@ -93,7 +93,7 @@ static BOOL isWide(unichar c) {
     NSUInteger s = [_buf lineStart:L], e = [_buf lineEnd:L], n = MIN(e - s, kMapReadBytes);
     NSData *raw = [_buf dataInRange:NSMakeRange(s, n)];
     const uint8_t *b = raw.bytes;
-    while (n > 0 && n < e - s && (b[n] & 0xC0) == 0x80) n--;
+    if (n < e - s) for (uint8_t next = [_buf byteAt:s + n]; n > 0 && (next & 0xC0) == 0x80; ) next = b[--n];
     NSString *str = [[NSString alloc] initWithBytes:b length:n encoding:NSUTF8StringEncoding] ?: @"";
     NSUInteger len = str.length;
     uint8_t *kinds = calloc(MAX(len, (NSUInteger)1), 1);
@@ -154,7 +154,8 @@ static void flushBucket(CGContextRef cg, NSUInteger k, CGRect *rects, NSUInteger
     }
 
     const NSUInteger kinds = TokKindCount, cap = 2048;
-    CGRect *buckets[TokKindCount] = {0};                    // allocated on first use: most files use a few kinds
+    NSMutableData *store[TokKindCount] = {nil};               // allocated on first use: most files use a few kinds
+    CGRect *buckets[TokKindCount] = {0};
     NSUInteger counts[TokKindCount] = {0};
     for (NSUInteger L = first; L < last; L++) {
         NSData *d = [self runsForLine:L];
@@ -164,12 +165,12 @@ static void flushBucket(CGContextRef cg, NSUInteger k, CGRect *rects, NSUInteger
             NSUInteger k = MIN(r[i].kind, (uint8_t)(TokKindCount - 1));
             CGFloat w = MIN(r[i].len * kMapChar, NSMaxX(m) - 4 - (x0 + r[i].col * kMapChar));
             if (w <= 0) continue;
-            if (!buckets[k]) buckets[k] = malloc(cap * sizeof(CGRect));
+            if (!buckets[k]) { store[k] = [NSMutableData dataWithLength:cap * sizeof(CGRect)]; buckets[k] = store[k].mutableBytes; }
             buckets[k][counts[k]++] = CGRectMake(x0 + r[i].col * kMapChar, y, w, kMapLine * 0.75);
             if (counts[k] == cap) flushBucket(cg, k, buckets[k], &counts[k]);
         }
     }
-    for (NSUInteger k = 0; k < kinds; k++) if (buckets[k]) { flushBucket(cg, k, buckets[k], &counts[k]); free(buckets[k]); }
+    for (NSUInteger k = 0; k < kinds; k++) if (buckets[k]) flushBucket(cg, k, buckets[k], &counts[k]);
 
     NSUInteger caretLine = [_buf lineForOffset:_caret];
     [[NSColor.controlAccentColor colorWithAlphaComponent:0.7] setFill];

@@ -73,7 +73,7 @@ static NSTextField *label(NSString *s, NSFont *f, NSColor *c) {
     [_stack setCustomSpacing:26 afterView:_stack.arrangedSubviews.lastObject];
 
     NSMutableArray *others = [NSMutableArray array];
-    for (NSString *r in _recent) if (![r isEqualToString:root]) [others addObject:r];
+    for (NSString *r in _recent) if (!root || ![r isEqualToString:root]) [others addObject:r];
     if (others.count) {
         [_stack addArrangedSubview:label(FTL(@"Recent Workspaces"), head, NSColor.secondaryLabelColor)];
         for (NSUInteger i = 0; i < MIN(others.count, (NSUInteger)8); i++) {

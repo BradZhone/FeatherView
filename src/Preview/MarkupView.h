@@ -26,6 +26,9 @@
 @property (nonatomic, readonly) NSView *webView;
 @property (nonatomic, copy) void (^onOpenFile)(NSString *path);
 @property (nonatomic, copy) void (^onLoad)(void);
+// Links open only right after a click or key press in the page, never from a script on its own.
+@property (nonatomic, copy) void (^onOpenExternal)(NSURL *url);   // tests; default opens in the browser
+- (void)noteUserGesture;                                   // tests: as if the user just clicked
 @property (nonatomic) CGFloat zoom;                        // page zoom, 1 = 100%
 @property (class, nonatomic) CGFloat defaultZoom;
 - (void)reload;
@@ -37,7 +40,7 @@
 - (instancetype)initWithEditor:(TextEditorView *)editor kind:(MarkupKind)kind path:(NSString *)path root:(NSString *)root;
 @property (nonatomic, readonly) TextEditorView *editor;
 @property (nonatomic, readonly) MarkupKind kind;
-@property (nonatomic) MarkupLayout layout;
+@property (nonatomic) MarkupLayout markupLayout;            // not "layout": that would replace -[NSView layout]
 @property (nonatomic, copy) NSString *path, *root;
 @property (nonatomic, readonly) MarkdownPreview *markdownView;   // nil unless kind is Markdown and preview exists
 @property (nonatomic, readonly) HTMLPreview *htmlView;

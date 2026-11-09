@@ -100,7 +100,7 @@ static NSRect closeRect(NSRect tab) { return NSMakeRect(NSMaxX(tab) - 24, NSMidY
 
 - (NSString *)view:(NSView *)v stringForToolTip:(NSToolTipTag)tag point:(NSPoint)p userData:(void *)data {
     NSInteger i = (intptr_t)data;
-    return i < (NSInteger)_items.count ? _items[i].toolTip : nil;
+    return (i < (NSInteger)_items.count ? _items[i].toolTip : nil) ?: @"";
 }
 
 - (void)drawRect:(NSRect)dirty {

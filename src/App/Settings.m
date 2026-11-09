@@ -11,7 +11,7 @@ NSNotificationName const FTSettingsDidChange = @"FTSettingsDidChange";
     dispatch_once(&once, ^{
         s = [FTSettings new];
         [NSUserDefaults.standardUserDefaults registerDefaults:@{
-            @"showHidden": @YES, @"respectGitignore": @YES, @"autoSaveMode": @1, @"showMinimap": @YES, @"wordWrap": @YES,
+            @"showHidden": @YES, @"respectGitignore": @YES, @"autoSaveMode": @1, @"showMinimap": @YES, @"wordWrap": @YES, @"remoteImages": @YES,
             @"alwaysHidden": FWDefaultAlwaysHidden(), @"searchSkipped": FWDefaultSearchSkipped()}];
     });
     return s;
@@ -32,6 +32,8 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 - (void)setShowsMinimap:(BOOL)v { [ud() setBool:v forKey:@"showMinimap"]; [self changed]; }
 - (BOOL)wordWrap { return [ud() boolForKey:@"wordWrap"]; }
 - (void)setWordWrap:(BOOL)v { [ud() setBool:v forKey:@"wordWrap"]; [self changed]; }
+- (BOOL)remoteImages { return [ud() boolForKey:@"remoteImages"]; }
+- (void)setRemoteImages:(BOOL)v { [ud() setBool:v forKey:@"remoteImages"]; [self changed]; }
 
 static NSArray *strings(id v) {
     NSMutableArray *out = [NSMutableArray array];

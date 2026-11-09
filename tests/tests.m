@@ -303,6 +303,77 @@ static void searchOptions(BOOL rg) {
 }
 
 
+static NSString *writeTree(NSDictionary<NSString *, NSString *> *files) {
+    NSString *root = [[NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString] stringByResolvingSymlinksInPath];
+    for (NSString *rel in files) {
+        NSString *p = [root stringByAppendingPathComponent:rel];
+        [NSFileManager.defaultManager createDirectoryAtPath:p.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+        [[files[rel] dataUsingEncoding:NSUTF8StringEncoding] writeToFile:p atomically:NO];
+    }
+    return root;
+}
+
+static NSSet<NSString *> *relPaths(NSArray<SearchHit *> *hits, NSString *root) {
+    NSMutableSet *out = [NSMutableSet set];
+    for (SearchHit *h in hits) [out addObject:[h.path substringFromIndex:MIN(root.length + 1, h.path.length)]];
+    return out;
+}
+
+static void searchSafety(BOOL rg) {
+    NSString *pad = [@"" stringByPaddingToLength:5000 withString:@"x" startingAtIndex:0];
+    NSString *root = writeTree(@{@".gitignore": @"gen/\nsecret.ts\n", @"src/a.ts": @"needle\n", @".hidden.ts": @"needle\n",
+                                 @".cache/b.ts": @"needle\n", @"gen/c.ts": @"needle\n", @"src/secret.ts": @"needle\n",
+                                 @"long.txt": [NSString stringWithFormat:@"%@needle tail\n", pad],
+                                 @"evil.txt": [[@"" stringByPaddingToLength:28 withString:@"a" startingAtIndex:0] stringByAppendingString:@"!\n"]});
+    NSTask *git = [NSTask new];
+    git.executableURL = [NSURL fileURLWithPath:@"/usr/bin/git"];
+    git.arguments = @[@"init", @"-q", root];
+    [git launchAndReturnError:nil];
+    [git waitUntilExit];
+
+    // An include filter must not bring back hidden or ignored files.
+    for (NSString *f in @[@".ts", @"*.ts", @"src"]) {
+        SearchOptions *o = [SearchOptions new];
+        o.filter = [FWPathFilter filterWithString:f];
+        NSSet *got = relPaths(runSearchWith(@"needle", root, o, rg), root);
+        NSSet *want = rg ? [NSSet setWithObject:@"src/a.ts"] : [NSSet setWithObjects:@"src/a.ts", @"src/secret.ts", @"gen/c.ts", nil];
+        if ([f isEqualToString:@"src"]) want = rg ? [NSSet setWithObject:@"src/a.ts"] : [NSSet setWithObjects:@"src/a.ts", @"src/secret.ts", nil];
+        CHECK([got isEqualToSet:want], "rg=%d filter %s skips hidden and ignored files: %s", rg, f.UTF8String, got.description.UTF8String);
+    }
+
+    // A match far into a long line: right column, and the preview shows it.
+    for (NSNumber *regex in @[@NO, @YES]) {
+        SearchOptions *o = [SearchOptions new];
+        o.regex = regex.boolValue;
+        NSArray<SearchHit *> *hits = runSearchWith(regex.boolValue ? @"nee+dle" : @"needle", root, o, rg);
+        SearchHit *h = nil;
+        for (SearchHit *x in hits) if ([x.path hasSuffix:@"long.txt"]) h = x;
+        CHECK(h && h.column == 5001 && h.matchBytes == 6 && [h.preview containsString:@"needle"] && h.previewMatch.location != NSNotFound,
+              "rg=%d regex=%d long line: col %lu, preview “%s”", rg, regex.boolValue, (unsigned long)h.column,
+              [h.preview substringFromIndex:h.preview.length > 30 ? h.preview.length - 30 : 0].UTF8String);
+    }
+
+    // Lookbehind: rg's engine rejects it, so the built-in scanner runs instead of showing "no results".
+    SearchOptions *o = [SearchOptions new];
+    o.regex = YES;
+    NSSet *got = relPaths(runSearchWith(@"(?<=x)needle", root, o, rg), root);
+    CHECK([got isEqualToSet:[NSSet setWithObject:@"long.txt"]], "rg=%d lookbehind regex: %s", rg, got.description.UTF8String);
+
+    // Catastrophic backtracking gives up on the line instead of hanging the search.
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    runSearchWith(@"(a+)+$", root, o, NO);
+    CHECK(CFAbsoluteTimeGetCurrent() - t0 < 6, "a pathological regex finishes (%.1f s)", CFAbsoluteTimeGetCurrent() - t0);
+
+    // A workspace opened through a symlink is searched.
+    NSString *link = [root stringByAppendingString:@"-link"];
+    symlink(root.fileSystemRepresentation, link.fileSystemRepresentation);
+    NSUInteger n = 0;
+    for (SearchHit *h in runSearchWith(@"needle", link, [SearchOptions new], rg)) if ([h.path hasSuffix:@"src/a.ts"]) n++;
+    CHECK(n == 1, "rg=%d search through a symlinked workspace folder", rg);
+    unlink(link.fileSystemRepresentation);
+    [NSFileManager.defaultManager removeItemAtPath:root error:nil];
+}
+
 static NSData *U(NSString *s) { return [s dataUsingEncoding:NSUTF8StringEncoding]; }
 
 static void csvTables(void) {
@@ -355,6 +426,25 @@ static void jsonTrees(void) {
     CHECK(pl.children.count == 3 && [pl.children[0].key isEqual:@"a"] && pl.children[1].kind == JSONBool && [pl.children[0].children[1].text hasPrefix:@"2 bytes  0102"] &&
           pl.children[2].kind == JSONDate, "property list: sorted keys, bool, data, date");
     CHECK(JSONNodeCount(r, 100) == 9, "node count (%lu)", (unsigned long)JSONNodeCount(r, 100));
+
+    // A 200-byte binary plist whose arrays all refer to the previous one: 2^40 leaves if expanded.
+    NSMutableData *bomb = [[@"bplist00" dataUsingEncoding:NSASCIIStringEncoding] mutableCopy];
+    NSMutableArray<NSNumber *> *offs = [NSMutableArray array];
+    [offs addObject:@(bomb.length)]; [bomb appendBytes:"\x54leaf" length:5];
+    for (uint8_t k = 1; k <= 40; k++) { [offs addObject:@(bomb.length)]; uint8_t a[3] = {0xA2, (uint8_t)(k - 1), (uint8_t)(k - 1)}; [bomb appendBytes:a length:3]; }
+    uint64_t table = bomb.length;
+    for (NSNumber *o in offs) { uint8_t b = o.unsignedCharValue; [bomb appendBytes:&b length:1]; }
+    uint8_t trailer[32] = {0};
+    trailer[6] = 1; trailer[7] = 1;
+    uint64_t be[3] = {CFSwapInt64HostToBig(offs.count), CFSwapInt64HostToBig(offs.count - 1), CFSwapInt64HostToBig(table)};
+    memcpy(trailer + 8, be, 24);
+    [bomb appendBytes:trailer length:32];
+    id bombObj = [NSPropertyListSerialization propertyListWithData:bomb options:NSPropertyListImmutable format:NULL error:nil];
+    CFAbsoluteTime b0 = CFAbsoluteTimeGetCurrent();
+    JSONNode *br = JSONFromPropertyList(bombObj);
+    NSUInteger bn = JSONNodeCount(br, 10000000);
+    CHECK(bombObj && bn <= 2000001 && CFAbsoluteTimeGetCurrent() - b0 < 3, "a plist that expands exponentially is cut off (%lu nodes, %.1f s)",
+          (unsigned long)bn, CFAbsoluteTimeGetCurrent() - b0);
 }
 
 static void notebooks(void) {
@@ -373,6 +463,11 @@ static void notebooks(void) {
     NSArray *files = [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil];
     CHECK(files.count == 1 && [md containsString:@"![]("] && ![md containsString:@"<Figure>"], "image output written and linked instead of its text");
     CHECK([NotebookToMarkdown(U(@"{\"x\":1}"), dir, NULL) containsString:@"Couldn’t read"], "not a notebook → explanation");
+    // Wrong types anywhere (hand-edited or other tools) must not throw.
+    NSString *odd = NotebookToMarkdown(U(@"{\"metadata\": {\"language_info\": \"python\", \"kernelspec\": [1]},"
+        "\"cells\": [{\"cell_type\": 3, \"source\": \"x\"}, {\"cell_type\": \"markdown\", \"source\": \"y\", \"attachments\": {\"a.png\": \"zz\", \"b.png\": {\"7\": 1}}},"
+        "{\"cell_type\": \"code\", \"source\": \"z\", \"outputs\": [{\"output_type\": \"error\", \"ename\": 5}, {\"output_type\": [], \"data\": []}]}]}"), dir, NULL);
+    CHECK([odd containsString:@"```python\nz\n```"], "a notebook with odd metadata types still renders: %s", odd.UTF8String);
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
 }
 
@@ -424,7 +519,9 @@ int main(void) {
         jsonTrees();
         notebooks();
         hiddenLists();
+        searchSafety(NO);
         if ([WorkspaceSearch ripgrepPath]) searchOptions(YES);
+        if ([WorkspaceSearch ripgrepPath]) searchSafety(YES);
         if ([WorkspaceSearch ripgrepPath]) workspaceSearch(root, YES);
         else printf("(ripgrep not installed; rg path not tested)\n");
         fileOps(root);

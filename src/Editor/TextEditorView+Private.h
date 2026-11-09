@@ -13,6 +13,7 @@ typedef NS_ENUM(NSInteger, GroupKind) { GroupOther, GroupTyping, GroupBackspace 
 
 @interface EditGroup : NSObject
 @property NSMutableArray<EditOp *> *ops;
+@property PieceTable *swapBuffer;        // set: the group replaces the whole buffer (Replace All); undo swaps back
 @property NSUInteger caretBefore, caretAfter, serial;
 @property GroupKind kind;
 @end
@@ -44,6 +45,12 @@ typedef NS_ENUM(NSInteger, GroupKind) { GroupOther, GroupTyping, GroupBackspace 
     NSUInteger _rowCap, _wrapLines;
     CGFloat _wrapWidth;                  // text width the table was built for
     CGFloat _pendingTop;                 // logical line to keep at the top across a rebuild, -1 = none
+    PTUnicodeIndex *_uindex;              // find with Unicode case folding; rebuilt when _uindexEdit != _editCount
+    NSUInteger _uindexEdit;
+    NSString *_killed;                   // ⌃K text, for ⌃Y
+    NSTimer *_dragScroll;                // autoscroll while a selection drag is outside the view
+    NSPoint _dragPoint;
+    NSUInteger _axEdit;                  // last edit VoiceOver was told about
     NSRange _editLines;                  // lines touched by the edit in progress (beginEdit:)
     BOOL _bulkEdit;                      // many ops at once: rebuild instead of splicing
     NSMutableDictionary<id, NSNumber *> *_advances;   // cluster → advance, for non-ASCII
@@ -108,9 +115,13 @@ typedef struct { NSUInteger count; uint32_t *starts; CGFloat indent; } WrapRows;
 - (void)moveCaretTo:(NSUInteger)off extend:(BOOL)extend;
 - (void)replaceRange:(NSRange)r withString:(NSString *)s kind:(GroupKind)kind;
 - (void)notifyChange;
+- (void)applyGroup:(EditGroup *)g inverse:(BOOL)inverse;
+- (void)pushUndo:(EditGroup *)g;
+- (PTUnicodeIndex *)unicodeIndexFor:(NSString *)needle;   // nil: the byte search applies                // keeps at most 2000 groups   // undo (inverse) / redo of one group
 - (void)undo:(id)sender;
 - (void)redo:(id)sender;
 @end
 
 @interface TextEditorView (Input) <NSTextInputClient>
+- (void)dragTo:(NSPoint)p;                      // selection drag, also from the autoscroll timer
 @end

@@ -89,6 +89,51 @@ int main(void) {
         for (NSString *s in @[@"", @"\n\n", @"[", @"]", @"![", @"<", @"&", @"*", @"`", @"|", @"- ", @"1.", @"> ", @"```", @"[a](", @"<a href=\"", @"*_*_~~"])
             MDRenderHTML(MDParse(s));
         C(YES, "no crash on fragments");
+
+        // emphasis and links per the CommonMark spec (the linear-time rewrite must agree)
+        T(@"*foo**bar*", @"<p><em>foo**bar</em></p>");
+        T(@"*foo *bar**", @"<p><em>foo <em>bar</em></em></p>");
+        T(@"***foo** bar*", @"<p><em><strong>foo</strong> bar</em></p>");
+        T(@"*foo**bar***", @"<p><em>foo<strong>bar</strong></em></p>");
+        T(@"foo***bar***baz", @"<p>foo<em><strong>bar</strong></em>baz</p>");
+        T(@"**foo*bar*baz**", @"<p><strong>foo<em>bar</em>baz</strong></p>");
+        T(@"*a **b** c*", @"<p><em>a <strong>b</strong> c</em></p>");
+        T(@"*[foo*](/uri)", @"<p>*<a href=\"/uri\">foo*</a></p>");
+        T(@"[foo [bar](/u)](/v)", @"<p>[foo <a href=\"/u\">bar</a>](/v)</p>");
+        T(@"[a](/u) [b [c](/v)](/w) [d](/x)", @"<p><a href=\"/u\">a</a> [b <a href=\"/v\">c</a>](/w) <a href=\"/x\">d</a></p>");
+        T(@"![a [b](/u) c](/i)", @"<p><img src=\"/i\" alt=\"a b c\"></p>");
+        T(@"` a `` b ` and ``c``", @"<p><code>a `` b</code> and <code>c</code></p>");
+        T(@"x ``` y `` z ` w", @"<p>x ``` y `` z ` w</p>");
+
+        // pathological input stays fast (each was quadratic: seconds for ~100 KB)
+        NSString *(^rep)(NSString *, NSUInteger) = ^(NSString *s, NSUInteger k) { return [@"" stringByPaddingToLength:s.length * k withString:s startingAtIndex:0]; };
+        NSDictionary<NSString *, NSString *> *slow = @{
+            @"matched emphasis": rep(@"*a* ", 30000), @"unmatched closers": rep(@"a* ", 30000), @"alternating": rep(@"*a_ ", 30000),
+            @"nested brackets": [rep(@"[", 30000) stringByAppendingString:rep(@"]", 30000)],
+            @"brackets then links": [rep(@"[", 20000) stringByAppendingString:rep(@"[a](b)", 20000)],
+            @"nested labels": [rep(@"[a", 20000) stringByAppendingString:rep(@"]", 20000)],
+            @"unclosed titles": rep(@"[a](b \"", 20000), @"unclosed comments": rep(@"<!-- ", 20000),
+            @"code runs": [rep(@"`", 300) stringByAppendingString:rep(@"x``` `` ", 20000)],
+            @"url parens": [@"https://x.y/" stringByAppendingString:rep(@")", 50000)],
+        };
+        for (NSString *name in slow) {
+            CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+            MDDocument *doc = MDParse(slow[name]);
+            for (MDBlock *b in doc.blocks) if (b.text) [doc inlines:b.text];
+            double secs = CFAbsoluteTimeGetCurrent() - t0;
+            C(secs < 1.5, [NSString stringWithFormat:@"%@ parses in %.2f s", name, secs].UTF8String);
+        }
+
+        // nesting is capped, so parsing and rendering can't run out of stack
+        NSMutableString *lists = [NSMutableString string];
+        for (NSUInteger k = 0; k < 300; k++) [lists appendFormat:@"%@- x\n", [@"" stringByPaddingToLength:k * 2 withString:@" " startingAtIndex:0]];
+        NSUInteger depth = 0;
+        for (MDBlock *b = MDParse(lists).blocks.firstObject; b.children.count; b = b.children.lastObject) depth++;
+        C(depth > 40 && depth < 120, [NSString stringWithFormat:@"300 nested lists capped (%lu levels)", (unsigned long)depth].UTF8String);
+        C(MDRenderHTML(MDParse([rep(@">", 200000) stringByAppendingString:@" deep"])).length > 0, "200 000 nested quotes");
+        C(MDRenderHTML(MDParse([[rep(@"*", 100000) stringByAppendingString:@"a"] stringByAppendingString:rep(@"*", 100000)])).length > 0, "100 000 nested emphasis");
+        C(MDRenderHTML(MDParse([[rep(@"[", 50000) stringByAppendingString:@"a"] stringByAppendingString:rep(@"](u)", 50000)])).length > 0, "50 000 nested links");
+        C(MDRenderHTML(MDParse([[rep(@"![", 50000) stringByAppendingString:@"a"] stringByAppendingString:rep(@"](u)", 50000)])).length > 0, "50 000 nested images");
     }
     if (failures) { printf("%d/%d markdown failure(s)\n", failures, total); return 1; }
     printf("all %d markdown tests passed\n", total);

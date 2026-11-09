@@ -148,9 +148,11 @@ static id<TableModel> parse(NSData *d, BOOL jsonl, unichar delim, NSInteger head
     [self install:model];
 }
 
+- (NSUInteger)shownColumns { return MIN(_model.columnCount, kMaxShownColumns); }
+
 - (void)install:(id<TableModel>)m {
     BOOL sameShape = _model && m.columnCount == _model.columnCount;
-    for (NSUInteger c = 0; sameShape && c < m.columnCount; c++)
+    for (NSUInteger c = 0; sameShape && c < MIN(m.columnCount, kMaxShownColumns); c++)
         if (![[m headerForColumn:c] isEqualToString:[_model headerForColumn:c]]) sameShape = NO;
     _keepScroll = _model != nil && sameShape;
     _model = m;
@@ -199,7 +201,7 @@ static id<TableModel> parse(NSData *d, BOOL jsonl, unichar delim, NSInteger head
     g.resizingMask = NSTableColumnNoResizing;
     [_table addTableColumn:g];
     NSUInteger sample = MIN(_model.rowCount, (NSUInteger)120);
-    for (NSUInteger c = 0; c < _model.columnCount; c++) {
+    for (NSUInteger c = 0; c < self.shownColumns; c++) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"%lu", (unsigned long)c]];
         col.title = [_model headerForColumn:c];
         col.headerToolTip = col.title;

@@ -2,9 +2,22 @@
 
 NSString *MDNormLabel(NSString *s);
 
+static const NSUInteger kMaxInlineDepth = 32;          // deeper emphasis / links stay literal text
+static const NSUInteger kMaxLabel = 999;                // CommonMark's limit for a link label
+
+@interface MDInline ()
+@property (nonatomic) NSUInteger depth;                 // nesting below this node
+@end
+
 @implementation MDInline
 + (instancetype)text:(NSString *)s { MDInline *n = [MDInline new]; n.type = MDText; n.text = s; return n; }
 @end
+
+static NSUInteger depthOf(NSArray<MDInline *> *children) {
+    NSUInteger d = 0;
+    for (MDInline *x in children) d = MAX(d, x.depth + 1);
+    return d;
+}
 
 static BOOL isPunct(unichar c) {
     return (c >= '!' && c <= '/') || (c >= ':' && c <= '@') || (c >= '[' && c <= '`') || (c >= '{' && c <= '~') ||
@@ -34,7 +47,11 @@ static BOOL isSpace(unichar c) { return c == 0 || c == ' ' || c == '\n' || c == 
     NSMutableArray<MDInline *> *nodes;
     NSMutableArray<MDDelim *> *delims;
     NSMutableArray<MDBracket *> *brackets;
+    NSUInteger linkFloor;                                // brackets below this index are inside a link: inactive
     NSMutableString *buf;
+    // Positions from which a scan is known to fail, so repeated unclosed constructs stay linear.
+    NSMutableDictionary<NSNumber *, NSNumber *> *noCodeRun;   // backtick run length → no closing run at or after
+    NSUInteger noDestFrom, noCommentFrom, noQuoteFrom[3];
 }
 @end
 
@@ -92,22 +109,27 @@ static NSString *entity(NSString *name) {
         if (k >= n || s[k] != '>') return NO;
         dest = [self sub:ds to:k]; k++;
     } else {
+        if (k >= noDestFrom) return NO;
         NSInteger depth = 0;
+        BOOL closer = NO;
         while (k < n && !isSpace(s[k])) {
             if (s[k] == '\\' && k + 1 < n) { k += 2; continue; }
             if (s[k] == '(') depth++;
-            if (s[k] == ')') { if (depth == 0) break; depth--; }
+            if (s[k] == ')') { closer = YES; if (depth == 0) break; depth--; }
             k++;
         }
+        if (k >= n && !closer) noDestFrom = MIN(noDestFrom, ds);     // no space and no ")" to the end
         dest = [self sub:ds to:k];
     }
     while (k < n && isSpace(s[k])) k++;
     NSString *t = @"";
     if (k < n && (s[k] == '"' || s[k] == '\'' || s[k] == '(')) {
         unichar close = s[k] == '(' ? ')' : s[k];
+        int qi = close == '"' ? 0 : close == '\'' ? 1 : 2;
         NSUInteger ts = ++k;
+        if (ts >= noQuoteFrom[qi]) return NO;
         while (k < n && s[k] != close) { if (s[k] == '\\') k++; k++; }
-        if (k >= n) return NO;
+        if (k >= n) { noQuoteFrom[qi] = MIN(noQuoteFrom[qi], ts); return NO; }
         t = [self sub:ts to:k]; k++;
         while (k < n && isSpace(s[k])) k++;
     }
@@ -125,54 +147,105 @@ static inline BOOL special(unichar c) {
 
 static NSArray<MDInline *> *mergeText(NSArray<MDInline *> *a) {
     NSMutableArray *o = [NSMutableArray arrayWithCapacity:a.count];
+    NSMutableString *run = nil;
     for (MDInline *x in a) {
-        if (x.type == MDText && !x.text.length) continue;
-        MDInline *last = o.lastObject;
-        if (x.type == MDText && last && last.type == MDText) { o[o.count - 1] = [MDInline text:[last.text stringByAppendingString:x.text]]; continue; }
+        if (x.type == MDText) { if (x.text.length) { if (!run) run = [NSMutableString string]; [run appendString:x.text]; } continue; }
+        if (run) { [o addObject:[MDInline text:run]]; run = nil; }
         [o addObject:x];
     }
+    if (run) [o addObject:[MDInline text:run]];
     return o;
 }
 
 static MDInline *node(MDInlineType t) { MDInline *x = [MDInline new]; x.type = t; return x; }
 
+static BOOL canPair(MDDelim *o, MDDelim *c) {
+    if (o.ch != c.ch || !o.canOpen || !o.len) return NO;
+    if (c.ch == '~') return o.len == c.len;
+    return !((o.canClose || c.canOpen) && (o.origLen + c.origLen) % 3 == 0 && !(o.origLen % 3 == 0 && c.origLen % 3 == 0));
+}
+
+// CommonMark's "process emphasis", as in cmark: nodes and delimiters are linked lists, and for each kind of
+// closer the position below which no opener can match is remembered, so the work stays linear.
 static void processEmphasis(NSMutableArray<MDInline *> *nodes, NSMutableArray<MDDelim *> *delims) {
-    NSUInteger ci = 0;
-    while (ci < delims.count) {
-        MDDelim *closer = delims[ci];
-        if (!closer.canClose || !closer.len) { ci++; continue; }
-        NSInteger oi = (NSInteger)ci - 1;
-        MDDelim *opener = nil;
-        for (; oi >= 0; oi--) {
-            MDDelim *o = delims[oi];
-            if (o.ch != closer.ch || !o.canOpen || !o.len) continue;
-            if (closer.ch == '~' && o.len != closer.len) continue;
-            if (closer.ch != '~' && (o.canClose || closer.canOpen) && (o.origLen + closer.origLen) % 3 == 0 &&
-                !(o.origLen % 3 == 0 && closer.origLen % 3 == 0)) continue;
-            opener = o;
-            break;
-        }
-        if (!opener) { ci++; continue; }
-        NSUInteger a = [nodes indexOfObjectIdenticalTo:opener.node], b = [nodes indexOfObjectIdenticalTo:closer.node];
-        if (a == NSNotFound || b == NSNotFound || b <= a) { ci++; continue; }
-        NSUInteger use = closer.ch == '~' ? closer.len : (opener.len >= 2 && closer.len >= 2 ? 2 : 1);
-        MDInline *wrap = node(closer.ch == '~' ? MDStrike : (use == 2 ? MDStrong : MDEmph));
-        wrap.children = mergeText([nodes subarrayWithRange:NSMakeRange(a + 1, b - a - 1)]);
-        [nodes replaceObjectsInRange:NSMakeRange(a + 1, b - a - 1) withObjectsFromArray:@[wrap]];
-        opener.len -= use; closer.len -= use;
-        opener.node.text = [opener.node.text substringToIndex:opener.len];
-        closer.node.text = [closer.node.text substringToIndex:closer.len];
-        [delims removeObjectsInRange:NSMakeRange(oi + 1, ci - oi - 1)];
-        ci = oi + 1;
-        if (!opener.len) { [nodes removeObjectIdenticalTo:opener.node]; [delims removeObjectAtIndex:oi]; ci--; }
-        if (!closer.len) { [nodes removeObjectIdenticalTo:closer.node]; [delims removeObjectAtIndex:ci]; }
+    NSUInteger nd = delims.count;
+    if (!nd) return;
+    NSMutableArray<MDInline *> *cells = [nodes mutableCopy];          // cell id → node; wraps are appended
+    NSUInteger cap = nodes.count + 1;
+    for (MDDelim *d in delims) cap += d.len;
+    NSInteger *np = malloc(cap * sizeof(NSInteger)), *nx = malloc(cap * sizeof(NSInteger));
+    NSInteger *dp = malloc(nd * sizeof(NSInteger)), *dx = malloc(nd * sizeof(NSInteger)), *dc = malloc(nd * sizeof(NSInteger));
+    __block NSInteger head = nodes.count ? 0 : -1;
+    for (NSUInteger k = 0; k < nodes.count; k++) { np[k] = (NSInteger)k - 1; nx[k] = k + 1 < nodes.count ? (NSInteger)k + 1 : -1; }
+    NSMapTable *cellOf = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory];
+    for (NSUInteger k = 0; k < nodes.count; k++) [cellOf setObject:@(k) forKey:nodes[k]];
+    __block NSInteger first = -1;
+    NSInteger last = -1;
+    for (NSUInteger k = 0; k < nd; k++) {
+        NSNumber *c = [cellOf objectForKey:delims[k].node];
+        dc[k] = c ? c.integerValue : -1;
+        if (dc[k] < 0) continue;
+        dp[k] = last; dx[k] = -1;
+        if (last >= 0) dx[last] = (NSInteger)k; else first = (NSInteger)k;
+        last = (NSInteger)k;
     }
+    void (^unlinkCell)(NSInteger) = ^(NSInteger c) {
+        if (np[c] >= 0) nx[np[c]] = nx[c]; else head = nx[c];
+        if (nx[c] >= 0) np[nx[c]] = np[c];
+    };
+    void (^unlinkDelim)(NSInteger) = ^(NSInteger d) {
+        if (dp[d] >= 0) dx[dp[d]] = dx[d]; else first = dx[d];
+        if (dx[d] >= 0) dp[dx[d]] = dp[d];
+    };
+    NSInteger bottom[3][2][3];
+    for (int a = 0; a < 3; a++) for (int b = 0; b < 2; b++) for (int c = 0; c < 3; c++) bottom[a][b][c] = -1;
+    NSInteger ci = first;
+    while (ci >= 0) {
+        MDDelim *c = delims[ci];
+        if (!c.canClose) { ci = dx[ci]; continue; }
+        NSInteger *bot = &bottom[c.ch == '*' ? 0 : c.ch == '_' ? 1 : 2][c.canOpen][c.origLen % 3];
+        NSInteger oi = dp[ci];
+        while (oi >= 0 && oi > *bot && !canPair(delims[oi], c)) oi = dp[oi];
+        MDDelim *o = oi >= 0 && oi > *bot ? delims[oi] : nil;
+        NSMutableArray *children = nil;
+        if (o) {
+            children = [NSMutableArray array];
+            for (NSInteger k = nx[dc[oi]]; k >= 0 && k != dc[ci]; k = nx[k]) [children addObject:cells[k]];
+            if (depthOf(children) >= kMaxInlineDepth) o = nil;      // too deep: these stay literal
+        }
+        if (!o) {
+            *bot = dp[ci];
+            NSInteger next = dx[ci];
+            if (!c.canOpen) unlinkDelim(ci);
+            ci = next;
+            continue;
+        }
+        NSUInteger use = c.ch == '~' ? c.len : (o.len >= 2 && c.len >= 2 ? 2 : 1);
+        MDInline *wrap = node(c.ch == '~' ? MDStrike : (use == 2 ? MDStrong : MDEmph));
+        wrap.children = mergeText(children);
+        wrap.depth = depthOf(wrap.children);
+        NSInteger w = (NSInteger)cells.count;
+        [cells addObject:wrap];
+        np[w] = dc[oi]; nx[w] = dc[ci];
+        nx[dc[oi]] = w; np[dc[ci]] = w;
+        dx[oi] = ci; dp[ci] = oi;                                     // delimiters in between are done
+        o.len -= use; c.len -= use;
+        o.node.text = [o.node.text substringToIndex:o.len];
+        c.node.text = [c.node.text substringToIndex:c.len];
+        if (!o.len) { unlinkCell(dc[oi]); unlinkDelim(oi); }
+        if (!c.len) { NSInteger next = dx[ci]; unlinkCell(dc[ci]); unlinkDelim(ci); ci = next; }
+    }
+    [nodes removeAllObjects];
+    for (NSInteger k = head; k >= 0; k = nx[k]) [nodes addObject:cells[k]];
+    free(np); free(nx); free(dp); free(dx); free(dc);
 }
 
 - (void)codeSpan {
     NSUInteger k = i;
     while (k < n && s[k] == '`') k++;
     NSUInteger run = k - i, j = k;
+    NSNumber *none = noCodeRun[@(run)];
+    if (none && k >= none.unsignedIntegerValue) j = n;              // known: no closing run of this length
     while (j < n) {
         if (s[j] != '`') { j++; continue; }
         NSUInteger e = j;
@@ -189,6 +262,7 @@ static void processEmphasis(NSMutableArray<MDInline *> *nodes, NSMutableArray<MD
         }
         j = e;
     }
+    if (!none || k < none.unsignedIntegerValue) noCodeRun[@(run)] = @(k);
     [buf appendString:[self sub:i to:k]];
     i = k;
 }
@@ -229,29 +303,34 @@ static void processEmphasis(NSMutableArray<MDInline *> *nodes, NSMutableArray<MD
     NSUInteger labelEnd = i;
     i++;
     NSUInteger after = i;
-    if (!op || !op.active) { if (op) [brackets removeLastObject]; [buf appendString:@"]"]; return; }
+    BOOL active = op.active && (op.image || brackets.count - 1 >= linkFloor);     // no links inside links
+    if (!op || !active) { if (op) [self popBracket]; [buf appendString:@"]"]; return; }
     NSString *url = nil, *title = @"";
     BOOL ok = i < n && s[i] == '(' && [self inlineDest:&url title:&title];
     if (!ok) {
         i = after;
-        NSString *own = [self sub:op.textStart to:labelEnd], *label = own;
         NSUInteger resume = after;
-        if (i < n && s[i] == '[') {
+        BOOL lookup = refs.count && labelEnd - op.textStart <= kMaxLabel;
+        NSString *own = lookup ? [self sub:op.textStart to:labelEnd] : @"", *label = own;
+        if (lookup && i < n && s[i] == '[') {
             NSUInteger k = i + 1;
-            while (k < n && s[k] != ']' && s[k] != '[') { if (s[k] == '\\') k++; k++; }
+            while (k < n && k - i <= kMaxLabel && s[k] != ']' && s[k] != '[') { if (s[k] == '\\') k++; k++; }
             if (k < n && s[k] == ']') {
                 NSString *l = [self sub:i + 1 to:k];
                 if (l.length) label = l;
                 resume = k + 1;
             }
         }
-        NSArray *ref = refs[MDNormLabel(label)];
-        if (!ref && ![label isEqualToString:own]) { ref = refs[MDNormLabel(own)]; resume = after; }
+        NSArray *ref = lookup ? refs[MDNormLabel(label)] : nil;
+        if (lookup && !ref && ![label isEqualToString:own]) { ref = refs[MDNormLabel(own)]; resume = after; }
         if (ref) { url = ref[0]; title = ref[1]; ok = YES; i = resume; }
     }
-    if (!ok) { [brackets removeLastObject]; [buf appendString:@"]"]; i = after; return; }
+    if (!ok) { [self popBracket]; [buf appendString:@"]"]; i = after; return; }
     [self flush];
-    NSUInteger at = [nodes indexOfObjectIdenticalTo:op.node];
+    NSUInteger at = nodes.count;                                    // from the end: the label is what follows it
+    while (at > 0 && nodes[at - 1] != op.node) at--;
+    if (!at) { [self popBracket]; [buf appendString:@"]"]; i = after; return; }
+    at--;
     NSMutableArray *inner = [[nodes subarrayWithRange:NSMakeRange(at + 1, nodes.count - at - 1)] mutableCopy];
     NSRange dr = NSMakeRange(op.delimDepth, delims.count - op.delimDepth);
     NSMutableArray *innerDelims = [[delims subarrayWithRange:dr] mutableCopy];
@@ -259,11 +338,18 @@ static void processEmphasis(NSMutableArray<MDInline *> *nodes, NSMutableArray<MD
     [delims removeObjectsInRange:dr];
     MDInline *ln = node(op.image ? MDImage : MDLink);
     ln.url = url; ln.title = title; ln.children = mergeText(inner);
+    ln.depth = depthOf(ln.children);
+    if (ln.depth >= kMaxInlineDepth) ln.children = @[[MDInline text:MDPlainText(ln.children)]];
     if (op.image) ln.text = MDPlainText(ln.children);
     [nodes removeObjectsInRange:NSMakeRange(at, nodes.count - at)];
     [nodes addObject:ln];
+    [self popBracket];
+    if (!op.image) linkFloor = brackets.count;
+}
+
+- (void)popBracket {
     [brackets removeLastObject];
-    if (!op.image) for (MDBracket *b in brackets) if (!b.image) b.active = NO;
+    linkFloor = MIN(linkFloor, brackets.count);
 }
 
 - (BOOL)angle {
@@ -289,6 +375,7 @@ static void processEmphasis(NSMutableArray<MDInline *> *nodes, NSMutableArray<MD
         }
     }
     if (k + 2 < n && s[k] == '!' && s[k + 1] == '-' && s[k + 2] == '-') {
+        if (k + 3 >= noCommentFrom) return NO;
         for (NSUInteger q = k + 3; q + 2 < n; q++) {
             if (s[q] == '-' && s[q + 1] == '-' && s[q + 2] == '>') {
                 MDInline *r = node(MDRawHTML); r.text = [self sub:i to:q + 3];
@@ -297,6 +384,7 @@ static void processEmphasis(NSMutableArray<MDInline *> *nodes, NSMutableArray<MD
                 return YES;
             }
         }
+        noCommentFrom = k + 3;
         return NO;
     }
     NSUInteger t = k;
@@ -344,14 +432,12 @@ static void processEmphasis(NSMutableArray<MDInline *> *nodes, NSMutableArray<MD
     if (!pre) return NO;
     NSUInteger k = i + pre;
     while (k < n && !isSpace(s[k]) && s[k] != '<' && s[k] != '[' && s[k] != ']' && s[k] != '`') k++;
+    NSInteger bal = 0;
+    for (NSUInteger q = i; q < k; q++) bal += s[q] == '(' ? 1 : s[q] == ')' ? -1 : 0;
     while (k > i + pre) {
         unichar e = s[k - 1];
-        if (strchr(".,:;!?\"'*_~", e) && e < 128) { k--; continue; }
-        if (e == ')') {
-            NSInteger bal = 0;
-            for (NSUInteger q = i; q < k; q++) bal += s[q] == '(' ? 1 : s[q] == ')' ? -1 : 0;
-            if (bal < 0) { k--; continue; }
-        }
+        if (e && e < 128 && strchr(".,:;!?\"'*_~", e)) { k--; continue; }
+        if (e == ')' && bal < 0) { k--; bal++; continue; }
         break;
     }
     if (k <= i + pre) return NO;
@@ -410,6 +496,9 @@ NSArray<MDInline *> *MDParseInline(NSString *str, NSDictionary *refs) {
     p->delims = [NSMutableArray array];
     p->brackets = [NSMutableArray array];
     p->buf = [NSMutableString string];
+    p->noCodeRun = [NSMutableDictionary dictionary];
+    p->noDestFrom = p->noCommentFrom = NSUIntegerMax;
+    for (int q = 0; q < 3; q++) p->noQuoteFrom[q] = NSUIntegerMax;
     [p scan];
     processEmphasis(p->nodes, p->delims);
     NSArray *r = mergeText(p->nodes);

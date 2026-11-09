@@ -8,6 +8,7 @@
 @property (nonatomic) CGFloat maxImageWidth;
 @property (nonatomic, copy) void (^onImageLoaded)(void);  // a remote image arrived; caller re-renders
 - (NSAttributedString *)render:(MDDocument *)doc;
+@property (class, nonatomic) BOOL loadsRemoteImages;     // default YES; off: https images show their alt text
 // From the last render: block start positions (source line → character index), heading anchors.
 @property (nonatomic, readonly) NSArray<NSNumber *> *mapLines, *mapLocs;
 @property (nonatomic, readonly) NSDictionary<NSString *, NSNumber *> *anchors;

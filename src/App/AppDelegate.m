@@ -4,8 +4,10 @@
 #import "WorkspaceSearch.h"
 #import "FileOps.h"
 #import "MarkupView.h"
+#import "MarkdownRender.h"
 #import "Settings.h"
 #import "DataPreviews.h"
+#import "BinaryPreviews.h"
 
 static const CGFloat kSidebarW = 260;
 
@@ -23,20 +25,19 @@ static const CGFloat kSidebarW = 260;
     [AppDelegate applyAppearance:FTSettings.shared.appearance];          // before the window draws
     [self buildMenu];
     [self buildWindow];
-    [self pruneUntitledBackups];
 }
 
-// Backups no saved session refers to (e.g. after a crash before the session was written) are kept a week.
-- (void)pruneUntitledBackups {
+// Backups no saved session refers to (a crash before the session was written, a session that was lost).
+- (NSArray<NSString *> *)orphanUntitledBackups {
     NSString *dir = _content.untitledDirectory;
     NSSet *keep = [ContentController untitledBackupsInSessions:[NSUserDefaults.standardUserDefaults dictionaryForKey:@"sessions"]];
-    NSFileManager *fm = NSFileManager.defaultManager;
-    for (NSString *name in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+    NSSet *open = [NSSet setWithArray:_content.openPaths];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *name in [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)]) {
         NSString *p = [dir stringByAppendingPathComponent:name];
-        if ([keep containsObject:p]) continue;
-        NSDate *m = [fm attributesOfItemAtPath:p error:nil].fileModificationDate;
-        if (m && -m.timeIntervalSinceNow > 7 * 86400) [fm removeItemAtPath:p error:nil];
+        if (![keep containsObject:p] && ![open containsObject:p]) [out addObject:p];
     }
+    return out;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
@@ -57,6 +58,8 @@ static const CGFloat kSidebarW = 260;
             root = _pendingFiles.count ? _pendingFiles.firstObject.stringByDeletingLastPathComponent : NSHomeDirectory();
         [self openRoot:root.stringByStandardizingPath];
     }
+    [_content adoptUntitledBackups:self.orphanUntitledBackups];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ [ArchivePreview removeStaleExtractions]; });
     [self openPendingFiles];
     [_win makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
@@ -76,7 +79,13 @@ static const CGFloat kSidebarW = 260;
         else [_pendingFiles addObject:p];
     }
     if (folder) [self switchToRoot:folder];
-    if (_launched) { [self openPendingFiles]; [_win makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; }
+    if (_launched) { [self mainWindowWillReappear]; [self openPendingFiles]; [_win makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; }
+}
+
+// The main window was closed while another window (Settings) kept the app running: the Dock icon brings it back.
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)app hasVisibleWindows:(BOOL)visible {
+    if (!_win.isVisible) { [self mainWindowWillReappear]; [_win makeKeyAndOrderFront:nil]; }
+    return NO;
 }
 
 - (void)openPendingFiles {
@@ -87,9 +96,39 @@ static const CGFloat kSidebarW = 260;
 
 - (void)applicationDidBecomeActive:(NSNotification *)n {
     if (!_tree.rootPath) return;
-    [_tree reload];
+    [_tree refreshInBackground];
     [_content checkExternalChanges];
 }
+
+- (void)fileSystemChanged {
+    [_tree refreshInBackground];
+    [_search fileSystemChanged];
+    [_content checkExternalChanges];
+}
+
+// Dropping onto the window: a folder becomes the workspace, files open as tabs.
+- (BOOL)openDroppedURLs:(NSArray<NSURL *> *)urls {
+    NSString *folder = nil;
+    NSMutableArray *files = [NSMutableArray array];
+    for (NSURL *u in urls) {
+        if (!u.isFileURL) continue;
+        BOOL dir = NO;
+        if (![NSFileManager.defaultManager fileExistsAtPath:u.path isDirectory:&dir]) continue;
+        if (dir) folder = folder ?: u.path.stringByStandardizingPath;
+        else [files addObject:u.path.stringByStandardizingPath];
+    }
+    if (!folder && !files.count) return NO;
+    if (folder && ![self switchToRoot:folder]) return NO;
+    for (NSString *f in files) [self openFile:f];
+    return YES;
+}
+
+- (NSArray<NSURL *> *)draggedURLs:(id<NSDraggingInfo>)info {
+    return [info.draggingPasteboard readObjectsForClasses:@[NSURL.class] options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}] ?: @[];
+}
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)info { return [self draggedURLs:info].count ? NSDragOperationCopy : NSDragOperationNone; }
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)info { return [self draggingEntered:info]; }
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)info { return [self openDroppedURLs:[self draggedURLs:info]]; }
 - (void)applicationWillResignActive:(NSNotification *)n {
     [_content flushAutoSave];          // switching to another app counts as a focus change
     [self saveSession];
@@ -112,6 +151,14 @@ static const CGFloat kSidebarW = 260;
     return YES;
 }
 
+- (void)mainWindowWillReappear {
+    if (!_sessionSaved) return;
+    _sessionSaved = NO;                                  // from now on ⌘Q asks about unsaved changes again
+    NSDictionary *s = _tree.rootPath ? [NSUserDefaults.standardUserDefaults dictionaryForKey:@"sessions"][_tree.rootPath] : nil;
+    if (s && !_content.tabCount) [_content restoreSession:s];
+    [self updateTitle];
+}
+
 - (void)saveSession {
     NSString *root = _tree.rootPath;
     if (!root || _sessionSaved) return;
@@ -119,7 +166,7 @@ static const CGFloat kSidebarW = 260;
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
     NSMutableDictionary *all = [[ud dictionaryForKey:@"sessions"] mutableCopy] ?: [NSMutableDictionary dictionary];
     all[root] = _content.sessionState;
-    NSArray *keep = self.recentRoots;
+    NSArray *keep = [ud stringArrayForKey:@"recentRoots"] ?: @[];      // as stored: an unmounted disk's folders count
     for (NSString *k in all.allKeys) {
         if ([keep containsObject:k] || [k isEqualToString:root]) continue;
         // a workspace taken off the recent list keeps its session while it holds untitled documents
@@ -133,6 +180,9 @@ static const CGFloat kSidebarW = 260;
     [self saveSession];
     [_content closeAllWithoutAsking];
     _tree.rootPath = root;
+    [_watcher stop];
+    __weak AppDelegate *weakSelf = self;
+    _watcher = [[FileWatcher alloc] initWithRoot:root onChange:^{ [weakSelf fileSystemChanged]; }];
     _search.root = root;
     _content.workspaceRoot = root;
     [NSUserDefaults.standardUserDefaults setObject:root forKey:@"lastRoot"];
@@ -169,6 +219,7 @@ static const CGFloat kSidebarW = 260;
     _content.autoSaveMode = (AutoSaveMode)st.autoSaveMode;
     _content.showsMinimap = st.showsMinimap;
     _content.wordWrap = st.wordWrap;
+    MarkdownRenderer.loadsRemoteImages = st.remoteImages;
     _search.includeHidden = st.showHidden;
     _search.respectGitignore = st.respectGitignore;
     [_search fileSystemChanged];
@@ -199,6 +250,7 @@ static const CGFloat kSidebarW = 260;
     _win.minSize = NSMakeSize(560, 320);
     _win.delegate = self;
     _win.releasedWhenClosed = NO;
+    [_win registerForDraggedTypes:@[NSPasteboardTypeFileURL]];          // the delegate (self) handles drops
     [_win center];
     _win.frameAutosaveName = @"FeatherMain";
     NSRect cb = _win.contentView.bounds;
@@ -293,6 +345,7 @@ static const CGFloat kSidebarW = 260;
     _content.onActivate = ^(NSString *p) {
         AppDelegate *me = weakSelf;
         if (p) [me->_tree revealPath:p];
+        if (p && me->_launched && !me->_win.isVisible) { [me mainWindowWillReappear]; [me->_win makeKeyAndOrderFront:nil]; }
         [me updateTitle];
     };
     _search.onOpen = ^(SearchHit *hit, BOOL focusEditor) {

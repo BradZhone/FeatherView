@@ -5,8 +5,10 @@
 #import "CanvasView.h"
 #import "DataPreviews.h"
 #include <sqlite3.h>
+#include <stdatomic.h>
 
 static const NSUInteger kMaxRows = 5000;
+static const unsigned long long kMaxCopyBytes = 256ull << 20;
 
 @implementation SQLitePreview {
     sqlite3 *_db;
@@ -21,6 +23,56 @@ static const NSUInteger kMaxRows = 5000;
     TablePreview *_grid;
     NSString *_current;
     unsigned long long _bytes;
+    NSString *_copyDir, *_note;                   // a WAL database opened from a temporary copy
+    _Atomic(NSUInteger) _queryGen;
+}
+
+// Nothing may write a file: not even VACUUM INTO or ATTACH, which a read-only connection still allows.
+static int authorize(void *ctx, int action, const char *a, const char *b, const char *db, const char *trigger) {
+    switch (action) {
+        case SQLITE_SELECT: case SQLITE_READ: case SQLITE_FUNCTION: case SQLITE_RECURSIVE: return SQLITE_OK;
+        case SQLITE_PRAGMA: return SQLITE_OK;    // reads only: the connection itself is read-only
+        default: return SQLITE_DENY;
+    }
+}
+
+static BOOL readable(sqlite3 *db) {
+    sqlite3_stmt *st = NULL;
+    BOOL ok = sqlite3_prepare_v2(db, "SELECT count(*) FROM sqlite_master", -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+// A WAL database needs its -shm file, which can't be created in a read-only folder; immutable=1 would
+// skip the -wal and hide recent changes. So such a database is read from a temporary copy.
+static sqlite3 *openReadOnly(NSString *path, NSString **copyDir, NSString **note) {
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path.fileSystemRepresentation, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK && readable(db)) return db;
+    sqlite3_close(db); db = NULL;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *wal = [path stringByAppendingString:@"-wal"];
+    unsigned long long size = [[fm attributesOfItemAtPath:path error:nil] fileSize] + [[fm attributesOfItemAtPath:wal error:nil] fileSize];
+    if ([fm fileExistsAtPath:wal] && size <= kMaxCopyBytes) {
+        NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"feather-sqlite-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        NSString *copy = [dir stringByAppendingPathComponent:path.lastPathComponent];
+        if ([fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil] &&
+            [fm copyItemAtPath:path toPath:copy error:nil] && [fm copyItemAtPath:wal toPath:[copy stringByAppendingString:@"-wal"] error:nil] &&
+            sqlite3_open_v2(copy.fileSystemRepresentation, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK && readable(db)) {
+            *copyDir = dir;
+            *note = FTL(@"read from a copy: the folder is read-only");
+            return db;
+        }
+        sqlite3_close(db); db = NULL;
+        [fm removeItemAtPath:dir error:nil];
+    }
+    NSString *uri = [@"file:" stringByAppendingString:[[NSURL fileURLWithPath:path].path stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet]];
+    uri = [uri stringByAppendingString:@"?immutable=1"];
+    if (sqlite3_open_v2(uri.UTF8String, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, NULL) == SQLITE_OK && readable(db)) {
+        if ([fm fileExistsAtPath:wal]) *note = FTL(@"the most recent changes may be missing (the folder is read-only)");
+        return db;
+    }
+    sqlite3_close(db);
+    return NULL;
 }
 
 static NSString *quoted(NSString *ident) { return [NSString stringWithFormat:@"\"%@\"", [ident stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]]; }
@@ -37,17 +89,25 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
 }
 
 - (instancetype)initWithFrame:(NSRect)frame path:(NSString *)path {
-    sqlite3 *db = NULL;
-    if (sqlite3_open_v2(path.fileSystemRepresentation, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) { sqlite3_close(db); return nil; }
+    NSString *copyDir = nil, *note = nil;
+    sqlite3 *db = openReadOnly(path, &copyDir, &note);
+    if (!db) return nil;
+    sqlite3_busy_timeout(db, 200);
+    sqlite3_set_authorizer(db, authorize, NULL);
     sqlite3_stmt *st = NULL;
     const char *q = "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY type, name";
-    if (sqlite3_prepare_v2(db, q, -1, &st, NULL) != SQLITE_OK) { sqlite3_close(db); return nil; }
+    if (sqlite3_prepare_v2(db, q, -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        if (copyDir) [NSFileManager.defaultManager removeItemAtPath:copyDir error:nil];
+        return nil;
+    }
     NSMutableArray *items = [NSMutableArray array];
     while (sqlite3_step(st) == SQLITE_ROW) [items addObject:@{@"name": cellString(st, 0), @"type": cellString(st, 1), @"sql": cellString(st, 2)}];
     sqlite3_finalize(st);
     if (!(self = [super initWithFrame:frame])) { sqlite3_close(db); return nil; }
     FTClipToBounds(self);
     _db = db; _items = items; _counts = [NSMutableDictionary dictionary];
+    _copyDir = copyDir; _note = note;
     _q = dispatch_queue_create("feather.sqlite", DISPATCH_QUEUE_SERIAL);
     _bytes = [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize];
     [self buildViews];
@@ -56,15 +116,21 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
     return self;
 }
 
-- (void)dealloc { sqlite3 *db = _db; sqlite3_interrupt(db); dispatch_async(_q, ^{ sqlite3_close_v2(db); }); }
+- (void)dealloc {
+    sqlite3 *db = _db;
+    NSString *dir = _copyDir;
+    sqlite3_interrupt(db);
+    dispatch_async(_q, ^{ sqlite3_close_v2(db); if (dir) [NSFileManager.defaultManager removeItemAtPath:dir error:nil]; });
+}
 - (BOOL)isFlipped { return YES; }
 - (TablePreview *)grid { return _grid; }
 - (NSArray<NSString *> *)tableNames { return [_items valueForKey:@"name"]; }
 - (NSString *)status {
     NSUInteger views = 0;
     for (NSDictionary *i in _items) if ([i[@"type"] isEqual:@"view"]) views++;
-    return [NSString stringWithFormat:FTLP(_items.count - views, @"SQLite database (read-only)   %lu table%@   %@", @"SQLite database (read-only)   %lu tables%@   %@"), (unsigned long)(_items.count - views),
+    NSString *s = [NSString stringWithFormat:FTLP(_items.count - views, @"SQLite database (read-only)   %lu table%@   %@", @"SQLite database (read-only)   %lu tables%@   %@"), (unsigned long)(_items.count - views),
             views ? [NSString stringWithFormat:FTLP(views, @" · %lu view", @" · %lu views"), (unsigned long)views] : @"", [NSByteCountFormatter stringFromByteCount:(long long)_bytes countStyle:NSByteCountFormatterCountStyleFile]];
+    return _note ? [NSString stringWithFormat:@"%@   (%@)", s, _note] : s;
 }
 
 // Table sizes, counted in the background (capped so a huge table doesn't stall).
@@ -87,16 +153,28 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
     });
 }
 
+static int progress(void *ctx) {
+    void **p = ctx;
+    return atomic_load((_Atomic(NSUInteger) *)p[0]) != (NSUInteger)(uintptr_t)p[1];      // a newer query: stop this one
+}
+
+// A new query stops the one still running (a slow view or a runaway recursive query), so it never queues behind it.
 - (void)runSQL:(NSString *)sql label:(NSString *)label {
     sqlite3 *db = _db;
     __weak SQLitePreview *weakSelf = self;
     _grid.extraInfo = FTL(@"Querying…");
+    NSUInteger gen = atomic_fetch_add(&_queryGen, 1) + 1;
+    _Atomic(NSUInteger) *genp = &_queryGen;
     dispatch_async(_q, ^{
+        if (atomic_load(genp) != gen) return;
+        void *ctx[2] = {(void *)genp, (void *)(uintptr_t)gen};
+        sqlite3_progress_handler(db, 2000, progress, ctx);
         sqlite3_stmt *st = NULL;
         NSMutableArray *rows = [NSMutableArray array], *headers = [NSMutableArray array];
         NSString *err = nil;
         BOOL more = NO;
         if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &st, NULL) != SQLITE_OK) err = @(sqlite3_errmsg(db));
+        else if (!sqlite3_stmt_readonly(st)) err = FTL(@"This database is opened read-only; only queries that read are run");
         else {
             int n = sqlite3_column_count(st);
             for (int i = 0; i < n; i++) [headers addObject:@(sqlite3_column_name(st, i) ?: "?")];
@@ -110,9 +188,11 @@ static NSString *cellString(sqlite3_stmt *st, int i) {
             if (rc != SQLITE_ROW && rc != SQLITE_DONE) err = @(sqlite3_errmsg(db));
         }
         sqlite3_finalize(st);
+        sqlite3_progress_handler(db, 0, NULL, NULL);
+        if (atomic_load(genp) != gen) return;                  // superseded: its result isn't shown
         dispatch_async(dispatch_get_main_queue(), ^{
             SQLitePreview *me = weakSelf;
-            if (!me) return;
+            if (!me || atomic_load(&me->_queryGen) != gen) return;
             [me->_grid setModel:[ArrayTable tableWithHeaders:headers rows:rows truncated:more]];
             me->_grid.extraInfo = err ? [@"⚠️ " stringByAppendingString:err] : more ? [NSString stringWithFormat:FTL(@"%@ · first %lu rows shown"), label, (unsigned long)kMaxRows] : label;
             if (me.onChange) me.onChange();

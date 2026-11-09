@@ -158,6 +158,8 @@ static NSString *sizeString(off_t n) {
     NSMutableArray<Doc *> *_docs;
     Doc *_active;
     NSMutableArray<NSString *> *_closed;
+    BOOL _closingAll;
+    NSUInteger _viewerLoads;                     // tests: how many viewers were built
 }
 
 - (instancetype)init {
@@ -247,12 +249,12 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 
 #pragma mark Markup layout
 
-- (MarkupLayout)activeMarkupLayout { return _active.markup ? _active.markup.layout : MarkupSource; }
+- (MarkupLayout)activeMarkupLayout { return _active.markup ? _active.markup.markupLayout : MarkupSource; }
 - (BOOL)activeIsMarkup { return _active.markup != nil; }
 - (MarkupKind)activeMarkupKind { return _active.markup.kind; }
 - (BOOL)activeHasDataView {
     MarkupContainer *m = _active.markup;
-    if (m && m.layout != MarkupSource && (m.kind == MarkupTable || m.kind == MarkupJSON || m.kind == MarkupPlist)) return YES;
+    if (m && m.markupLayout != MarkupSource && (m.kind == MarkupTable || m.kind == MarkupJSON || m.kind == MarkupPlist)) return YES;
     return [_active.viewer isKindOfClass:TreePreview.class] || [_active.viewer isKindOfClass:SQLitePreview.class] || [_active.viewer isKindOfClass:ArchivePreview.class];
 }
 
@@ -277,7 +279,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 - (void)setActiveMarkupLayout:(MarkupLayout)l {
     Doc *d = _active;
     if (!d.markup) return;
-    d.markup.layout = l;
+    d.markup.markupLayout = l;
     d.layout = l; d.hasLayout = YES;
     [NSUserDefaults.standardUserDefaults setInteger:l forKey:[ContentController layoutKey:d.markup.kind]];
     [self syncLayoutSwitch];
@@ -289,7 +291,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 - (void)syncLayoutSwitch {
     NSSegmentedControl *sw = (NSSegmentedControl *)_pane.layoutSwitch;
     _pane.showsLayoutSwitch = _active.markup != nil;
-    if (_active.markup) sw.selectedSegment = _active.markup.layout;
+    if (_active.markup) sw.selectedSegment = _active.markup.markupLayout;
     [_pane layoutPane];
 }
 
@@ -304,6 +306,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 }
 
 - (void)setWorkspaceRoot:(NSString *)root {
+    if (![root isEqualToString:_workspaceRoot]) [_closed removeAllObjects];    // Reopen Closed Tab stays in its workspace
     _workspaceRoot = [root copy];
     for (Doc *d in _docs) d.markup.root = root;
 }
@@ -333,8 +336,11 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     return v;
 }
 
+- (NSUInteger)viewerLoads { return _viewerLoads; }
+
 - (void)loadViewer:(Doc *)d {
-    struct timespec mt; off_t sz;
+    _viewerLoads++;
+    struct timespec mt = {0}; off_t sz = 0;
     d.missing = !statPath(d.path, &mt, &sz);
     if (d.missing) { d.viewer = [self placeholder:FTL(@"The file no longer exists")]; d.status = FTL(@"Deleted"); return; }
     d.mtime = mt; d.size = sz; d.changedOnDisk = NO;
@@ -354,7 +360,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 - (void)loadText:(Doc *)d {
     NSStringEncoding enc = NSUTF8StringEncoding;
     NSString *err = nil;
-    NSData *data = FKLoadText(d.path, &enc, &err);
+    NSData *data = FKLoadTextAllowingNUL(d.path, &enc, d.untitled || d.mode == ViewerText, &err);
     if (!data) { [self loadHex:d]; return; }
     TextEditorView *ed = [[TextEditorView alloc] initWithFrame:NSZeroRect buffer:[[PieceTable alloc] initWithData:data]
                                                           path:d.path encoding:enc];
@@ -401,7 +407,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
         ed.onScroll = ^{ [weakDoc.markup editorScrolled]; };
         d.markup = mc;
         d.viewer = mc;
-        mc.layout = d.hasLayout ? d.layout : (data.length ? [ContentController defaultLayout:mk] : MarkupSource);
+        mc.markupLayout = d.hasLayout ? d.layout : (data.length ? [ContentController defaultLayout:mk] : MarkupSource);
     }
     ed.onChange();
 }
@@ -477,6 +483,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
         doc.status = [NSString stringWithFormat:@"%@   %@", weakPv.info, sizeString(doc.size)];
         if (doc == me->_active) me->_status.stringValue = doc.status;
     };
+    pv.onOpenFile = ^(NSString *p) { [weakSelf openLinkedFile:p anchor:nil]; };
     pv.showsThumbnails = [NSUserDefaults.standardUserDefaults boolForKey:@"pdfThumbnails"];
     d.viewer = pv;
     pv.onChange();
@@ -506,6 +513,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     __weak Doc *weakDoc = d;
     __weak ArchivePreview *weakV = v;
     v.onOpenFile = ^(NSString *p) { [weakSelf openPath:p preview:NO focus:YES]; };
+    v.onMessage = ^(NSString *m) { [weakSelf flashStatus:m]; };
     v.onChange = ^{
         ContentController *me = weakSelf; Doc *doc = weakDoc;
         if (!me || !doc) return;
@@ -526,7 +534,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 
 - (void)releaseViewer:(Doc *)d {
     if (d.viewerIsQL) FKCloseQuickLookView(d.viewer);
-    if (d.markup) { d.layout = d.markup.layout; d.hasLayout = YES; [d.markup releasePreview]; }
+    if (d.markup) { d.layout = d.markup.markupLayout; d.hasLayout = YES; [d.markup releasePreview]; }
     [d.saveTimer invalidate];
     d.saveTimer = nil;
     [d.viewer removeFromSuperview];
@@ -580,9 +588,9 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     if ([_active.viewer isKindOfClass:TreePreview.class] || [_active.viewer isKindOfClass:SQLitePreview.class] ||
         [_active.viewer isKindOfClass:ArchivePreview.class]) return 5;
     MarkupContainer *m = _active.markup;
-    if (m && m.layout != MarkupSource) {
+    if (m && m.markupLayout != MarkupSource) {
         NSResponder *fr = _pane.window.firstResponder;
-        BOOL inEditor = m.layout == MarkupSplit && [fr isKindOfClass:NSView.class] && [(NSView *)fr isDescendantOf:m.editor];
+        BOOL inEditor = m.markupLayout == MarkupSplit && [fr isKindOfClass:NSView.class] && [(NSView *)fr isDescendantOf:m.editor];
         if (!inEditor) {
             if (m.kind == MarkupHTML) return 3;
             if (m.kind == MarkupTable || m.kind == MarkupJSON || m.kind == MarkupPlist) return 5;
@@ -689,7 +697,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 // Opens with an explicit layout for this tab only (e.g. a new .md file starts in the editor).
 - (void)openPath:(NSString *)path preview:(BOOL)preview focus:(BOOL)focus layout:(MarkupLayout)layout {
     Doc *d = [self openPath:path mode:ViewerAuto preview:preview focus:NO];
-    if (d.markup) { d.markup.layout = layout; d.layout = layout; d.hasLayout = YES; [self syncLayoutSwitch]; }
+    if (d.markup) { d.markup.markupLayout = layout; d.layout = layout; d.hasLayout = YES; [self syncLayoutSwitch]; }
     if (focus) [_pane.window makeFirstResponder:d.markup ? d.markup.focusView : d.viewer];
 }
 
@@ -788,6 +796,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     if (d.untitled && (ask || d.discarded)) [NSFileManager.defaultManager removeItemAtPath:d.path error:nil];
     if (d == _active) {
         _active = nil;
+        if (_closingAll) return YES;                   // the next tab isn't loaded just to be closed too
         if (_docs.count) { [self activate:_docs[MIN(i, _docs.count - 1)] focus:hadFocus]; return YES; }
         [self installActive:NO];
         if (self.onActivate) self.onActivate(nil);
@@ -813,17 +822,30 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     return YES;
 }
 
+- (void)finishClosingAll {
+    _closingAll = NO;
+    if (_docs.count) { [self activate:_docs.firstObject focus:NO]; return; }
+    [self installActive:NO];
+    if (self.onActivate) self.onActivate(nil);
+    [self reloadTabs];
+    [self stateChanged];
+}
+
 - (BOOL)closeAll {
     if (![self confirmClose:YES]) return NO;
+    _closingAll = YES;
     for (Doc *d in _docs.copy) {
         if (d.untitled && !docDirty(d)) d.discarded = YES;              // empty untitled tabs just go
         [self closeDoc:d ask:NO];
     }
+    [self finishClosingAll];
     return YES;
 }
 
 - (void)closeAllWithoutAsking {
+    _closingAll = YES;
     for (Doc *d in _docs.copy) [self closeDoc:d ask:NO];
+    [self finishClosingAll];
 }
 
 - (BOOL)closePathsWithin:(NSString *)path {
@@ -908,7 +930,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
             Doc *d = [Doc new];
             d.path = p;
             NSString *title = [t[@"untitled"] isKindOfClass:NSString.class] ? t[@"untitled"] : nil;
-            if (title) { d.untitled = YES; d.title = title; }
+            if (title) { d.untitled = YES; d.title = title; d.mode = ViewerText; }
             d.preview = !title && [t[@"preview"] boolValue] && _previewEnabled;
             d.restoreLine = [t[@"line"] unsignedIntegerValue];
             [_docs addObject:d];
@@ -1050,18 +1072,22 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     return [[support stringByAppendingPathComponent:folder] stringByAppendingPathComponent:@"Untitled"];
 }
 
-- (void)newUntitledDocument {
+- (NSString *)nextUntitledTitle {
     NSMutableSet *used = [NSMutableSet set];
     for (Doc *d in _docs) if (d.untitled) [used addObject:d.title];
     NSUInteger n = 1;
     while ([used containsObject:[NSString stringWithFormat:FTL(@"Untitled-%lu"), (unsigned long)n]]) n++;
+    return [NSString stringWithFormat:FTL(@"Untitled-%lu"), (unsigned long)n];
+}
+
+- (void)newUntitledDocument {
     NSString *dir = self.untitledDirectory;
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     NSString *path = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.txt", NSUUID.UUID.UUIDString]];
     if (![NSData.data writeToFile:path atomically:NO]) { NSBeep(); return; }
     Doc *d = [Doc new];
     d.path = path; d.mode = ViewerText; d.untitled = YES;
-    d.title = [NSString stringWithFormat:FTL(@"Untitled-%lu"), (unsigned long)n];
+    d.title = self.nextUntitledTitle;
     NSUInteger at = _active ? [_docs indexOfObject:_active] + 1 : _docs.count;
     [_docs insertObject:d atIndex:MIN(at, _docs.count)];
     [self activate:d focus:YES];
@@ -1100,8 +1126,17 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
     if (!d.editor) [self loadViewer:d];
     TextEditorView *ed = d.editor;
     if (!ed) return NO;
-    NSString *dest = [self askSavePath:suggestedName(ed, d.title)];
+    NSString *dest = [self askSavePath:suggestedName(ed, d.title)].stringByStandardizingPath;
     if (!dest.length) return NO;
+    Doc *other = [self docForPath:dest];                 // that file is open in another tab
+    if (other && docDirty(other)) {
+        NSAlert *a = [NSAlert new];
+        a.messageText = [NSString stringWithFormat:FTL(@"“%@” is open with unsaved changes"), dest.lastPathComponent];
+        a.informativeText = FTL(@"Saving here replaces the file and closes that tab. Its changes will be lost.");
+        [a addButtonWithTitle:FTL(@"Replace")];
+        [a addButtonWithTitle:FTL(@"Cancel")];
+        if ([self runAlert:a] != NSAlertFirstButtonReturn) return NO;
+    }
     NSString *backup = d.path;
     BOOL existed = [NSFileManager.defaultManager fileExistsAtPath:dest];
     if (!existed) [NSFileManager.defaultManager createFileAtPath:dest contents:nil attributes:@{NSFilePosixPermissions: @0644}];
@@ -1117,6 +1152,7 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
         return NO;
     }
     [NSFileManager.defaultManager removeItemAtPath:backup error:nil];
+    if (other) { other.discarded = YES; [self closeDoc:other ask:NO]; [_closed removeObject:dest]; }
     d.path = dest; d.untitled = NO; d.title = nil; d.saveError = nil;
     if (FKMarkupKind(dest) != MarkupNone) { d.mode = ViewerAuto; [self reloadViewerOf:d]; }   // gets its preview
     [self didSave:d];
@@ -1134,9 +1170,29 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
     return out;
 }
 
+- (void)adoptUntitledBackups:(NSArray<NSString *> *)paths {
+    Doc *first = nil;
+    for (NSString *p in paths) {
+        struct stat st;
+        if ([self docForPath:p] || lstat(p.fileSystemRepresentation, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (st.st_size == 0) { [NSFileManager.defaultManager removeItemAtPath:p error:nil]; continue; }
+        Doc *d = [Doc new];
+        d.path = p; d.mode = ViewerText; d.untitled = YES;
+        d.title = self.nextUntitledTitle;
+        [_docs addObject:d];
+        first = first ?: d;
+    }
+    if (!first) return;
+    if (_active) [self reloadTabs];
+    else [self activate:first focus:NO];
+    [self stateChanged];
+}
+
+// A cancelled save panel (an untitled tab) or a failed save doesn't stop the others.
 - (BOOL)saveAll {
-    for (Doc *d in _docs.copy) if (docDirty(d) && ![self saveDoc:d]) return NO;
-    return YES;
+    BOOL ok = YES;
+    for (Doc *d in _docs.copy) if (docDirty(d) && ![self saveDoc:d]) ok = NO;
+    return ok;
 }
 
 #pragma mark Find / replace / navigation
@@ -1206,7 +1262,7 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
         ViewerKind k = FKMarkupKind(path) != MarkupNone ? ViewerAuto : ViewerText;   // keep the .md preview chrome
         d = [self openPath:path mode:k preview:YES focus:NO];
     }
-    if (d.markup.layout == MarkupPreview) [self setActiveMarkupLayout:MarkupSplit];   // the match must be visible
+    if (d.markup.markupLayout == MarkupPreview) [self setActiveMarkupLayout:MarkupSplit];   // the match must be visible
     [d.editor selectLine:line column:col length:len];
 }
 
