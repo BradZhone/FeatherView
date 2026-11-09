@@ -24,8 +24,9 @@ static const NSUInteger kMaxRecent = 10;
     return out;
 }
 
+// The stored list keeps folders that are missing right now (a disk that is not mounted); only the menus skip them.
 - (void)noteRecentRoot:(NSString *)root {
-    NSMutableArray *a = [self.recentRoots mutableCopy];
+    NSMutableArray *a = [[NSUserDefaults.standardUserDefaults stringArrayForKey:@"recentRoots"] mutableCopy] ?: [NSMutableArray array];
     [a removeObject:root];
     [a insertObject:root atIndex:0];
     while (a.count > kMaxRecent) [a removeLastObject];

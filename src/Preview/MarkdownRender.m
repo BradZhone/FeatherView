@@ -29,6 +29,10 @@ NSTextBlock *MDFullWidthBlock(void) {
 
 @implementation MarkdownRenderer
 
+static BOOL gRemoteImages = YES;
++ (BOOL)loadsRemoteImages { return gRemoteImages; }
++ (void)setLoadsRemoteImages:(BOOL)v { gRemoteImages = v; }
+
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     _images = [NSMutableDictionary dictionary];

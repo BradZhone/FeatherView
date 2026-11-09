@@ -214,10 +214,11 @@ static NSString *joinPara(NSArray<NSString *> *para) {
     return [[a componentsJoinedByString:@"\n"] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
 }
 
-static NSMutableArray<MDBlock *> *parseBlocks(NSArray<NSString *> *L, NSUInteger base, NSMutableDictionary *refs);
+static const NSUInteger kMaxBlockDepth = 48;            // deeper quotes / lists are shown as plain text
+static NSMutableArray<MDBlock *> *parseBlocks(NSArray<NSString *> *L, NSUInteger base, NSMutableDictionary *refs, NSUInteger depth);
 
-static NSUInteger parseList(NSArray<NSString *> *L, NSUInteger i, NSUInteger base, NSMutableDictionary *refs, NSMutableArray *out) {
-    MDMarker first;
+static NSUInteger parseList(NSArray<NSString *> *L, NSUInteger i, NSUInteger base, NSMutableDictionary *refs, NSMutableArray *out, NSUInteger depth) {
+    MDMarker first = {0};
     listMarker(L[i], &first);
     MDBlock *list = blk(MDList, base + i);
     list.ordered = first.ordered;
@@ -246,7 +247,7 @@ static NSUInteger parseList(NSArray<NSString *> *L, NSUInteger i, NSUInteger bas
         NSString *f = content[0], *fl = f.lowercaseString;
         if ([f hasPrefix:@"[ ] "] || [f isEqualToString:@"[ ]"]) { item.task = 0; content[0] = [f substringFromIndex:MIN((NSUInteger)4, f.length)]; }
         else if ([fl hasPrefix:@"[x] "] || [fl isEqualToString:@"[x]"]) { item.task = 1; content[0] = [f substringFromIndex:MIN((NSUInteger)4, f.length)]; }
-        item.children = parseBlocks(content, base + s, refs);
+        item.children = parseBlocks(content, base + s, refs, depth + 1);
         for (NSUInteger k = 1; k < item.children.count; k++) {
             NSUInteger r = item.children[k].line - (base + s);
             if (r > 0 && r - 1 < content.count && isBlank(content[r - 1])) loose = YES;
@@ -260,8 +261,13 @@ static NSUInteger parseList(NSArray<NSString *> *L, NSUInteger i, NSUInteger bas
     return i;
 }
 
-static NSMutableArray<MDBlock *> *parseBlocks(NSArray<NSString *> *L, NSUInteger base, NSMutableDictionary *refs) {
+static NSMutableArray<MDBlock *> *parseBlocks(NSArray<NSString *> *L, NSUInteger base, NSMutableDictionary *refs, NSUInteger depth) {
     NSMutableArray<MDBlock *> *out = [NSMutableArray array];
+    if (depth >= kMaxBlockDepth) {                                       // bounds recursion (and the renderer's)
+        MDBlock *b = blk(MDCode, base); b.text = [L componentsJoinedByString:@"\n"]; b.info = @"";
+        [out addObject:b];
+        return out;
+    }
     NSMutableArray<NSString *> *para = [NSMutableArray array];
     __block NSUInteger paraLine = 0;
     void (^flush)(void) = ^{
@@ -319,14 +325,14 @@ static NSMutableArray<MDBlock *> *parseBlocks(NSArray<NSString *> *L, NSUInteger
                 else break;
             }
             MDBlock *q = blk(MDQuote, base + s);
-            q.children = parseBlocks(inner, base + s, refs);
+            q.children = parseBlocks(inner, base + s, refs, depth + 1);
             [out addObject:q];
             continue;
         }
         MDMarker m;
         if (listMarker(l, &m) && (!para.count || (!m.empty && (!m.ordered || m.num == 1)))) {
             flush();
-            i = parseList(L, i, base, refs, out);
+            i = parseList(L, i, base, refs, out, depth);
             continue;
         }
         if (para.count && [para.lastObject rangeOfString:@"|"].location != NSNotFound) {   // GFM table
@@ -380,7 +386,7 @@ MDDocument *MDParse(NSString *source) {
         [lines addObject:expandTabs([l hasSuffix:@"\r"] ? [l substringToIndex:l.length - 1] : l)];
     NSMutableDictionary *refs = [NSMutableDictionary dictionary];
     MDDocument *d = [MDDocument new];
-    d.blocks = parseBlocks(lines, 0, refs);
+    d.blocks = parseBlocks(lines, 0, refs, 0);
     d.refs = refs;
     return d;
 }

@@ -25,7 +25,7 @@ typedef struct { uint8_t src; NSUInteger start, len; } Piece;   // src 0 = origi
     _lineCap = 1024;
     _lines = malloc(_lineCap * sizeof(uint32_t));
     _lines[_lineCount++] = 0;
-    const uint8_t *p = b, *end = b + _length;
+    const uint8_t *p = b, *end = b ? b + _length : b;            // empty data may have no bytes pointer
     while (p < end && (p = memchr(p, '\n', end - p))) {
         if (p > b && p[-1] == '\r') _usesCRLF = YES;
         p++;
@@ -71,7 +71,8 @@ typedef struct { uint8_t src; NSUInteger start, len; } Piece;   // src 0 = origi
 }
 
 - (const uint8_t *)bytesOf:(Piece)p {
-    return (const uint8_t *)(p.src ? _add.bytes : _orig.bytes) + p.start;
+    const uint8_t *base = p.src ? _add.bytes : _orig.bytes;
+    return base ? base + p.start : (const uint8_t *)"";        // empty data has no bytes pointer
 }
 
 - (uint8_t)byteAt:(NSUInteger)off {

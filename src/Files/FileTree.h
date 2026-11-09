@@ -21,6 +21,8 @@
 @property (nonatomic, readonly) NSArray<NSString *> *clickedPaths;
 // Programmatic selection below never triggers onOpen.
 - (void)reload;                       // keeps expansion state and the selection
+- (void)refreshInBackground;          // same, reading folders off the main thread (file system events)
+@property (nonatomic, copy) void (^onRefreshed)(void);   // a background refresh changed the tree
 - (void)revealPath:(NSString *)path;  // expand ancestors and select
 - (void)revealPaths:(NSArray<NSString *> *)paths;
 - (void)reloadAndReveal:(NSString *)path;

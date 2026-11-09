@@ -4,6 +4,7 @@
 #import "TableModel.h"
 #import "CanvasView.h"
 #import "DataPreviews.h"
+#include <sys/stat.h>
 
 static const NSUInteger kMaxEntries = 200000;
 
@@ -19,7 +20,8 @@ static NSData *runTar(NSArray *args, int *status) {
     NSTask *t = [NSTask new];
     t.executableURL = [NSURL fileURLWithPath:@"/usr/bin/bsdtar"];
     t.arguments = args;
-    t.environment = @{@"LC_ALL": @"C", @"PATH": @"/usr/bin:/bin"};
+    // UTF-8 names (the C locale prints them as octal escapes); English month names for the verbose listing
+    t.environment = @{@"LC_ALL": @"en_US.UTF-8", @"LANG": @"en_US.UTF-8", @"PATH": @"/usr/bin:/bin"};
     NSPipe *out = [NSPipe pipe];
     t.standardOutput = out;
     t.standardError = [NSFileHandle fileHandleWithNullDevice];
@@ -103,20 +105,51 @@ static NSArray *parseListing(NSString *verbose, NSArray<NSString *> *names, unsi
     return [NSString stringWithFormat:FTLP(_rows.count, @"Archive (read-only)   %@ item", @"Archive (read-only)   %@ items"), FTGrouped(_rows.count)];
 }
 
+static NSString *const kExtractPrefix = @"feather-archive-";
+
++ (void)removeStaleExtractions {
+    NSString *tmp = NSTemporaryDirectory();
+    NSFileManager *fm = NSFileManager.defaultManager;
+    for (NSString *name in [fm contentsOfDirectoryAtPath:tmp error:nil]) {
+        if (![name hasPrefix:kExtractPrefix]) continue;
+        NSString *p = [tmp stringByAppendingPathComponent:name];
+        NSDate *m = [fm attributesOfItemAtPath:p error:nil].fileModificationDate;
+        if (m && -m.timeIntervalSinceNow > 3600) [fm removeItemAtPath:p error:nil];
+    }
+}
+
+// bsdtar treats member names as patterns: "a*.txt" would also extract "ab.txt".
+static NSString *literalPattern(NSString *name) {
+    NSMutableString *out = [NSMutableString stringWithCapacity:name.length];
+    for (NSUInteger i = 0; i < name.length; i++) {
+        unichar c = [name characterAtIndex:i];
+        if (c == '*' || c == '?' || c == '[' || c == ']' || c == '\\') [out appendString:@"\\"];
+        [out appendFormat:@"%C", c];
+    }
+    return out;
+}
+
 - (void)extract:(NSUInteger)row {
     if (row >= _rows.count || [_rows[row][3] isEqual:FTL(@"folder")]) { NSBeep(); return; }
     NSString *name = _rows[row][0], *archive = _path;
-    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"feather-archive-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[kExtractPrefix stringByAppendingString:NSUUID.UUID.UUIDString]];
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     __weak ArchivePreview *weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         int status = 0;
-        runTar(@[@"-xf", archive, @"-C", dir, @"--", name], &status);
+        runTar(@[@"-xf", archive, @"-C", dir, @"--", literalPattern(name)], &status);
         NSString *out = [dir stringByAppendingPathComponent:name];
-        BOOL ok = status == 0 && [NSFileManager.defaultManager fileExistsAtPath:out];
+        NSString *problem = nil;
+        struct stat st;
+        if (status != 0 || lstat(out.fileSystemRepresentation, &st) != 0) problem = FTL(@"Couldn’t extract this entry");
+        // a link (or a path through one) would let saving the "copy" write somewhere outside the archive
+        else if (!S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+                 ![out.stringByResolvingSymlinksInPath hasPrefix:[dir.stringByResolvingSymlinksInPath stringByAppendingString:@"/"]])
+            problem = FTL(@"This entry is a link, not a file, so it isn’t opened");
+        if (problem) [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
         dispatch_async(dispatch_get_main_queue(), ^{
             ArchivePreview *me = weakSelf;
-            if (!ok) { NSBeep(); return; }
+            if (problem) { NSBeep(); if (me.onMessage) me.onMessage(problem); return; }
             if (me.onOpenFile) me.onOpenFile(out);
         });
     });

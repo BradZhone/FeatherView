@@ -1,6 +1,8 @@
 #import "TablePreview.h"
 #import "TableModel.h"
 
+static const NSUInteger kMaxShownColumns = 1000;     // a table view with more columns stops responding
+
 @interface TablePreview () {
 @public
     NSSearchField *_filter;
@@ -21,6 +23,7 @@
     NSTimer *_filterTimer;
 }
 - (void)rebuildColumns;
+- (NSUInteger)shownColumns;              // at most kMaxShownColumns of the model's
 - (NSUInteger)modelRow:(NSInteger)displayRow;
 - (BOOL)columnIsNumeric:(NSUInteger)c;
 @end

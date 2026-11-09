@@ -124,7 +124,49 @@ static NSData *readFile(NSString *path, NSString **error, BOOL forceMap) {
 
 NSData *FKLoadRaw(NSString *path, NSString **error) { return readFile(path, error, YES); }
 
-NSData *FKLoadText(NSString *path, NSStringEncoding *enc, NSString **error) {
+BOOL FKIsMappedSize(unsigned long long size) { return size >= kCopyThreshold; }
+
+NSString *FKEncodingName(NSStringEncoding e) {
+    if (e == NSUTF8StringEncoding) return @"UTF-8";
+    if (e == NSUTF16LittleEndianStringEncoding) return @"UTF-16 LE";
+    if (e == NSUTF16BigEndianStringEncoding) return @"UTF-16 BE";
+    if (e == NSUTF16StringEncoding) return @"UTF-16";
+    CFStringRef iana = CFStringConvertEncodingToIANACharSetName(CFStringConvertNSStringEncodingToEncoding(e));
+    return iana ? [(__bridge NSString *)iana uppercaseString] : [NSString localizedNameOfStringEncoding:e];
+}
+
+NSData *FKLoadText(NSString *path, NSStringEncoding *enc, NSString **error) { return FKLoadTextAllowingNUL(path, enc, NO, error); }
+
+// Legacy encodings, most likely first for this app's users. Foundation's detector picks among them by
+// how plausible the decoded text is; plain "does it decode" accepted Shift-JIS, Big5 and EUC-KR as GB18030.
+static NSArray<NSNumber *> *legacyEncodings(void) {
+    static NSArray *a;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Shift-JIS as NSShiftJISStringEncoding (Windows CP932): with kCFStringEncodingShiftJIS the detector prefers GB18030
+        CFStringEncoding cf[] = {kCFStringEncodingGB_18030_2000, kCFStringEncodingBig5, kCFStringEncodingEUC_JP, kCFStringEncodingEUC_KR,
+                                 kCFStringEncodingWindowsLatin1};
+        NSMutableArray *m = [NSMutableArray array];
+        for (size_t i = 0; i < sizeof cf / sizeof *cf; i++) [m addObject:@(CFStringConvertEncodingToNSStringEncoding(cf[i]))];
+        [m insertObject:@(NSShiftJISStringEncoding) atIndex:2];
+        a = m;
+    });
+    return a;
+}
+
+static NSStringEncoding detectLegacy(NSData *d) {
+    NSUInteger n = d.length, cut = MIN(n, (NSUInteger)1 << 20);
+    const uint8_t *b = d.bytes;
+    if (cut < n) { while (cut > 0 && b[cut - 1] != '\n') cut--; if (!cut) cut = MIN(n, (NSUInteger)1 << 20); }
+    NSData *sample = cut < n ? [d subdataWithRange:NSMakeRange(0, cut)] : d;
+    NSStringEncoding e = [NSString stringEncodingForData:sample encodingOptions:@{
+        NSStringEncodingDetectionSuggestedEncodingsKey: legacyEncodings(),
+        NSStringEncodingDetectionUseOnlySuggestedEncodingsKey: @YES,
+        NSStringEncodingDetectionAllowLossyKey: @NO} convertedString:NULL usedLossyConversion:NULL];
+    return e;
+}
+
+NSData *FKLoadTextAllowingNUL(NSString *path, NSStringEncoding *enc, BOOL allowNUL, NSString **error) {
     NSData *d = readFile(path, error, NO);
     if (!d) return nil;
     if (d.length > kMaxTextSize) { if (error) *error = FTL(@"File too large, showing as hex"); return nil; }
@@ -132,15 +174,21 @@ NSData *FKLoadText(NSString *path, NSStringEncoding *enc, NSString **error) {
     NSUInteger n = d.length;
 
     if (n >= 2 && ((b[0] == 0xFF && b[1] == 0xFE) || (b[0] == 0xFE && b[1] == 0xFF))) {
-        NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF16StringEncoding];
-        if (s) { *enc = NSUTF16StringEncoding; return [s dataUsingEncoding:NSUTF8StringEncoding]; }
+        BOOL be = b[0] == 0xFE;                          // saved back in the same byte order, with its BOM
+        NSStringEncoding e = be ? NSUTF16BigEndianStringEncoding : NSUTF16LittleEndianStringEncoding;
+        NSString *s = [[NSString alloc] initWithData:[d subdataWithRange:NSMakeRange(2, n - 2)] encoding:e];
+        if (s) { *enc = e; return [s dataUsingEncoding:NSUTF8StringEncoding]; }
     }
-    if (memchr(b, 0, MIN(n, (NSUInteger)8192))) { if (error) *error = FTL(@"Binary file"); return nil; }
+    if (memchr(b, 0, MIN(n, (NSUInteger)8192)) && !(allowNUL && FKIsValidUTF8(b, n))) { if (error) *error = FTL(@"Binary file"); return nil; }
     if (FKIsValidUTF8(b, n)) { *enc = NSUTF8StringEncoding; return d; }
     if (n < (64u << 20)) {
-        NSStringEncoding gb = CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000);
-        NSString *s = [[NSString alloc] initWithData:d encoding:gb];
-        if (s) { *enc = gb; return [s dataUsingEncoding:NSUTF8StringEncoding]; }
+        NSMutableArray<NSNumber *> *order = [legacyEncodings() mutableCopy];
+        NSStringEncoding guess = detectLegacy(d);
+        if (guess) { [order removeObject:@(guess)]; [order insertObject:@(guess) atIndex:0]; }
+        for (NSNumber *e in order) {                      // the whole file must decode, not just the sample
+            NSString *s = [[NSString alloc] initWithData:d encoding:e.unsignedIntegerValue];
+            if (s) { *enc = e.unsignedIntegerValue; return [s dataUsingEncoding:NSUTF8StringEncoding]; }
+        }
     }
     if (error) *error = FTL(@"Unrecognized text encoding");
     return nil;

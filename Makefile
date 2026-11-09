@@ -11,7 +11,7 @@ INC      := $(addprefix -Isrc/,$(MODULES))
 ARCH     ?=
 CFLAGS   := -O2 -fobjc-arc -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=12.0 $(INC) $(ARCH)
 FRAMEWORKS := -framework Cocoa -framework CoreText -framework ImageIO -framework UniformTypeIdentifiers \
-              -framework WebKit -framework PDFKit -lsqlite3
+              -framework WebKit -framework PDFKit -framework CoreServices -lsqlite3
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 # Foundation-only code, tested without AppKit
@@ -19,7 +19,7 @@ CORE_SRC := src/Support/Localization.m src/Editor/PieceTable.m src/Editor/PieceT
             src/Files/FileOps.m src/Search/WorkspaceSearch.m src/Preview/TableModel.m src/Preview/JSONTree.m src/Preview/Notebook.m
 MD_SRC   := src/Preview/Markdown.m src/Preview/MarkdownInline.m
 
-.PHONY: all run test clean install release
+.PHONY: all run test clean install release sanitize analyze
 
 RES      := $(patsubst Resources/%,$(APP)/Contents/Resources/%,$(wildcard Resources/*.lproj/*.strings))
 
@@ -68,6 +68,22 @@ test: build/tests build/markdown_tests build/editor_tests
 	./build/tests
 	./build/markdown_tests
 	./build/editor_tests
+
+# The three test programs built with AddressSanitizer and UndefinedBehaviorSanitizer, in build/san.
+SAN := -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g -O1
+sanitize:
+	@mkdir -p build/san
+	clang $(filter-out -O2,$(CFLAGS)) $(SAN) -framework Foundation -framework UniformTypeIdentifiers -o build/san/tests tests/tests.m $(CORE_SRC)
+	clang $(filter-out -O2,$(CFLAGS)) $(SAN) -framework Foundation -o build/san/markdown_tests tests/markdown_tests.m $(MD_SRC)
+	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/editor_tests tests/editor_tests.m $(LIB_SRC)
+	./build/san/tests
+	./build/san/markdown_tests
+	./build/san/editor_tests
+
+# clang's static analyzer over every source file; fails on any finding.
+analyze:
+	@for f in $(SRC); do clang --analyze -Xanalyzer -analyzer-output=text -fobjc-arc $(INC) -mmacosx-version-min=12.0 $$f -o /dev/null 2>&1; done | tee build/analyze.txt
+	@! grep -q "warning:" build/analyze.txt
 
 run: all
 	open $(APP) --args "$(CURDIR)"

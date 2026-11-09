@@ -132,6 +132,7 @@ static NSImage *decode(CGImageSourceRef src, CGFloat maxPx) {
 - (CGFloat)decodeLimit { return self.maxImageWidth * 2; }       // Retina
 
 - (NSImage *)localImage:(NSString *)path {
+    if (!path.length) return nil;
     CGImageSourceRef src = CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path], NULL);
     NSImage *img = decode(src, self.decodeLimit);
     if (src) CFRelease(src);
@@ -180,7 +181,7 @@ static NSImage *decode(CGImageSourceRef src, CGFloat maxPx) {
     if (!cached && src.length) {
         NSURL *u = [NSURL URLWithString:src];
         NSString *scheme = u.scheme.lowercaseString;
-        if ([scheme isEqualToString:@"https"]) [self fetch:src];
+        if ([scheme isEqualToString:@"https"]) { if (MarkdownRenderer.loadsRemoteImages) [self fetch:src]; }
         else if (!scheme.length || [scheme isEqualToString:@"file"]) {
             NSString *p = [scheme isEqualToString:@"file"] ? u.path : (src.stringByRemovingPercentEncoding ?: src);
             if (![p hasPrefix:@"/"]) p = [self.baseDir stringByAppendingPathComponent:p];

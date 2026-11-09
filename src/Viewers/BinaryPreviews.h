@@ -21,6 +21,8 @@
 @property (nonatomic, readonly) NSUInteger entryCount;
 @property (nonatomic, readonly) BOOL loaded;
 @property (nonatomic, copy) void (^onOpenFile)(NSString *path);
+@property (nonatomic, copy) void (^onMessage)(NSString *message);     // an entry could not be opened
 @property (nonatomic, copy) void (^onChange)(void);
 @property (nonatomic, readonly) NSString *status;
++ (void)removeStaleExtractions;          // temporary copies left by earlier runs
 @end

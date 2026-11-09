@@ -15,6 +15,8 @@
 make            # build build/FeatherView.app for the host architecture, ad-hoc signed
 make run        # build and open with the current directory as the workspace
 make test       # localization check, logic tests, Markdown tests, live-view tests
+make sanitize   # the same tests under AddressSanitizer and UndefinedBehaviorSanitizer
+make analyze    # clang static analyzer; fails on any finding
 make install    # install to /Applications (or ~/Applications if that is not writable)
 make release    # run the tests, then build a universal (arm64 + x86_64) package in dist/
 scripts/bench.sh 3 20 > results.tsv   # resource comparison with VS Code, Zed and Chrome

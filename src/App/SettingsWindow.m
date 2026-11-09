@@ -3,7 +3,7 @@
 #import "Settings.h"
 
 @implementation SettingsWindow {
-    NSButton *_showHiddenBox, *_gitignoreBox, *_minimapBox, *_wrapBox;
+    NSButton *_showHiddenBox, *_gitignoreBox, *_minimapBox, *_wrapBox, *_remoteBox;
     NSTextField *_alwaysHiddenField, *_searchSkippedField;
     NSPopUpButton *_appearancePopup, *_autoSavePopup;
 }
@@ -49,6 +49,7 @@ static NSStackView *column(NSArray<NSView *> *views) {
     w.title = FTL(@"Settings");
     w.releasedWhenClosed = NO;
     if (!(self = [super initWithWindow:w])) return nil;
+    w.delegate = self;
 
     _appearancePopup = [NSPopUpButton new];
     [_appearancePopup addItemsWithTitles:@[FTL(@"System"), FTL(@"Light"), FTL(@"Dark")]];
@@ -70,6 +71,7 @@ static NSStackView *column(NSArray<NSView *> *views) {
     _autoSavePopup.target = self; _autoSavePopup.action = @selector(autoSaveChanged:);
     _minimapBox = [NSButton checkboxWithTitle:FTL(@"Show minimap") target:self action:@selector(boxChanged:)];
     _wrapBox = [NSButton checkboxWithTitle:FTL(@"Wrap lines to the window width") target:self action:@selector(boxChanged:)];
+    _remoteBox = [NSButton checkboxWithTitle:FTL(@"Load images from the web in Markdown previews") target:self action:@selector(boxChanged:)];
 
     NSGridView *grid = [NSGridView gridViewWithViews:@[
         @[heading(FTL(@"Appearance")), NSGridCell.emptyContentView],
@@ -81,13 +83,15 @@ static NSStackView *column(NSArray<NSView *> *views) {
         @[NSGridCell.emptyContentView, _gitignoreBox],
         @[heading(FTL(@"Editor")), NSGridCell.emptyContentView],
         @[rowLabel(FTL(@"Auto save:")), _autoSavePopup],
-        @[NSGridCell.emptyContentView, column(@[_wrapBox, note(FTL(@"Toggle with ⌥Z. Files over 1 million lines or 32 MB are not wrapped."))])],
-        @[NSGridCell.emptyContentView, _minimapBox]]];
+        @[NSGridCell.emptyContentView, column(@[_wrapBox, note(FTL(@"Toggle with ⌥⌘Z. Files over 1 million lines or 32 MB are not wrapped."))])],
+        @[NSGridCell.emptyContentView, _minimapBox],
+        @[heading(FTL(@"Previews")), NSGridCell.emptyContentView],
+        @[NSGridCell.emptyContentView, column(@[_remoteBox, note(FTL(@"Off: images such as README badges show their description instead, and nothing is downloaded."))])]]];
     grid.rowSpacing = 10;
     grid.columnSpacing = 10;
     [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
-    const NSInteger headings[] = {0, 2, 7};
-    for (int k = 0; k < 3; k++) {
+    const NSInteger headings[] = {0, 2, 7, 11};
+    for (int k = 0; k < 4; k++) {
         NSInteger r = headings[k];
         NSGridRow *row = [grid rowAtIndex:r];
         [row mergeCellsInRange:NSMakeRange(0, 2)];
@@ -124,6 +128,7 @@ static NSStackView *column(NSArray<NSView *> *views) {
 - (NSButton *)gitignoreBox { return _gitignoreBox; }
 - (NSButton *)minimapBox { return _minimapBox; }
 - (NSButton *)wrapBox { return _wrapBox; }
+- (NSButton *)remoteImagesBox { return _remoteBox; }
 - (NSTextField *)alwaysHiddenField { return _alwaysHiddenField; }
 - (NSTextField *)searchSkippedField { return _searchSkippedField; }
 - (NSPopUpButton *)appearancePopup { return _appearancePopup; }
@@ -136,6 +141,7 @@ static NSStackView *column(NSArray<NSView *> *views) {
     _gitignoreBox.state = s.respectGitignore;
     _minimapBox.state = s.showsMinimap;
     _wrapBox.state = s.wordWrap;
+    _remoteBox.state = s.remoteImages;
     [_autoSavePopup selectItemAtIndex:MIN(2, MAX(0, s.autoSaveMode))];
     if (self.window.firstResponder != _alwaysHiddenField.currentEditor) _alwaysHiddenField.stringValue = [s.alwaysHidden componentsJoinedByString:@", "];
     if (self.window.firstResponder != _searchSkippedField.currentEditor) _searchSkippedField.stringValue = [s.searchSkipped componentsJoinedByString:@", "];
@@ -149,6 +155,7 @@ static NSStackView *column(NSArray<NSView *> *views) {
     else if (b == _gitignoreBox) s.respectGitignore = b.state == NSControlStateValueOn;
     else if (b == _minimapBox) s.showsMinimap = b.state == NSControlStateValueOn;
     else if (b == _wrapBox) s.wordWrap = b.state == NSControlStateValueOn;
+    else if (b == _remoteBox) s.remoteImages = b.state == NSControlStateValueOn;
 }
 
 - (void)commitFields {
@@ -159,6 +166,9 @@ static NSStackView *column(NSArray<NSView *> *views) {
     if (![skipped isEqualToArray:s.searchSkipped]) s.searchSkipped = skipped;
 }
 - (void)controlTextDidEndEditing:(NSNotification *)n { [self commitFields]; }
+// A list typed without pressing Return still counts when the window is closed or left.
+- (void)windowWillClose:(NSNotification *)n { [self.window makeFirstResponder:nil]; [self commitFields]; }
+- (void)windowDidResignKey:(NSNotification *)n { [self commitFields]; }
 
 - (void)resetFiles:(id)sender { [FTSettings.shared resetFileLists]; [self.window makeFirstResponder:nil]; [self reloadFromSettings]; }
 

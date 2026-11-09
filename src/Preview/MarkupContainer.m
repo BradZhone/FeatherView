@@ -14,8 +14,18 @@ static const NSUInteger kMaxMarkdownBytes = 2u << 20;
 @interface HTMLPreview () <WKNavigationDelegate, WKUIDelegate>
 @end
 
+// Records when the user last clicked or typed in the page.
+@interface FTWebView : WKWebView
+@property (nonatomic) NSTimeInterval lastGesture;
+@end
+@implementation FTWebView
+- (void)mouseDown:(NSEvent *)e { _lastGesture = NSProcessInfo.processInfo.systemUptime; [super mouseDown:e]; }
+- (void)otherMouseDown:(NSEvent *)e { _lastGesture = NSProcessInfo.processInfo.systemUptime; [super otherMouseDown:e]; }
+- (void)keyDown:(NSEvent *)e { _lastGesture = NSProcessInfo.processInfo.systemUptime; [super keyDown:e]; }
+@end
+
 @implementation HTMLPreview {
-    WKWebView *_web;
+    FTWebView *_web;
     NSString *_root;
     double _restoreY;
 }
@@ -33,7 +43,7 @@ static NSString *absolute(NSString *p) {
     _root = [root copy];
     WKWebViewConfiguration *cfg = [WKWebViewConfiguration new];
     cfg.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;    // nothing written to ~/Library
-    _web = [[WKWebView alloc] initWithFrame:self.bounds configuration:cfg];
+    _web = [[FTWebView alloc] initWithFrame:self.bounds configuration:cfg];
     _web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _web.navigationDelegate = self;
     _web.UIDelegate = self;
@@ -85,13 +95,22 @@ static NSString *absolute(NSString *p) {
     return u.isFileURL && [u.path.stringByStandardizingPath isEqualToString:_path.stringByStandardizingPath];
 }
 
+- (void)noteUserGesture { _web.lastGesture = NSProcessInfo.processInfo.systemUptime; }
+
 - (void)follow:(NSURL *)u {
+    // a script can "click" a link or call window.open; only follow what the user just asked for
+    NSTimeInterval since = NSProcessInfo.processInfo.systemUptime - _web.lastGesture;
+    if (_web.lastGesture <= 0 || since > 1.0) return;
+    _web.lastGesture = 0;                                  // one gesture, one link
     NSString *scheme = u.scheme.lowercaseString;
     if (u.isFileURL) {
         BOOL dir = NO;
         if ([NSFileManager.defaultManager fileExistsAtPath:u.path isDirectory:&dir] && !dir && self.onOpenFile) self.onOpenFile(u.path);
         else NSBeep();
-    } else if ([@[@"http", @"https", @"mailto"] containsObject:scheme ?: @""]) [NSWorkspace.sharedWorkspace openURL:u];
+    } else if ([@[@"http", @"https", @"mailto"] containsObject:scheme ?: @""]) {
+        if (self.onOpenExternal) self.onOpenExternal(u);
+        else [NSWorkspace.sharedWorkspace openURL:u];
+    }
 }
 
 // The page itself and its iframes load normally; clicked links open in a tab (local files) or the browser.
@@ -105,7 +124,7 @@ static NSString *absolute(NSString *p) {
 
 - (WKWebView *)webView:(WKWebView *)wv createWebViewWithConfiguration:(WKWebViewConfiguration *)c
    forNavigationAction:(WKNavigationAction *)a windowFeatures:(WKWindowFeatures *)f {
-    if (a.navigationType == WKNavigationTypeLinkActivated) [self follow:a.request.URL];
+    [self follow:a.request.URL];                           // window.open counts only right after a click
     return nil;
 }
 
@@ -130,7 +149,7 @@ static NSString *absolute(NSString *p) {
     _kind = kind;
     _path = [path copy];
     _root = [root copy];
-    _layout = MarkupSource;
+    _markupLayout = MarkupSource;
     self.autoresizesSubviews = YES;
     FTClipToBounds(self);
     [self applyLayout];
@@ -140,9 +159,9 @@ static NSString *absolute(NSString *p) {
 - (MarkdownPreview *)markdownView { return [_preview isKindOfClass:MarkdownPreview.class] ? (MarkdownPreview *)_preview : nil; }
 - (HTMLPreview *)htmlView { return [_preview isKindOfClass:HTMLPreview.class] ? (HTMLPreview *)_preview : nil; }
 
-- (void)setLayout:(MarkupLayout)l {
-    if (l == _layout && _built) return;
-    _layout = l;
+- (void)setMarkupLayout:(MarkupLayout)l {
+    if (l == _markupLayout && _built) return;
+    _markupLayout = l;
     [self applyLayout];
 }
 
@@ -164,7 +183,7 @@ static NSString *absolute(NSString *p) {
 }
 
 - (void)ensurePreview {
-    if (_layout == MarkupSource || _preview) { if (!_built) [self applyLayout]; return; }
+    if (_markupLayout == MarkupSource || _preview) { if (!_built) [self applyLayout]; return; }
     [self applyLayout];
 }
 
@@ -183,15 +202,15 @@ static NSString *absolute(NSString *p) {
     for (NSView *v in self.subviews.copy) [v removeFromSuperview];
     [_split removeFromSuperview];
     _split = nil;
-    if (_layout != MarkupSource && !_preview) {
+    if (_markupLayout != MarkupSource && !_preview) {
         _preview = [self makePreview];
         if (_kind != MarkupHTML) [self refreshNow];              // HTML loads itself from disk
     }
     NSRect b = self.bounds;
-    if (_layout == MarkupSource) {
+    if (_markupLayout == MarkupSource) {
         _editor.frame = b; _editor.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         [self addSubview:_editor];
-    } else if (_layout == MarkupPreview) {
+    } else if (_markupLayout == MarkupPreview) {
         _preview.frame = b; _preview.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         [self addSubview:_preview];
     } else {
@@ -210,14 +229,14 @@ static NSString *absolute(NSString *p) {
         [self editorScrolled];
     }
     _built = YES;
-    if (w && (editorFocused || _layout == MarkupPreview)) [w makeFirstResponder:self.focusView];
+    if (w && (editorFocused || _markupLayout == MarkupPreview)) [w makeFirstResponder:self.focusView];
 }
 
 - (CGFloat)splitView:(NSSplitView *)sv constrainMinCoordinate:(CGFloat)p ofSubviewAt:(NSInteger)i { return 160; }
 - (CGFloat)splitView:(NSSplitView *)sv constrainMaxCoordinate:(CGFloat)p ofSubviewAt:(NSInteger)i { return sv.bounds.size.width - 160; }
 
 - (NSView *)focusView {
-    if (_layout != MarkupPreview) return _editor;
+    if (_markupLayout != MarkupPreview) return _editor;
     if (self.dataView) return self.dataView.focusView;
     return self.markdownView ? self.markdownView.textView : self.htmlView ? self.htmlView.webView : _editor;
 }
@@ -230,7 +249,7 @@ static NSString *absolute(NSString *p) {
 
 // A row / node was double-clicked: show the source next to it, on that line.
 - (void)revealSourceLine:(NSUInteger)line {
-    if (_layout == MarkupPreview) { self.layout = MarkupSplit; if (self.onLayoutChange) self.onLayoutChange(MarkupSplit); }
+    if (_markupLayout == MarkupPreview) { self.markupLayout = MarkupSplit; if (self.onLayoutChange) self.onLayoutChange(MarkupSplit); }
     [_editor gotoLine:line];
     [self.window makeFirstResponder:_editor];
 }
@@ -243,7 +262,6 @@ static NSString *absolute(NSString *p) {
 - (void)refreshNow {
     if (self.dataView) { [self.dataView setSourceData:_editor.contentData path:_path]; return; }
     if (self.markdownView && _kind == MarkupNotebook) {
-        [NSFileManager.defaultManager removeItemAtPath:self.notebookImageDir error:nil];
         [self.markdownView setMarkdown:NotebookToMarkdown(_editor.contentData, self.notebookImageDir, NULL) baseDir:_path.stringByDeletingLastPathComponent];
         return;
     }
@@ -255,7 +273,7 @@ static NSString *absolute(NSString *p) {
         }
         NSString *s = [[NSString alloc] initWithData:_editor.contentData encoding:NSUTF8StringEncoding] ?: @"";
         [self.markdownView setMarkdown:s baseDir:dir];
-        if (_layout == MarkupSplit) [self editorScrolled];
+        if (_markupLayout == MarkupSplit) [self editorScrolled];
     } else if (self.htmlView) [self.htmlView reload];
 }
 
@@ -273,7 +291,7 @@ static NSString *absolute(NSString *p) {
 - (void)didSave { if (self.htmlView) [self.htmlView reload]; }
 
 - (void)editorScrolled {
-    if (_layout == MarkupSplit && _kind == MarkupMarkdown) [self.markdownView scrollToSourceLine:_editor.topVisibleLine];
+    if (_markupLayout == MarkupSplit && _kind == MarkupMarkdown) [self.markdownView scrollToSourceLine:_editor.topVisibleLine];
 }
 
 - (void)setPath:(NSString *)p {

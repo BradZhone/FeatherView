@@ -15,6 +15,8 @@
 make            # 构建 build/FeatherView.app（本机架构，ad-hoc 签名）
 make run        # 构建，并以当前目录作为工作区打开
 make test       # 本地化检查、逻辑测试、Markdown 测试、真实视图测试
+make sanitize   # 在 AddressSanitizer 和 UndefinedBehaviorSanitizer 下运行上述测试
+make analyze    # clang 静态分析，有任何警告即失败
 make install    # 安装到 /Applications（不可写时安装到 ~/Applications）
 make release    # 先运行测试，再将 arm64 + x86_64 通用包输出到 dist/
 scripts/bench.sh 3 20 > results.tsv   # 与 VS Code、Zed、Chrome 的资源占用对比

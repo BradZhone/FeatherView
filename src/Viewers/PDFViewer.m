@@ -5,6 +5,9 @@
 
 static const CGFloat kThumbW = 132;
 
+@interface PDFPreview () <PDFViewDelegate>
+@end
+
 @implementation PDFPreview {
     PDFView *_pdf;
     PDFThumbnailView *_thumbs;
@@ -26,6 +29,7 @@ static const CGFloat kThumbW = 132;
     _pdf.autoScales = YES;
     _pdf.backgroundColor = NSColor.windowBackgroundColor;
     _pdf.document = doc;
+    _pdf.delegate = self;
     [self addSubview:_pdf];
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
     [nc addObserver:self selector:@selector(pdfChanged:) name:PDFViewPageChangedNotification object:_pdf];
@@ -37,6 +41,16 @@ static const CGFloat kThumbW = 132;
     [NSNotificationCenter.defaultCenter removeObserver:self];
     _thumbs.PDFView = nil;
     _pdf.document = nil;                 // drops PDFKit's page caches
+}
+
+// A link in a PDF may name any URL scheme (an app's custom one, a file): only web and mail links leave the app.
++ (BOOL)opensLink:(NSURL *)url {
+    return [@[@"http", @"https", @"mailto"] containsObject:url.scheme.lowercaseString ?: @""];
+}
+- (void)PDFViewWillClickOnLink:(PDFView *)sender withURL:(NSURL *)url {
+    if (url.isFileURL && self.onOpenFile) { self.onOpenFile(url.path); return; }
+    if ([PDFPreview opensLink:url]) [NSWorkspace.sharedWorkspace openURL:url];
+    else NSBeep();
 }
 
 - (PDFView *)pdfView { return _pdf; }

@@ -310,14 +310,19 @@ JSONNode *JSONParse(NSData *utf8, NSString **error) {
 
 #pragma mark Property lists
 
-static JSONNode *plistNode(id v, NSUInteger depth) {
+// *budget counts down per node: a binary plist can refer to one object many times, so a few hundred bytes
+// can describe an exponentially large tree. Past the budget the rest is one "…" entry.
+static JSONNode *plistNode(id v, NSUInteger depth, NSUInteger *budget) {
     JSONNode *n = [JSONNode new];
+    if (*budget == 0) { n.kind = JSONString; n.text = FTL(@"… (too many items, the rest isn’t shown)"); return n; }
+    (*budget)--;
     if ([v isKindOfClass:NSDictionary.class] && depth < kMaxDepth) {
         n.kind = JSONObject;
         NSMutableArray *kids = [NSMutableArray array];
         for (id k in [[v allKeys] sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
                  return [[a description] localizedStandardCompare:[b description]]; }]) {
-            JSONNode *c = plistNode(v[k], depth + 1);
+            if (!*budget) break;
+            JSONNode *c = plistNode(v[k], depth + 1, budget);
             c.key = [k description];
             c.index = kids.count;
             c.parent = n;
@@ -328,10 +333,11 @@ static JSONNode *plistNode(id v, NSUInteger depth) {
         n.kind = JSONArray;
         NSMutableArray *kids = [NSMutableArray array];
         for (id x in v) {
-            JSONNode *c = plistNode(x, depth + 1);
+            JSONNode *c = plistNode(x, depth + 1, budget);
             c.index = kids.count;
             c.parent = n;
             [kids addObject:c];
+            if (!*budget) break;
         }
         n.children = kids;
     } else if ([v isKindOfClass:NSString.class]) {
@@ -349,8 +355,9 @@ static JSONNode *plistNode(id v, NSUInteger depth) {
         n.text = [NSString stringWithFormat:FTLP(d.length, @"%lu byte  %@%@", @"%lu bytes  %@%@"), (unsigned long)d.length, hex, d.length > 24 ? @"…" : @""];
     } else if ([v isKindOfClass:NSDate.class]) {
         n.kind = JSONDate;
-        NSISO8601DateFormatter *f = [NSISO8601DateFormatter new];
-        f.timeZone = NSTimeZone.localTimeZone;
+        static NSISO8601DateFormatter *f;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ f = [NSISO8601DateFormatter new]; f.timeZone = NSTimeZone.localTimeZone; });
         n.text = [f stringFromDate:v];
     } else {
         n.kind = JSONString; n.text = [v description];
@@ -358,7 +365,10 @@ static JSONNode *plistNode(id v, NSUInteger depth) {
     return n;
 }
 
-JSONNode *JSONFromPropertyList(id plist) { return plist ? plistNode(plist, 0) : nil; }
+JSONNode *JSONFromPropertyList(id plist) {
+    NSUInteger budget = kMaxNodes;
+    return plist ? plistNode(plist, 0, &budget) : nil;
+}
 
 NSUInteger JSONNodeCount(JSONNode *root, NSUInteger limit) {
     if (!root) return 0;

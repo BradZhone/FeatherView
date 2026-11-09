@@ -1,4 +1,5 @@
 #import "TextEditorView+Private.h"
+#import "FileKind.h"
 #import "Localization.h"
 
 @implementation EditOp @end
@@ -261,15 +262,25 @@ static CGColorRef tokenColor(TokenKind k) { return HLColor(k).CGColor; }
 - (BOOL)isAccessibilityElement { return YES; }
 - (NSAccessibilityRole)accessibilityRole { return NSAccessibilityTextAreaRole; }
 - (NSString *)accessibilityLabel { return _path.lastPathComponent; }
+// VoiceOver sees the caret's line as the text (a whole large file would be too much to hand over).
 - (id)accessibilityValue { return [self lineString:[_buf lineForOffset:_caret]]; }
+- (NSInteger)accessibilityNumberOfCharacters { return (NSInteger)[self.accessibilityValue length]; }
+- (NSInteger)accessibilityInsertionPointLineNumber { return (NSInteger)[_buf lineForOffset:_caret]; }
+- (NSString *)accessibilitySelectedText { return self.selection.length <= 65536 ? self.selectedText : nil; }
+- (NSRange)accessibilitySelectedTextRange {
+    NSUInteger L = [_buf lineForOffset:_caret];
+    NSRange sel = self.selection;
+    NSUInteger a = [self utf16Index:MAX(sel.location, [_buf lineStart:L]) inLine:L], b = [self utf16Index:MIN(NSMaxRange(sel), [_buf lineEnd:L]) inLine:L];
+    return NSMakeRange(a, b >= a ? b - a : 0);
+}
+- (NSString *)accessibilityRoleDescription { return FTL(@"text editor"); }
 
 - (NSUInteger)caretLine { return [_buf lineForOffset:_caret] + 1; }
 
 - (NSString *)statusText {
     NSUInteger L = [_buf lineForOffset:_caret];
     NSUInteger col = [self utf16Index:_caret inLine:L] + 1;
-    NSString *enc = _encoding == NSUTF8StringEncoding ? @"UTF-8" :
-                    _encoding == NSUTF16StringEncoding ? @"UTF-16" : @"GB18030";
+    NSString *enc = FKEncodingName(_encoding);
     NSMutableString *s = [NSMutableString stringWithFormat:FTL(@"Ln %lu, Col %lu   %@   %@"),
                           (unsigned long)L + 1, (unsigned long)col, enc, _buf.usesCRLF ? @"CRLF" : @"LF"];
     NSRange sel = self.selection;

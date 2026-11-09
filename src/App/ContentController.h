@@ -35,6 +35,7 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 - (BOOL)closeAll;                       // asks once about unsaved tabs
 - (BOOL)closePathsWithin:(NSString *)path;
 - (void)closeAllWithoutAsking;
+@property (nonatomic, readonly) NSUInteger viewerLoads;       // tests: viewers built so far
 - (void)selectTabOffset:(NSInteger)delta;
 - (void)selectTabAtIndex:(NSInteger)i;  // negative = last
 - (BOOL)reopenClosed;
@@ -58,6 +59,8 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 @property (nonatomic, copy) NSString *(^savePathHandler)(NSString *suggestedName, NSString *directory);
 @property (nonatomic, copy) void (^onSaveAs)(NSString *path);  // an untitled document became this file
 + (NSSet<NSString *> *)untitledBackupsInSessions:(NSDictionary *)sessions;
+// Backups no session refers to (a crash before the session was written): non-empty ones open as untitled tabs.
+- (void)adoptUntitledBackups:(NSArray<NSString *> *)paths;
 
 - (void)showFindBar;
 - (void)showReplaceBar;

@@ -120,6 +120,7 @@ static NSMutableData *computeOrder(id<TableModel> m, NSInteger sortCol, BOOL asc
     if (_order && shown != total) [s appendFormat:FTL(@"%@ of %@ rows"), FTGrouped(shown), FTGrouped(total)];
     else [s appendFormat:FTLP(total, @"%@ row", @"%@ rows"), FTGrouped(total)];
     [s appendFormat:FTLP(_model.columnCount, @" × %@ column", @" × %@ columns"), FTGrouped(_model.columnCount)];
+    if (_model.columnCount > self.shownColumns) [s appendFormat:FTL(@" (first %@ shown)"), FTGrouped(self.shownColumns)];
     if ([_model respondsToSelector:@selector(truncated)] && _model.truncated) [s appendString:FTL(@" (file too large, only the beginning was read)")];
     if ([_model isKindOfClass:JSONLinesTable.class] && [(JSONLinesTable *)_model badLines])
         [s appendFormat:FTLP([(JSONLinesTable *)_model badLines], @" · %lu line is not a JSON object", @" · %lu lines are not JSON objects"), (unsigned long)[(JSONLinesTable *)_model badLines]];

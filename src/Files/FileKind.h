@@ -21,6 +21,10 @@ ViewerKind FKGuessKind(NSString *path);
 // NSUTF8StringEncoding or the original encoding (GB18030 / UTF-16), in which case
 // the returned data has already been converted to UTF-8.
 NSData *FKLoadText(NSString *path, NSStringEncoding *encoding, NSString **error);
+// allowNUL: the user asked for text (View as Text, a draft), so NUL bytes in UTF-8 are kept instead of meaning "binary".
+NSData *FKLoadTextAllowingNUL(NSString *path, NSStringEncoding *encoding, BOOL allowNUL, NSString **error);
+NSString *FKEncodingName(NSStringEncoding encoding);         // short label for the status bar: UTF-8, Shift_JIS, …
+BOOL FKIsMappedSize(unsigned long long size);                // files this big are mmap'd rather than read
 
 // Raw bytes (mmap'd) for the hex viewer.
 NSData *FKLoadRaw(NSString *path, NSString **error);
