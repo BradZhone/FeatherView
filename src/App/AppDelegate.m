@@ -8,6 +8,7 @@
 #import "Settings.h"
 #import "DataPreviews.h"
 #import "BinaryPreviews.h"
+#import "OfficeViews.h"
 
 static const CGFloat kSidebarW = 260;
 
@@ -59,7 +60,7 @@ static const CGFloat kSidebarW = 260;
         [self openRoot:root.stringByStandardizingPath];
     }
     [_content adoptUntitledBackups:self.orphanUntitledBackups];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ [ArchivePreview removeStaleExtractions]; });
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ [ArchivePreview removeStaleExtractions]; [DocumentPreview removeStaleRenderings]; });
     [self openPendingFiles];
     [_win makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];

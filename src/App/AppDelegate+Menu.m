@@ -316,7 +316,7 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
 - (NSString *)targetPathFrom:(id)sender { return [self targetPathsFrom:sender].firstObject; }
 
 - (void)saveDocument:(id)s {
-    if (!_content.activeIsUntitled && !_content.editor.isDirty) return;   // nothing to write; don't touch the file
+    if (!_content.activeIsUntitled && !_content.activeIsDirty) return;    // nothing to write; don't touch the file
     [_content save];
     [self updateTitle];
 }

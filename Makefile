@@ -11,12 +11,14 @@ INC      := $(addprefix -Isrc/,$(MODULES))
 ARCH     ?=
 CFLAGS   := -O2 -fobjc-arc -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=12.0 $(INC) $(ARCH)
 FRAMEWORKS := -framework Cocoa -framework CoreText -framework ImageIO -framework UniformTypeIdentifiers \
-              -framework WebKit -framework PDFKit -framework CoreServices -lsqlite3
+              -framework WebKit -framework PDFKit -framework CoreServices -lsqlite3 -lz
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 # Foundation-only code, tested without AppKit
 CORE_SRC := src/Support/Localization.m src/Editor/PieceTable.m src/Editor/PieceTable+Search.m src/Files/FileKind.m src/Files/FileWalker.m \
-            src/Files/FileOps.m src/Search/WorkspaceSearch.m src/Preview/TableModel.m src/Preview/JSONTree.m src/Preview/Notebook.m
+            src/Files/FileOps.m src/Search/WorkspaceSearch.m src/Preview/TableModel.m src/Preview/JSONTree.m src/Preview/Notebook.m \
+            src/Files/ZipArchive.m src/Preview/XLXML.m src/Preview/XLNumberFormat.m src/Preview/XLStyles.m src/Preview/XLWorkbook.m \
+            src/Preview/XLSheet.m src/Preview/XLSheetEdit.m src/Preview/XLSave.m
 MD_SRC   := src/Preview/Markdown.m src/Preview/MarkdownInline.m
 
 .PHONY: all run test clean install release sanitize analyze
@@ -51,11 +53,11 @@ $(ICNS): build/make_icon
 	./build/make_icon build/$(NAME).iconset
 	iconutil -c icns build/$(NAME).iconset -o $@
 
-build/tests: tests/tests.m $(CORE_SRC)
+build/tests: tests/tests.m tests/xlsx_fixture.h $(CORE_SRC)
 	@mkdir -p build
-	clang $(CFLAGS) -framework Foundation -framework UniformTypeIdentifiers -o $@ $^
+	clang $(CFLAGS) -framework Foundation -framework UniformTypeIdentifiers -lz -o $@ tests/tests.m $(CORE_SRC)
 
-build/editor_tests: tests/editor_tests.m $(LIB_SRC) $(HDR)
+build/editor_tests: tests/editor_tests.m tests/xlsx_fixture.h $(LIB_SRC) $(HDR)
 	@mkdir -p build
 	clang $(CFLAGS) $(FRAMEWORKS) -o $@ tests/editor_tests.m $(LIB_SRC)
 
@@ -73,7 +75,7 @@ test: build/tests build/markdown_tests build/editor_tests
 SAN := -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g -O1
 sanitize:
 	@mkdir -p build/san
-	clang $(filter-out -O2,$(CFLAGS)) $(SAN) -framework Foundation -framework UniformTypeIdentifiers -o build/san/tests tests/tests.m $(CORE_SRC)
+	clang $(filter-out -O2,$(CFLAGS)) $(SAN) -framework Foundation -framework UniformTypeIdentifiers -lz -o build/san/tests tests/tests.m $(CORE_SRC)
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) -framework Foundation -o build/san/markdown_tests tests/markdown_tests.m $(MD_SRC)
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/editor_tests tests/editor_tests.m $(LIB_SRC)
 	./build/san/tests

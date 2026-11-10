@@ -10,6 +10,8 @@ typedef NS_ENUM(NSInteger, ViewerKind) {
     ViewerTree,          // binary property list
     ViewerSQLite,
     ViewerArchive,
+    ViewerSpreadsheet,   // .xlsx: own grid, editable
+    ViewerDocument,      // .docx: rendered pages, read-only
 };
 
 // Guess from extension / UTType; reads the first 4 KB only when the extension is ambiguous

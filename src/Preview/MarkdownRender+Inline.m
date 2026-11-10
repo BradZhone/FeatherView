@@ -253,6 +253,7 @@ static NSImage *decode(CGImageSourceRef src, CGFloat maxPx) {
                 x.align = al == MDAlignCenter ? NSTextAlignmentCenter : al == MDAlignRight ? NSTextAlignmentRight : NSTextAlignmentNatural;
             }];
             NSString *src = [b.rows[r][col] stringByReplacingOccurrencesOfString:@"\\|" withString:@"|"];
+            if (r == 0 && [b.info isEqualToString:@"frontmatter"]) src = col ? FTL(@"Value") : FTL(@"Property");
             NSMutableAttributedString *s = [self inlineText:src ctx:cc font:r ? body : head];
             if (!s.length) [s appendAttributedString:[[NSAttributedString alloc] initWithString:@"\u200B" attributes:[self base:cc font:body]]];
             [self para:s ctx:cc after:0 before:0 block:cell marker:nil markerAt:0 font:body];

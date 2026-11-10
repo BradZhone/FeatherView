@@ -42,6 +42,8 @@ Modules include each other's headers directly. The Makefile adds an `-I` flag fo
 
 **The workspace is watched with FSEvents.** `FileWatcher` reports changes under the workspace folder, coalesced over half a second and ignoring skipped folders such as `.git` and `node_modules`. The tree then re-reads the folders it has already shown on a background queue and reloads only if a listing changed.
 
+**Workbooks are edited by splicing, not rewriting.** An .xlsx is a zip of XML parts. `ZipArchive` copies every entry it doesn't change byte for byte, compressed data included. While reading a worksheet, `XLWorkbook` records the byte range of every cell element; saving replaces only the edited cells' ranges (or inserts new elements in order), sets `fullCalcOnLoad` so Excel and Numbers recalculate, and drops the optional calculation chain. Charts, pivot tables, macros, comments and formatting rules are therefore never touched. The result is parsed again before it replaces the file. Word documents are only displayed: the system's Office converter (the one Quick Look uses) produces HTML that is shown in a web view with scripts disabled, because no converter available on macOS can save a .docx without losing content.
+
 **Images are decoded at display size.** ImageIO decodes only the pixels needed for the current zoom level and decodes again when zooming in, up to 24 megapixels.
 
 **Default apps are never taken over.** Every document type in `Info.plist` uses `LSHandlerRank None`. After installation FeatherView appears under "Open With" but never becomes the default for any file type on its own; a default changes only when the user selects it in the Default Apps panel. `tests/tests.m` verifies this.
@@ -56,7 +58,7 @@ make test
 
 - `scripts/l10n.py`: translation coverage and format-specifier consistency.
 - `build/tests`: logic tests for the piece table, traversal and filtering, search options, and CSV, JSON and notebook parsing.
-- `build/markdown_tests`: 82 Markdown cases, including CommonMark examples for emphasis and links, time limits for pathological input, and nesting caps.
+- `build/markdown_tests`: 91 Markdown cases, including front matter, CommonMark examples for emphasis and links, time limits for pathological input, and nesting caps.
 - `build/editor_tests`: drives the real editor, file tree, tabs, previews and viewers in an offscreen window, checking behaviour, pixels and performance — for example, "a minimap frame on a 100,000-line file takes under 16 ms" and "after every edit, the incrementally maintained wrap table equals a full rebuild". It also renders the menus and status bar in both languages.
 
 `make sanitize` builds the three test programs with AddressSanitizer and UndefinedBehaviorSanitizer and runs them; `make analyze` runs the clang static analyzer and fails on any finding. Both were clean for 0.17.0.

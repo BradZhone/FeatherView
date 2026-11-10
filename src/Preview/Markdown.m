@@ -380,13 +380,90 @@ static NSMutableArray<MDBlock *> *parseBlocks(NSArray<NSString *> *L, NSUInteger
     return out;
 }
 
+// Every ASCII punctuation character escaped, so front-matter values show literally (no emphasis or links).
+static NSString *literal(NSString *s) {
+    NSMutableString *o = [NSMutableString stringWithCapacity:s.length];
+    for (NSUInteger i = 0; i < s.length; i++) {
+        unichar c = [s characterAtIndex:i];
+        if (c < 128 && ispunct(c)) [o appendString:@"\\"];
+        [o appendFormat:@"%C", c];
+    }
+    return o;
+}
+
+static NSString *unquoted(NSString *v) {
+    v = trim(v);
+    if (v.length >= 2) {
+        unichar a = [v characterAtIndex:0], b = [v characterAtIndex:v.length - 1];
+        if ((a == '"' || a == '\'') && a == b) return [v substringWithRange:NSMakeRange(1, v.length - 2)];
+    }
+    return v;
+}
+
+// Flat "key: value" (YAML) or "key = value" (TOML) lines, YAML lists joined; nil if anything is nested.
+static NSArray<NSArray<NSString *> *> *frontMatterPairs(NSArray<NSString *> *body, BOOL toml) {
+    NSMutableArray *rows = [NSMutableArray array];
+    for (NSString *l in body) {
+        if (isBlank(l) || [trim(l) hasPrefix:@"#"]) continue;
+        NSString *t = trim(l);
+        if (!toml && indentOf(l) > 0 && [t hasPrefix:@"- "] && rows.count) {     // list item under the previous key
+            NSMutableArray *last = [rows.lastObject mutableCopy];
+            NSString *item = unquoted([t substringFromIndex:2]);
+            last[1] = [last[1] length] ? [NSString stringWithFormat:@"%@, %@", last[1], item] : item;
+            rows[rows.count - 1] = last;
+            continue;
+        }
+        if (indentOf(l) > 0) return nil;
+        NSRange sep = [l rangeOfString:toml ? @"=" : @":"];
+        if (sep.location == NSNotFound || sep.location == 0) return nil;
+        NSString *k = trim([l substringToIndex:sep.location]), *v = trim([l substringFromIndex:NSMaxRange(sep)]);
+        if (toml && [v hasPrefix:@"["] && ![v hasSuffix:@"]"]) return nil;
+        if ([k hasPrefix:@"["] || [v isEqualToString:@"|"] || [v isEqualToString:@">"]) return nil;
+        if (!toml && [v hasPrefix:@"["] && [v hasSuffix:@"]"]) {                  // [a, b] flow list
+            NSMutableArray *items = [NSMutableArray array];
+            for (NSString *x in [[v substringWithRange:NSMakeRange(1, v.length - 2)] componentsSeparatedByString:@","]) if (trim(x).length) [items addObject:unquoted(x)];
+            v = [items componentsJoinedByString:@", "];
+        } else v = unquoted(v);
+        [rows addObject:@[unquoted(k), v]];
+    }
+    return rows;
+}
+
+// "---" YAML or "+++" TOML at the very top: metadata, shown as a table (or as code when nested), never as
+// a heading. Returns the number of lines it used, 0 when there is none.
+static NSUInteger frontMatter(NSArray<NSString *> *L, NSMutableArray<MDBlock *> *out) {
+    if (!L.count) return 0;
+    NSString *open = L[0];
+    BOOL toml = [open isEqualToString:@"+++"];
+    if (![open isEqualToString:@"---"] && !toml) return 0;
+    NSUInteger end = 1;
+    while (end < L.count && ![L[end] isEqualToString:open] && !(!toml && [L[end] isEqualToString:@"..."])) end++;
+    if (end >= L.count) return 0;                                     // never closed: an ordinary rule
+    NSArray *body = [L subarrayWithRange:NSMakeRange(1, end - 1)];
+    if (!body.count) return end + 1;
+    NSArray<NSArray<NSString *> *> *pairs = frontMatterPairs(body, toml);
+    MDBlock *b = blk(pairs.count ? MDTable : MDCode, 0);
+    if (pairs.count) {
+        NSMutableArray *rows = [NSMutableArray arrayWithObject:@[@"Property", @"Value"]];
+        for (NSArray *p in pairs) [rows addObject:@[literal(p[0]), literal(p[1])]];
+        b.rows = rows; b.align = @[@(MDAlignNone), @(MDAlignNone)];
+        b.info = @"frontmatter";
+    } else { b.text = [body componentsJoinedByString:@"\n"]; b.info = toml ? @"toml" : @"yaml"; }
+    [out addObject:b];
+    return end + 1;
+}
+
 MDDocument *MDParse(NSString *source) {
     NSMutableArray *lines = [NSMutableArray array];
     for (NSString *l in [source componentsSeparatedByString:@"\n"])
         [lines addObject:expandTabs([l hasSuffix:@"\r"] ? [l substringToIndex:l.length - 1] : l)];
+    if (lines.count && [lines[0] hasPrefix:@"\uFEFF"]) lines[0] = [lines[0] substringFromIndex:1];
     NSMutableDictionary *refs = [NSMutableDictionary dictionary];
     MDDocument *d = [MDDocument new];
-    d.blocks = parseBlocks(lines, 0, refs, 0);
+    NSMutableArray<MDBlock *> *blocks = [NSMutableArray array];
+    NSUInteger skip = frontMatter(lines, blocks);
+    [blocks addObjectsFromArray:parseBlocks([lines subarrayWithRange:NSMakeRange(skip, lines.count - skip)], skip, refs, 0)];
+    d.blocks = blocks;
     d.refs = refs;
     return d;
 }

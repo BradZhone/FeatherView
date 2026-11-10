@@ -73,7 +73,8 @@ def source_keys():
             lits = re.findall(r'(?<!@)"((?:[^"\\]|\\.)*)"', m.group(2))
             for k in (lits[:1] if m.group(1) else lits):
                 keys.setdefault(unescape(k), where(m.start()))
-        for m in re.finditer(OBJC, re.sub(r'//[^\n]*', '', s)):
+        code = '\n'.join('' if 'l10n: data' in line else line for line in s.split('\n'))   # file-format data, not UI text
+        for m in re.finditer(OBJC, re.sub(r'//[^\n]*', '', code)):
             if CJK.search(m.group(1)) and m.group(1) not in DATA_LITERALS:
                 problems.append('%s: Chinese text in the source; write English inside FTL(): "%s"' % (f, m.group(1)[:60]))
     return keys, problems

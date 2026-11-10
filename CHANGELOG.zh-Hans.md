@@ -4,6 +4,17 @@
 
 本文件记录 FeatherView 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。1.0 之前，次版本号的变化可能包含不兼容的改动。
 
+## [0.18.0] — 2026-11-10
+
+### 新增
+
+- Excel 工作簿（.xlsx、.xlsm）以表格视图打开：工作表标签、列字母与行号、数字与日期格式、字体、填充、边框、合并单元格、列宽、隐藏的行和列、冻结窗格。可以直接在单元格或编辑栏中修改，支持撤销、复制粘贴和查找。保存（⌘S）时只把修改过的单元格写回文件，工作簿的其余部分逐字节保留；公式会在下次用 Excel 或 Numbers 打开时重新计算。共享公式的源单元格、数组公式、表格标题行、合并单元格和受保护的工作表为只读，并说明原因。工作簿不会自动保存。
+- Word 文档（.docx、.doc、.rtf、.odt）由系统的 Office 渲染器按页面显示，支持缩放和查找，只读。“在 Pages 中打开”（或 Word、WPS Office 等）可交给能编辑的应用。
+
+### 修复
+
+- Markdown 文件开头的 YAML（`---`）和 TOML（`+++`）元数据显示为属性表，不再被渲染成标题。
+
 ## [0.17.0] — 2026-11-09
 
 可靠性版本：修复全面审查中发现的数据丢失、安全和崩溃问题，每项修复都附带回归测试。
@@ -118,6 +129,7 @@
 - 文件树多选与批量操作；SVG 与 TypeScript 文件识别；新图标与配色。
 - 原生 Markdown 渲染、HTML 预览、图片、PDF 与十六进制查看器、小地图、自动保存、会话恢复。
 
+[0.18.0]: https://github.com/BradZhone/FeatherView/releases/tag/v0.18.0
 [0.17.0]: https://github.com/BradZhone/feather/releases/tag/v0.17.0
 [0.16.0]: https://github.com/BradZhone/feather/releases/tag/v0.16.0
 [0.15.0]: https://github.com/BradZhone/feather/releases/tag/v0.15.0

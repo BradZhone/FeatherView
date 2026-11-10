@@ -4,6 +4,17 @@
 
 All notable changes to FeatherView are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may contain incompatible changes.
 
+## [0.18.0] — 2026-11-10
+
+### Added
+
+- Excel workbooks (.xlsx, .xlsm) open in a spreadsheet view: sheet tabs, column letters and row numbers, number and date formats, fonts, fills, borders, merged cells, column widths, hidden rows and columns, and frozen panes. Cells can be edited in place or in the formula bar, with undo, copy and paste, and find. Saving (⌘S) writes only the edited cells back into the file; every other part of the workbook is kept byte for byte, and Excel or Numbers recalculates formulas when the file is next opened. Shared-formula sources, array formulas, table header rows, merged cells and protected sheets are read-only, with the reason shown. Workbooks are never auto-saved.
+- Word documents (.docx, .doc, .rtf, .odt) are rendered by the system's Office renderer as pages, with zoom and find, read-only. "Open in Pages" (or Word, WPS Office …) hands the file to an app that can edit it.
+
+### Fixed
+
+- YAML (`---`) and TOML (`+++`) front matter at the top of a Markdown file is shown as a property table instead of being rendered as a heading.
+
 ## [0.17.0] — 2026-11-09
 
 A reliability release: data-loss, security and crash fixes found in a full review, each with a regression test.
@@ -118,6 +129,7 @@ First packaged release. The project was renamed **FeatherView**.
 - Multi-selection and batch operations in the file tree; SVG and TypeScript detection; new icon and colour scheme.
 - Native Markdown rendering, HTML preview, image, PDF and hex viewers, minimap, auto-save, session restore.
 
+[0.18.0]: https://github.com/BradZhone/FeatherView/releases/tag/v0.18.0
 [0.17.0]: https://github.com/BradZhone/feather/releases/tag/v0.17.0
 [0.16.0]: https://github.com/BradZhone/feather/releases/tag/v0.16.0
 [0.15.0]: https://github.com/BradZhone/feather/releases/tag/v0.15.0

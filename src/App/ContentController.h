@@ -42,6 +42,7 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 - (BOOL)confirmCloseAll;                // save/discard/cancel for all dirty files (not untitled tabs: they are kept); does not close
 
 - (BOOL)save;
+@property (nonatomic, readonly) BOOL activeIsDirty;            // the active tab has unsaved changes (text or cells)
 - (BOOL)saveAll;
 - (NSDictionary *)sessionState;
 - (void)restoreSession:(NSDictionary *)state;

@@ -50,6 +50,9 @@ ViewerKind FKGuessKind(NSString *path) {
     NSString *name = path.lastPathComponent.lowercaseString;
     if ([name hasSuffix:@".tar.gz"] || [name hasSuffix:@".tar.bz2"] || [name hasSuffix:@".tar.xz"] || [name hasSuffix:@".tar.zst"] || [archiveExts() containsObject:ext])
         return ViewerArchive;
+    // Office Open XML: a zip package ("PK"); anything else with that name goes to Quick Look
+    if ([@[@"xlsx", @"xlsm", @"xltx", @"xltm"] containsObject:ext] && headerIs(path, "PK")) return ViewerSpreadsheet;
+    if ([@[@"docx", @"docm", @"dotx", @"doc", @"rtf", @"odt"] containsObject:ext] && !headLooksLikeText(path)) return ViewerDocument;
     if ([@[@"sqlite", @"sqlite3", @"db", @"db3", @"sqlitedb"] containsObject:ext] && headerIs(path, "SQLite format 3")) return ViewerSQLite;
     if ([@[@"plist", @"strings", @"stringsdict", @"entitlements", @"xcprivacy", @"mobileconfig", @"webloc", @"savedstate", @"nib"] containsObject:ext] &&
         headerIs(path, "bplist00")) return ViewerTree;

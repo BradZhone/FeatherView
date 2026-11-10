@@ -105,6 +105,18 @@ int main(void) {
         T(@"` a `` b ` and ``c``", @"<p><code>a `` b</code> and <code>c</code></p>");
         T(@"x ``` y `` z ` w", @"<p>x ``` y `` z ` w</p>");
 
+        // front matter is metadata, not a heading
+        T(@"---\ntitle: Hello\ntags: [a, b]\nlist:\n  - x\n  - y\n---\n# Body", @"<table><tr><th>Property</th><th>Value</th></tr><tr><td>title</td><td>Hello</td></tr>"
+          @"<tr><td>tags</td><td>a, b</td></tr><tr><td>list</td><td>x, y</td></tr></table><h1>Body</h1>");
+        T(@"---\nauthor: \"*me* [x](y)\"\n---\ntext", @"<table><tr><th>Property</th><th>Value</th></tr><tr><td>author</td><td>*me* [x](y)</td></tr></table><p>text</p>");
+        T(@"+++\ntitle = \"Toml\"\n+++\nbody", @"<table><tr><th>Property</th><th>Value</th></tr><tr><td>title</td><td>Toml</td></tr></table><p>body</p>");
+        T(@"---\nnested:\n  a: 1\n---\nbody", @"<pre lang=\"yaml\">nested:\n  a: 1</pre><p>body</p>");
+        T(@"---\n---\nbody", @"<p>body</p>");
+        T(@"\uFEFF---\nk: v\n---\n", @"<table><tr><th>Property</th><th>Value</th></tr><tr><td>k</td><td>v</td></tr></table>");
+        T(@"text\n---\nmore", @"<h2>text</h2><p>more</p>");                  // later: still a setext heading
+        T(@"---\nnot closed", @"<hr><p>not closed</p>");
+        C(MDParse(@"---\na: 1\n---\n\npara").blocks[1].line == 4, "lines after front matter keep their numbers");
+
         // pathological input stays fast (each was quadratic: seconds for ~100 KB)
         NSString *(^rep)(NSString *, NSUInteger) = ^(NSString *s, NSUInteger k) { return [@"" stringByPaddingToLength:s.length * k withString:s startingAtIndex:0]; };
         NSDictionary<NSString *, NSString *> *slow = @{
