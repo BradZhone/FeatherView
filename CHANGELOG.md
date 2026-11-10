@@ -4,6 +4,22 @@
 
 All notable changes to FeatherView are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may contain incompatible changes.
 
+## [0.19.0] — 2026-11-10
+
+### Added
+
+- Multiple cursors. ⌥-click adds or removes a cursor, ⇧⌥-drag selects a column, ⌥⌘↑ / ⌥⌘↓ add a cursor on the line above or below, ⌥⌘I puts one at the end of every selected line, ⌘D selects the word and then adds its next occurrence, ⇧⌘D moves the last selection to the next occurrence, ⇧⌘L selects all occurrences, ⌘U takes the last cursor change back and Esc returns to one cursor. Typing, deleting, moving, input methods, copy and paste (one piece per cursor when the counts match) work at every cursor, and each change is one undo step that restores all cursors. Up to 10,000 cursors; typing a word at all of them in a 2 MB file takes about 50 ms.
+- A Selection menu with line commands: move line up / down (⌥↑ / ⌥↓), copy line up / down (⇧⌥↑ / ⇧⌥↓), delete line (⇧⌘K), insert line below / above (⌘↩ / ⇧⌘↩), join lines (⌃J), indent / outdent (⌘] / ⌘[), toggle line comment (⌘/, with the language's comment syntax), go to matching bracket (⇧⌘\), sort lines, trim trailing whitespace, and upper / lower case. Its shortcuts apply only while a text editor has the focus.
+- Brackets and quotes close automatically, selections are wrapped when an opening bracket or quote is typed, a closing one that was added automatically is typed over, and backspace removes an empty pair. Quotes are not closed in plain text and Markdown. It can be turned off in Settings.
+- The matching bracket is outlined, the caret's line is shaded, and other occurrences of the word at the caret (or of the selected text) are marked.
+- Enter after `{`, `[`, `(` or a Python `:` indents one more level, and between a pair of brackets puts the closing one on its own line. Backspace in the indentation removes spaces back to the previous tab stop, and Tab inserts spaces to the next one.
+- ⌘C and ⌘X without a selection copy or cut the whole line, and such a line is pasted above the caret's line.
+- ⌃G goes to a line, as well as ⌘L.
+
+### Changed
+
+- ⌘← goes to the first non-blank character of the line, and a second press to its start; ⌃A always goes to the start.
+
 ## [0.18.0] — 2026-11-10
 
 ### Added

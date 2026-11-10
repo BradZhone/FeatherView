@@ -2,15 +2,16 @@
 #import "FileKind.h"
 #import "Localization.h"
 
-@implementation EditOp @end
-@implementation EditGroup @end
-
 @implementation TextEditorView
 @synthesize path = _path, encoding = _encoding;
+@dynamic cursorCount, pasteboard;
 
 static CGFloat gDefaultFontSize = 13;
 + (CGFloat)defaultFontSize { return gDefaultFontSize; }
 + (void)setDefaultFontSize:(CGFloat)s { gDefaultFontSize = MIN(MAX(s, 8), 40); }
+BOOL FTEditorAutoClose = YES;
++ (BOOL)autoCloseBrackets { return FTEditorAutoClose; }
++ (void)setAutoCloseBrackets:(BOOL)on { FTEditorAutoClose = on; }
 
 - (instancetype)initWithFrame:(NSRect)frame buffer:(PieceTable *)buffer
                          path:(NSString *)path encoding:(NSStringEncoding)encoding {
@@ -133,6 +134,11 @@ static CTFontRef variant(CTFontRef base, CTFontSymbolicTraits trait, CGFloat cha
 
 static CGColorRef tokenColor(TokenKind k) { return HLColor(k).CGColor; }
 
+// What one cursor contributes to a line, as UTF-16 indices into the drawn string.
+typedef struct { NSUInteger su, eu; BOOL nl; NSUInteger caret; } Span;
+
+static inline BOOL wordUnit(unichar c) { return c >= 0x80 || c == '_' || (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z'); }
+
 - (void)drawRect:(NSRect)dirty {
     dirty = NSIntersectionRect(dirty, self.bounds);
     CGContextRef cg = NSGraphicsContext.currentContext.CGContext;
@@ -146,11 +152,25 @@ static CGColorRef tokenColor(TokenKind k) { return HLColor(k).CGColor; }
     NSUInteger lastRow = MIN(rows, (NSUInteger)ceil((self.scrollY + NSMaxY(dirty) - 4) / _lineHeight) + 1);
     NSUInteger first = firstRow < rows ? [self lineOfRow:firstRow] : _buf.lineCount;
     NSUInteger last = lastRow > firstRow ? [self lineOfRow:lastRow - 1] + 1 : first;
-    NSRange sel = self.selection;
     NSUInteger caretLine = [_buf lineForOffset:_caret];
     BOOL focused = self.window.firstResponder == self && self.window.isKeyWindow;
     BOOL healed = NO;
     CGContextSetTextMatrix(cg, CGAffineTransformMakeScale(1, -1));
+
+    NSUInteger primary = 0;
+    NSData *curData = _extra.length ? [self cursors:&primary] : nil;
+    Sel one = {_anchor, _caret, _desiredX};
+    const Sel *cur = curData ? curData.bytes : &one;
+    NSUInteger ncur = curData ? curData.length / sizeof(Sel) : 1;
+    [self updateBracketPair];
+    BOOL wholeWord = NO;
+    NSString *word = focused || ncur > 1 ? [self highlightedWord:&wholeWord] : nil;
+    NSColor *selColor = focused ? NSColor.selectedTextBackgroundColor : NSColor.unemphasizedSelectedTextBackgroundColor;
+    NSColor *lineColor = [NSColor.labelColor colorWithAlphaComponent:0.045];
+    NSColor *wordColor = [NSColor.systemGrayColor colorWithAlphaComponent:0.22];
+    NSColor *bracketColor = [NSColor.systemGrayColor colorWithAlphaComponent:0.35];
+    CGFloat fullWidth = self.bounds.size.width;
+    NSMutableData *spanData = [NSMutableData data];
 
     CGContextSaveGState(cg);
     CGContextClipToRect(cg, NSMakeRect(gutter, NSMinY(dirty), self.bounds.size.width - gutter - self.minimapWidth, NSHeight(dirty)));
@@ -184,21 +204,48 @@ static CGColorRef tokenColor(TokenKind k) { return HLColor(k).CGColor; }
         }
         CTTypesetterRef ts = wr.count > 1 ? CTTypesetterCreateWithAttributedString((__bridge CFAttributedStringRef)as) : NULL;
         NSUInteger ls = [_buf lineStart:L], le = [_buf lineEnd:L];
-        // selection as UTF-16 indices into s
-        NSUInteger su = NSNotFound, eu = 0;
-        BOOL nl = NO;
-        if (sel.length && sel.location <= le && NSMaxRange(sel) > ls) {
-            su = [self utf16Index:MAX(sel.location, ls) inLine:L];
-            eu = [self utf16Index:MIN(NSMaxRange(sel), le) inLine:L];
-            nl = NSMaxRange(sel) > le;
-            if (markAt != NSNotFound) {
-                if (su > markAt) su += _markedText.length;
-                if (eu > markAt) eu += _markedText.length;
+        NSUInteger (^u16)(NSUInteger) = ^NSUInteger(NSUInteger off) {
+            NSUInteger u = [self utf16Index:off inLine:L];
+            return markAt != NSNotFound && u > markAt ? u + self->_markedText.length : u;
+        };
+
+        // the cursors on this line (sorted, so a binary search finds the first)
+        spanData.length = 0;
+        BOOL caretHere = NO;
+        NSUInteger lo = 0, hi = ncur;
+        while (lo < hi) { NSUInteger mid = (lo + hi) / 2; if (SelEnd(cur[mid]) < ls) lo = mid + 1; else hi = mid; }
+        for (NSUInteger i = lo; i < ncur && SelStart(cur[i]) <= le; i++) {
+            Sel c = cur[i];
+            Span sp = {NSNotFound, 0, NO, NSNotFound};
+            NSUInteger a = SelStart(c), b = SelEnd(c);
+            if (a < b && a <= le && b > ls) {
+                sp.su = u16(MAX(a, ls)); sp.eu = u16(MIN(b, le)); sp.nl = b > le;
+            }
+            if (focused && c.caret >= ls && c.caret <= le) {
+                BOOL isPrimary = curData ? i == primary : YES;
+                sp.caret = isPrimary && markAt != NSNotFound ? markAt + _markedSel.location : u16(c.caret);
+                if (a == b) caretHere = YES;
+            }
+            if (sp.su != NSNotFound || sp.caret != NSNotFound) [spanData appendBytes:&sp length:sizeof sp];
+        }
+        const Span *spans = spanData.bytes;
+        NSUInteger nspan = spanData.length / sizeof(Span);
+        NSUInteger brk[2] = {NSNotFound, NSNotFound};
+        for (int k = 0; k < 2; k++)
+            if (_bracketPair[k] != NSNotFound && _bracketPair[k] >= ls && _bracketPair[k] < le) brk[k] = u16(_bracketPair[k]);
+        NSMutableData *hits = nil;                      // other occurrences of the word, UTF-16 ranges
+        if (word.length && s.length >= word.length) {
+            hits = [NSMutableData data];
+            NSRange in = NSMakeRange(0, s.length);
+            while (in.length) {
+                NSRange r = [s rangeOfString:word options:NSLiteralSearch range:in];
+                if (r.location == NSNotFound) break;
+                BOOL ok = !wholeWord || ((r.location == 0 || !wordUnit([s characterAtIndex:r.location - 1])) &&
+                                         (NSMaxRange(r) >= s.length || !wordUnit([s characterAtIndex:NSMaxRange(r)])));
+                if (ok) [hits appendBytes:&r length:sizeof r];
+                in = NSMakeRange(NSMaxRange(r), s.length - NSMaxRange(r));
             }
         }
-        NSUInteger caretU = NSNotFound;
-        if (L == caretLine && focused)
-            caretU = [self utf16Index:_caret inLine:L] + (markAt != NSNotFound ? _markedSel.location : 0);
 
         for (NSUInteger k = 0; k < wr.count; k++) {
             NSUInteger a = k ? wr.starts[k] : 0, b = k + 1 < wr.count ? wr.starts[k + 1] : s.length;
@@ -208,21 +255,43 @@ static CGColorRef tokenColor(TokenKind k) { return HLColor(k).CGColor; }
             CTLineRef line = ts ? CTTypesetterCreateLine(ts, CFRangeMake(a, b - a))
                                 : CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)as);
             BOOL lastRowOfLine = k + 1 == wr.count;
-            if (su != NSNotFound) {
-                NSUInteger p = MAX(su, a), q = MIN(eu, b);
+            if (caretHere) {
+                [lineColor setFill];
+                NSRectFillUsingOperation(NSMakeRect(gutter, top, fullWidth - gutter, _lineHeight), NSCompositingOperationSourceOver);
+            }
+            const NSRange *hr = hits.bytes;
+            for (NSUInteger h = 0; h < hits.length / sizeof(NSRange); h++) {
+                NSUInteger p = MAX(hr[h].location, a), q = MIN(NSMaxRange(hr[h]), b);
+                if (p >= q) continue;
+                CGFloat xa = CTLineGetOffsetForStringIndex(line, p, NULL), xb = CTLineGetOffsetForStringIndex(line, q, NULL);
+                [wordColor setFill];
+                NSRectFillUsingOperation(NSMakeRect(rx + xa, top + 1, xb - xa, _lineHeight - 2), NSCompositingOperationSourceOver);
+            }
+            for (NSUInteger j = 0; j < nspan; j++) {
+                if (spans[j].su == NSNotFound) continue;
+                NSUInteger p = MAX(spans[j].su, a), q = MIN(spans[j].eu, b);
+                BOOL nl = spans[j].nl;
                 if (p < q || (p == q && lastRowOfLine && nl && p >= a)) {
                     CGFloat xa = CTLineGetOffsetForStringIndex(line, p, NULL);
                     CGFloat xb = CTLineGetOffsetForStringIndex(line, q, NULL);
                     if (lastRowOfLine && nl) xb += _charWidth * 0.6;          // newline is selected
-                    [(focused ? NSColor.selectedTextBackgroundColor : NSColor.unemphasizedSelectedTextBackgroundColor) setFill];
+                    [selColor setFill];
                     NSRectFill(NSMakeRect(rx + xa, top, MAX(1, xb - xa), _lineHeight));
                 }
             }
             CGContextSetTextPosition(cg, rx, top + _ascent + 1);
             CTLineDraw(line, cg);
             if (!wrap) _widestLine = MAX(_widestLine, CTLineGetTypographicBounds(line, NULL, NULL, NULL));
-            if (caretU != NSNotFound && caretU >= a && (caretU < b || lastRowOfLine)) {
-                CGFloat cx = CTLineGetOffsetForStringIndex(line, caretU, NULL);
+            for (int m = 0; m < 2; m++) {
+                if (brk[m] == NSNotFound || brk[m] < a || brk[m] >= b) continue;
+                CGFloat xa = CTLineGetOffsetForStringIndex(line, brk[m], NULL), xb = CTLineGetOffsetForStringIndex(line, brk[m] + 1, NULL);
+                [bracketColor setFill];
+                NSFrameRectWithWidthUsingOperation(NSMakeRect(rx + xa, top + 1, MAX(1, xb - xa), _lineHeight - 2), 1, NSCompositingOperationSourceOver);
+            }
+            for (NSUInteger j = 0; j < nspan; j++) {
+                NSUInteger cu = spans[j].caret;
+                if (cu == NSNotFound || cu < a || !(cu < b || lastRowOfLine)) continue;
+                CGFloat cx = CTLineGetOffsetForStringIndex(line, cu, NULL);
                 [NSColor.controlAccentColor setFill];
                 NSRectFill(NSMakeRect(floor(rx + cx), top, 2, _lineHeight));
             }
@@ -284,7 +353,9 @@ static CGColorRef tokenColor(TokenKind k) { return HLColor(k).CGColor; }
     NSMutableString *s = [NSMutableString stringWithFormat:FTL(@"Ln %lu, Col %lu   %@   %@"),
                           (unsigned long)L + 1, (unsigned long)col, enc, _buf.usesCRLF ? @"CRLF" : @"LF"];
     NSRange sel = self.selection;
-    if (sel.length) [s appendFormat:FTLP(sel.length, @"   %lu byte selected", @"   %lu bytes selected"), (unsigned long)sel.length];
+    NSUInteger n = self.cursorCount;
+    if (n > 1) [s appendFormat:FTLP(n, @"   %lu selection", @"   %lu selections"), (unsigned long)n];
+    else if (sel.length) [s appendFormat:FTLP(sel.length, @"   %lu byte selected", @"   %lu bytes selected"), (unsigned long)sel.length];
     if (self.wrapLimited) [s appendString:FTL(@"   Large file, not wrapped")];
     return s;
 }

@@ -7,6 +7,7 @@
 // tests
 @property (nonatomic, readonly) NSButton *showHiddenBox, *gitignoreBox, *minimapBox, *wrapBox;
 @property (nonatomic, readonly) NSButton *remoteImagesBox;
+@property (nonatomic, readonly) NSButton *autoCloseBox;
 @property (nonatomic, readonly) NSTextField *alwaysHiddenField, *searchSkippedField;
 @property (nonatomic, readonly) NSPopUpButton *appearancePopup, *autoSavePopup;
 - (void)commitFields;

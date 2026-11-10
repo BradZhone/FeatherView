@@ -257,6 +257,11 @@ static NSDictionary<NSString *, HLLang *> *languages(void) {
 }
 
 - (NSString *)modeName { return _l->name; }
+- (NSString *)lineComment { return _l->line ? @(_l->line) : nil; }
+- (NSArray<NSString *> *)blockComment {
+    if (_l->mode == ModeMarkup || _l->mode == ModeMarkdown) return @[@"<!--", @"-->"];
+    return _l->block ? @[@"/*", @"*/"] : nil;
+}
 
 typedef void (^Emit)(NSRange, TokenKind);
 static const NSUInteger kMaxHighlight = 20000;          // longer lines (minified files) are highlighted up to here

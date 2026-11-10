@@ -61,14 +61,19 @@ build/editor_tests: tests/editor_tests.m tests/xlsx_fixture.h $(LIB_SRC) $(HDR)
 	@mkdir -p build
 	clang $(CFLAGS) $(FRAMEWORKS) -o $@ tests/editor_tests.m $(LIB_SRC)
 
+build/editing_tests: tests/editing_tests.m $(LIB_SRC) $(HDR)
+	@mkdir -p build
+	clang $(CFLAGS) $(FRAMEWORKS) -o $@ tests/editing_tests.m $(LIB_SRC)
+
 build/markdown_tests: tests/markdown_tests.m $(MD_SRC) src/Preview/Markdown.h
 	@mkdir -p build
 	clang $(CFLAGS) -framework Foundation -o $@ tests/markdown_tests.m $(MD_SRC)
 
-test: build/tests build/markdown_tests build/editor_tests
+test: build/tests build/markdown_tests build/editor_tests build/editing_tests
 	python3 scripts/l10n.py
 	./build/tests
 	./build/markdown_tests
+	./build/editing_tests
 	./build/editor_tests
 
 # The three test programs built with AddressSanitizer and UndefinedBehaviorSanitizer, in build/san.
@@ -78,8 +83,10 @@ sanitize:
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) -framework Foundation -framework UniformTypeIdentifiers -lz -o build/san/tests tests/tests.m $(CORE_SRC)
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) -framework Foundation -o build/san/markdown_tests tests/markdown_tests.m $(MD_SRC)
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/editor_tests tests/editor_tests.m $(LIB_SRC)
+	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/editing_tests tests/editing_tests.m $(LIB_SRC)
 	./build/san/tests
 	./build/san/markdown_tests
+	./build/san/editing_tests
 	./build/san/editor_tests
 
 # clang's static analyzer over every source file; fails on any finding.

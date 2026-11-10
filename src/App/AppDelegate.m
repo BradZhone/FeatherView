@@ -220,6 +220,7 @@ static const CGFloat kSidebarW = 260;
     _content.autoSaveMode = (AutoSaveMode)st.autoSaveMode;
     _content.showsMinimap = st.showsMinimap;
     _content.wordWrap = st.wordWrap;
+    TextEditorView.autoCloseBrackets = st.autoCloseBrackets;
     MarkdownRenderer.loadsRemoteImages = st.remoteImages;
     _search.includeHidden = st.showHidden;
     _search.respectGitignore = st.respectGitignore;

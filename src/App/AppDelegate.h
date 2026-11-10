@@ -41,6 +41,12 @@
 - (void)showSidebarTab:(NSInteger)tab;     // 0 files, 1 search
 @end
 
+// The Selection menu: its shortcuts (⌥↑, ⌘D, ⌘[ …) only apply while a text editor has the focus, so a
+// disabled item doesn't swallow them in other views (tables, text fields, the spreadsheet grid).
+@interface FTEditorMenu : NSMenu
+@property (class, nonatomic, weak) NSResponder *focusOverride;     // tests: stands in for the key window's first responder
+@end
+
 @interface AppDelegate (Menu)
 - (void)buildMenu;
 + (void)applyAppearance:(NSInteger)mode;   // 0 system, 1 light, 2 dark

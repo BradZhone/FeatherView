@@ -3,6 +3,8 @@
 // Text buffer: immutable original bytes (usually mmap'd) + append-only add buffer,
 // stitched together by a piece list. Line starts are kept as uint32 offsets,
 // so a buffer must stay below 4 GB.
+typedef struct { NSUInteger location, removed; const uint8_t *bytes; NSUInteger inserted; } PTEdit;
+
 @interface PieceTable : NSObject
 
 - (instancetype)initWithData:(NSData *)data;
@@ -22,12 +24,19 @@
 
 - (void)insertBytes:(const uint8_t *)bytes length:(NSUInteger)n at:(NSUInteger)offset;
 - (void)deleteRange:(NSRange)range;
+// Several replacements in one pass (multiple cursors): sorted by location, not overlapping (one may start
+// where the previous removal ends), all in the coordinates of the text before the call.
+- (void)applyEdits:(const PTEdit *)edits count:(NSUInteger)count;
 
 @end
 
 @interface PieceTable (Search)
 // ASCII case-insensitive search. Wraps around. Returns NSNotFound if absent.
 - (NSUInteger)find:(NSData *)needle from:(NSUInteger)offset backward:(BOOL)backward;
+// Exact bytes, forward from offset, wrapping around.
+- (NSUInteger)findExact:(NSData *)needle from:(NSUInteger)offset;
+// Starts of all exact, non-overlapping matches (at most `limit`), in order.
+- (NSData *)allExact:(NSData *)needle limit:(NSUInteger)limit;      // NSUInteger[]
 - (BOOL)writeToFD:(int)fd;
 // Every non-overlapping match (same matching as find:) replaced, in one pass; nil when there is none.
 // *offset is moved along with the text around it (into the replacement if it was inside a match).

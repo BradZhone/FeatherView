@@ -25,5 +25,7 @@ BOOL HLIsBold(TokenKind k);     // headings, strong
 @interface Highlighter : NSObject
 + (instancetype)highlighterForPath:(NSString *)path;   // nil = no highlighting
 @property (nonatomic, readonly) NSString *modeName;    // "code", "json", "markdown", … (tests)
+@property (nonatomic, readonly) NSString *lineComment;                  // "//", "#", "--"; nil if none
+@property (nonatomic, readonly) NSArray<NSString *> *blockComment;      // @[open, close]; nil if none
 - (void)tokenize:(NSString *)line emit:(void (^)(NSRange r, TokenKind k))emit;
 @end

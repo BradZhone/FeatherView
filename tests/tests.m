@@ -55,6 +55,53 @@ static void fuzz(void) {
     verify(pt, ref, -1);
 }
 
+// Batches of edits (multiple cursors) against a plain byte copy, mixed with single edits and lookups.
+static void batchFuzz(void) {
+    srandom(7);
+    NSMutableData *ref = [[@"alpha\nbeta\r\ngamma\n中文\n\nend" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    PieceTable *pt = [[PieceTable alloc] initWithData:[ref copy]];
+    const char *alphabet = "ab\n\nxy \t";
+    for (int step = 0; step < 3000; step++) {
+        NSUInteger n = 1 + random() % 12, len = ref.length;
+        PTEdit e[12];
+        uint8_t bytes[12][6];
+        NSUInteger at = 0, k = 0;
+        for (; k < n; k++) {
+            NSUInteger room = len - at;
+            NSUInteger loc = at + (room ? random() % (room / (n - k) + 1) : 0);
+            NSUInteger rem = loc < len && random() % 2 ? random() % MIN((NSUInteger)4, len - loc + 1) : 0;
+            NSUInteger ins = random() % 3 ? random() % 6 : 0;
+            for (NSUInteger j = 0; j < ins; j++) bytes[k][j] = alphabet[random() % strlen(alphabet)];
+            e[k] = (PTEdit){loc, rem, bytes[k], ins};
+            at = loc + rem;
+        }
+        [pt applyEdits:e count:k];
+        for (NSUInteger j = k; j-- > 0;)
+            [ref replaceBytesInRange:NSMakeRange(e[j].location, e[j].removed) withBytes:e[j].bytes length:e[j].inserted];
+        if (random() % 4 == 0 && ref.length) {                 // a single edit in between
+            NSUInteger a = random() % ref.length;
+            [pt deleteRange:NSMakeRange(a, 1)];
+            [ref replaceBytesInRange:NSMakeRange(a, 1) withBytes:NULL length:0];
+        }
+        if (ref.length > 4000) {                                // keep it small enough to verify often
+            [pt deleteRange:NSMakeRange(0, 2000)];
+            [ref replaceBytesInRange:NSMakeRange(0, 2000) withBytes:NULL length:0];
+        }
+        if (step % 25 == 0) {
+            verify(pt, ref, step);
+            for (NSUInteger q = 0; q < ref.length; q += 13)
+                CHECK([pt byteAt:q] == ((const uint8_t *)ref.bytes)[q], "step %d byteAt(%lu)", step, (unsigned long)q);
+        }
+    }
+    verify(pt, ref, -2);
+    // edits that touch: one removal ends where the next starts, two inserts at one place
+    PieceTable *t = [[PieceTable alloc] initWithData:[@"abcdef" dataUsingEncoding:NSUTF8StringEncoding]];
+    PTEdit two[] = {{1, 2, (const uint8_t *)"X", 1}, {3, 0, (const uint8_t *)"Y\n", 2}, {3, 1, (const uint8_t *)"Z", 1}};
+    [t applyEdits:two count:3];
+    NSString *got = [[NSString alloc] initWithData:[t dataInRange:NSMakeRange(0, t.length)] encoding:NSUTF8StringEncoding];
+    CHECK([got isEqualToString:@"aXY\nZef"] && t.lineCount == 2 && [t lineStart:1] == 4, "touching edits: %s", got.UTF8String);
+}
+
 static void search(void) {
     NSData *d = [@"one Two three two\nTWO" dataUsingEncoding:NSUTF8StringEncoding];
     PieceTable *pt = [[PieceTable alloc] initWithData:d];
@@ -66,6 +113,8 @@ static void search(void) {
     CHECK([pt find:n from:14 backward:YES] == 4, "find backward");
     CHECK([pt find:n from:3 backward:YES] == 18, "wrap backward");
     CHECK([pt find:[@"zzz" dataUsingEncoding:NSUTF8StringEncoding] from:0 backward:NO] == NSNotFound, "absent");
+    CHECK([pt findExact:n from:0] == 14 && [pt findExact:n from:15] == 14, "exact find skips other cases and wraps");
+    CHECK([pt findExact:[@"TWO" dataUsingEncoding:NSUTF8StringEncoding] from:0] == 18, "exact find");
 }
 
 static void crlf(void) {
@@ -597,7 +646,7 @@ static void docTypesNeverTakeOver(void) {
 int main(void) {
     @autoreleasepool {
         docTypesNeverTakeOver();
-        fuzz(); search(); crlf(); utf8(); guessKindByContent(); fuzzy();
+        fuzz(); batchFuzz(); search(); crlf(); utf8(); guessKindByContent(); fuzzy();
         NSString *root = makeTree();
         walker(root);
         workspaceSearch(root, NO);

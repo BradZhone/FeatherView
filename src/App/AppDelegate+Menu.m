@@ -15,6 +15,16 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
     return m;
 }
 
+@implementation FTEditorMenu
+static __weak NSResponder *gFocusOverride;
++ (NSResponder *)focusOverride { return gFocusOverride; }
++ (void)setFocusOverride:(NSResponder *)r { gFocusOverride = r; }
+- (BOOL)performKeyEquivalent:(NSEvent *)e {
+    NSResponder *fr = gFocusOverride ?: NSApp.keyWindow.firstResponder;
+    return [fr isKindOfClass:TextEditorView.class] && [super performKeyEquivalent:e];
+}
+@end
+
 @implementation AppDelegate (Menu)
 
 - (void)buildMenu {
@@ -76,6 +86,7 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
                     item(FTL(@"Next Search Result"), @selector(nextSearchResult:), [NSString stringWithFormat:@"%C", (unichar)NSF4FunctionKey], 0),
                     item(FTL(@"Previous Search Result"), @selector(previousSearchResult:), [NSString stringWithFormat:@"%C", (unichar)NSF4FunctionKey], S),
                     item(FTL(@"Go to Line…"), @selector(promptGoToLine:), @"l", C)]],
+        @[FTL(@"Selection"), [self selectionMenuItems]],
         @[FTL(@"View"), @[item(FTL(@"Zoom In"), @selector(zoomInAction:), @"=", C),
                     item(FTL(@"Zoom Out"), @selector(zoomOutAction:), @"-", C),
                     item(FTL(@"Fit to Window / Default Size"), @selector(zoomResetAction:), @"0", C),
@@ -112,8 +123,15 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
     NSMenu *bar = [NSMenu new];
     for (NSArray *m in spec) {
         NSMenuItem *top = [NSMenuItem new];
-        NSMenu *sub = [[NSMenu alloc] initWithTitle:m[0]];
+        BOOL editorOnly = [m[0] isEqualToString:FTL(@"Selection")];
+        NSMenu *sub = [[(editorOnly ? FTEditorMenu.class : NSMenu.class) alloc] initWithTitle:m[0]];
         for (NSMenuItem *i in m[1]) [sub addItem:i];
+        if ([m[0] isEqualToString:FTL(@"Edit")]) {               // ⌃G as well, as in VS Code
+            NSMenuItem *g = item(FTL(@"Go to Line…"), @selector(promptGoToLine:), @"g", NSEventModifierFlagControl);
+            g.hidden = YES;
+            g.allowsKeyEquivalentWhenHidden = YES;
+            [sub addItem:g];
+        }
         if ([m[0] isEqualToString:FTL(@"View")]) {               // ⌘+ (shift-=) as well as ⌘=
             NSMenuItem *plus = item(FTL(@"Zoom In"), @selector(zoomInAction:), @"+", NSEventModifierFlagCommand);
             plus.hidden = YES;
@@ -125,6 +143,46 @@ static NSMenuItem *item(NSString *title, SEL action, NSString *key, NSEventModif
         if ([m[0] isEqualToString:FTL(@"Window")]) NSApp.windowsMenu = sub;     // AppKit lists the open windows here
     }
     NSApp.mainMenu = bar;
+}
+
+// Multiple cursors and line commands; they go to the text editor (disabled elsewhere).
+- (NSArray<NSMenuItem *> *)selectionMenuItems {
+    const NSEventModifierFlags C = NSEventModifierFlagCommand, O = NSEventModifierFlagOption, S = NSEventModifierFlagShift,
+                               K = NSEventModifierFlagControl;
+    NSString *up = [NSString stringWithFormat:@"%C", (unichar)NSUpArrowFunctionKey];
+    NSString *down = [NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey];
+    NSMenu *transform = [[NSMenu alloc] initWithTitle:FTL(@"Transform")];
+    for (NSMenuItem *i in @[item(FTL(@"Uppercase"), @selector(uppercaseWord:), nil, 0),
+                            item(FTL(@"Lowercase"), @selector(lowercaseWord:), nil, 0),
+                            item(FTL(@"Capitalize"), @selector(capitalizeWord:), nil, 0)]) [transform addItem:i];
+    NSMenuItem *transformItem = item(FTL(@"Transform"), NULL, nil, 0);
+    transformItem.submenu = transform;
+    return @[item(FTL(@"Add Cursor Above"), @selector(addCursorAbove:), up, C | O),
+             item(FTL(@"Add Cursor Below"), @selector(addCursorBelow:), down, C | O),
+             item(FTL(@"Add Cursors to Line Ends"), @selector(addCursorsToLineEnds:), @"i", C | O),
+             item(FTL(@"Add Next Occurrence"), @selector(addNextOccurrence:), @"d", C),
+             item(FTL(@"Move Last Selection to Next Occurrence"), @selector(skipToNextOccurrence:), @"d", C | S),
+             item(FTL(@"Select All Occurrences"), @selector(selectAllOccurrences:), @"l", C | S),
+             item(FTL(@"Undo Cursor"), @selector(undoCursor:), @"u", C),
+             NSMenuItem.separatorItem,
+             item(FTL(@"Move Line Up"), @selector(moveLinesUp:), up, O),
+             item(FTL(@"Move Line Down"), @selector(moveLinesDown:), down, O),
+             item(FTL(@"Copy Line Up"), @selector(copyLinesUp:), up, O | S),
+             item(FTL(@"Copy Line Down"), @selector(copyLinesDown:), down, O | S),
+             item(FTL(@"Delete Line"), @selector(deleteLines:), @"k", C | S),
+             item(FTL(@"Insert Line Below"), @selector(insertLineBelow:), @"\r", C),
+             item(FTL(@"Insert Line Above"), @selector(insertLineAbove:), @"\r", C | S),
+             item(FTL(@"Join Lines"), @selector(joinLines:), @"j", K),
+             NSMenuItem.separatorItem,
+             item(FTL(@"Indent Lines"), @selector(indentLines:), @"]", C),
+             item(FTL(@"Outdent Lines"), @selector(outdentLines:), @"[", C),
+             item(FTL(@"Toggle Line Comment"), @selector(toggleLineComment:), @"/", C),
+             item(FTL(@"Go to Matching Bracket"), @selector(jumpToBracket:), @"\\", C | S),
+             NSMenuItem.separatorItem,
+             item(FTL(@"Sort Lines Ascending"), @selector(sortLinesAscending:), nil, 0),
+             item(FTL(@"Sort Lines Descending"), @selector(sortLinesDescending:), nil, 0),
+             item(FTL(@"Trim Trailing Whitespace"), @selector(trimTrailingWhitespace:), nil, 0),
+             transformItem];
 }
 
 - (NSArray<NSMenuItem *> *)tabMenuItems {

@@ -2437,6 +2437,49 @@ static NSArray<NSString *> *menuTitles(NSMenu *m) {
     return t;
 }
 
+static NSMenuItem *itemFor(SEL action) {
+    for (NSMenuItem *top in NSApp.mainMenu.itemArray) for (NSMenuItem *i in top.submenu.itemArray) if (i.action == action) return i;
+    return nil;
+}
+
+// The Selection menu's shortcuts reach the editor and nothing else.
+static void editingShortcuts(NSString *dir) {
+    const NSEventModifierFlags C = NSEventModifierFlagCommand, O = NSEventModifierFlagOption, S = NSEventModifierFlagShift;
+    NSString *up = [NSString stringWithFormat:@"%C", (unichar)NSUpArrowFunctionKey], *down = [NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey];
+    struct { SEL a; NSString *key; NSEventModifierFlags mods; } want[] = {
+        {@selector(addNextOccurrence:), @"d", C}, {@selector(skipToNextOccurrence:), @"d", C | S}, {@selector(selectAllOccurrences:), @"l", C | S},
+        {@selector(addCursorAbove:), up, C | O}, {@selector(addCursorBelow:), down, C | O}, {@selector(addCursorsToLineEnds:), @"i", C | O},
+        {@selector(undoCursor:), @"u", C}, {@selector(moveLinesUp:), up, O}, {@selector(moveLinesDown:), down, O},
+        {@selector(copyLinesUp:), up, O | S}, {@selector(copyLinesDown:), down, O | S}, {@selector(deleteLines:), @"k", C | S},
+        {@selector(insertLineBelow:), @"\r", C}, {@selector(insertLineAbove:), @"\r", C | S}, {@selector(indentLines:), @"]", C},
+        {@selector(outdentLines:), @"[", C}, {@selector(toggleLineComment:), @"/", C}, {@selector(jumpToBracket:), @"\\", C | S},
+        {@selector(joinLines:), @"j", NSEventModifierFlagControl}};
+    for (size_t k = 0; k < sizeof want / sizeof want[0]; k++) {
+        NSMenuItem *i = itemFor(want[k].a);
+        CHECK(i && [i.keyEquivalent isEqual:want[k].key] && i.keyEquivalentModifierMask == want[k].mods, "%s has its shortcut", sel_getName(want[k].a));
+        CHECK([TextEditorView instancesRespondToSelector:want[k].a], "the editor implements %s", sel_getName(want[k].a));
+        CHECK([i.menu isKindOfClass:FTEditorMenu.class], "%s is in the editor-only menu", sel_getName(want[k].a));
+    }
+    BOOL ctrlG = NO;
+    for (NSMenuItem *top in NSApp.mainMenu.itemArray) for (NSMenuItem *i in top.submenu.itemArray)
+        if (i.action == @selector(promptGoToLine:) && [i.keyEquivalent isEqual:@"g"] && i.keyEquivalentModifierMask == NSEventModifierFlagControl) ctrlG = YES;
+    CHECK(ctrlG, "⌃G goes to a line too, next to ⌘L");
+    CHECK(itemFor(@selector(promptGoToLine:)).keyEquivalentModifierMask == C, "⌘L stays Go to Line");
+
+    NSMenu *selection = itemFor(@selector(moveLinesDown:)).menu;
+    NSEvent *altDown = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:O | NSEventModifierFlagFunction | NSEventModifierFlagNumericPad
+                                        timestamp:0 windowNumber:0 context:nil characters:down charactersIgnoringModifiers:down isARepeat:NO keyCode:125];
+    NSTextView *field = [NSTextView new];
+    FTEditorMenu.focusOverride = field;
+    CHECK(![selection performKeyEquivalent:altDown], "⌥↓ is left to a text field");
+    NSString *p = mkfile(dir, @"keys.c", @"one\ntwo\n");
+    TextEditorView *ed = openEditor(p);
+    FTEditorMenu.focusOverride = ed;
+    CHECK([selection performKeyEquivalent:altDown], "and goes to the editor when it has the focus");
+    FTEditorMenu.focusOverride = nil;
+    [cc closeAllWithoutAsking];
+}
+
 // English is the development language; zh-Hans comes from Resources/zh-Hans.lproj (scripts/l10n.py checks coverage).
 static void localization(NSString *dir) {
     NSString *p = mkfile(dir, @"l10n.txt", @"hello\n");
@@ -2474,6 +2517,7 @@ static void localization(NSString *dir) {
     [t closeAllWithoutAsking];
     FTSetLocalizationFolder(nil);
     [en buildMenu];
+    editingShortcuts(dir);
 }
 
 int main(void) {

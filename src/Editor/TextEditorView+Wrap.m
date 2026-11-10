@@ -263,6 +263,58 @@ static NSUInteger findLine(const uint64_t *rowStart, NSUInteger n, uint64_t row)
     if (_markedText) [self refreshRowsOfLine:[_buf lineForOffset:_caret]];
 }
 
+// Many edits at once (multiple cursors): one pass over the row table. Lines between the edited ones keep
+// their row counts; the edited ones are measured again.
+- (void)wrapApplyEdits:(const PTEdit *)e count:(NSUInteger)n {
+    BOOL track = _wrapActive && !_bulkEdit && _wrapValid && _wrapLines == _buf.lineCount;
+    if (!track) {
+        if (_wrapActive && !_bulkEdit) _wrapValid = NO;
+        [_buf applyEdits:e count:n];
+        return;
+    }
+    // touched line spans in old lines, merged; and how many lines each has afterwards
+    NSMutableData *spans = [NSMutableData data];          // {oldFirst, oldLast, newCount}
+    for (NSUInteger k = 0; k < n; k++) {
+        NSUInteger a = [_buf lineForOffset:e[k].location], b = [_buf lineForOffset:e[k].location + e[k].removed];
+        NSUInteger removedNL = b - a, addedNL = 0;
+        for (NSUInteger j = 0; j < e[k].inserted; j++) if (e[k].bytes[j] == '\n') addedNL++;
+        NSUInteger *last = spans.length ? (NSUInteger *)spans.mutableBytes + spans.length / sizeof(NSUInteger) - 3 : NULL;
+        if (last && a <= last[1]) {
+            last[2] = last[2] + (b > last[1] ? b - last[1] : 0) + addedNL - removedNL;
+            last[1] = MAX(last[1], b);
+        } else {
+            NSUInteger s3[3] = {a, b, b - a + 1 + addedNL - removedNL};
+            [spans appendBytes:s3 length:sizeof s3];
+        }
+    }
+    [_buf applyEdits:e count:n];
+    NSUInteger newLines = _buf.lineCount, ns = spans.length / (3 * sizeof(NSUInteger));
+    const NSUInteger *sp = spans.bytes;
+    uint64_t *rows = malloc((newLines + 1) * sizeof(uint64_t)), acc = 0;
+    NSUInteger oldL = 0, newL = 0;
+    BOOL ok = YES;
+    for (NSUInteger i = 0; i <= ns && ok; i++) {
+        NSUInteger upto = i < ns ? sp[3 * i] : _wrapLines;           // copy old lines [oldL, upto)
+        for (; oldL < upto; oldL++, newL++) {
+            if (newL >= newLines) { ok = NO; break; }
+            rows[newL] = acc;
+            acc += _rowStart[oldL + 1] - _rowStart[oldL];
+        }
+        if (i == ns || !ok) break;
+        for (NSUInteger j = 0; j < sp[3 * i + 2]; j++, newL++) {
+            if (newL >= newLines) { ok = NO; break; }
+            rows[newL] = acc;
+            acc += [self rowCountOfLine:newL];
+        }
+        oldL = sp[3 * i + 1] + 1;
+    }
+    if (!ok || newL != newLines) { free(rows); _wrapValid = NO; return; }
+    rows[newLines] = acc;
+    free(_rowStart);
+    _rowStart = rows; _rowCap = newLines + 1; _wrapLines = newLines;
+    if (_markedText) [self refreshRowsOfLine:[_buf lineForOffset:_caret]];
+}
+
 - (CGFloat)beginBulkEdit {
     [self ensureWrap];
     _bulkEdit = YES;

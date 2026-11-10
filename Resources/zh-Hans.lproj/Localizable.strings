@@ -438,3 +438,36 @@
 "%lu column" = "%lu 列";
 "%lu columns" = "%lu 列";
 "   Formulas are recalculated when the file is opened in Excel or Numbers" = "   公式会在用 Excel 或 Numbers 打开时重新计算";
+
+/* Multiple cursors and line commands (Selection menu) */
+"   %lu selection" = "   %lu 个选区";
+"   %lu selections" = "   %lu 个选区";
+"Selection" = "选择";
+"Add Cursor Above" = "在上方添加光标";
+"Add Cursor Below" = "在下方添加光标";
+"Add Cursors to Line Ends" = "在行尾添加光标";
+"Add Next Occurrence" = "添加下一个匹配项";
+"Move Last Selection to Next Occurrence" = "将最后一个选区移到下一个匹配项";
+"Select All Occurrences" = "选择所有匹配项";
+"Undo Cursor" = "撤销光标操作";
+"Move Line Up" = "向上移动行";
+"Move Line Down" = "向下移动行";
+"Copy Line Up" = "向上复制行";
+"Copy Line Down" = "向下复制行";
+"Delete Line" = "删除行";
+"Insert Line Below" = "在下方插入行";
+"Insert Line Above" = "在上方插入行";
+"Join Lines" = "合并行";
+"Indent Lines" = "增加缩进";
+"Outdent Lines" = "减少缩进";
+"Toggle Line Comment" = "切换行注释";
+"Go to Matching Bracket" = "跳到匹配的括号";
+"Sort Lines Ascending" = "按升序排列行";
+"Sort Lines Descending" = "按降序排列行";
+"Trim Trailing Whitespace" = "删除行尾空白";
+"Transform" = "转换";
+"Uppercase" = "转为大写";
+"Lowercase" = "转为小写";
+"Capitalize" = "首字母大写";
+"Auto-close brackets and quotes" = "自动补全括号和引号";
+"Quotes are not closed in plain text and Markdown." = "纯文本和 Markdown 中不自动补全引号。";
