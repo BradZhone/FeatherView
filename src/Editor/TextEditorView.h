@@ -19,7 +19,36 @@
 @property (nonatomic, readonly) BOOL wrapsLines;         // wrapping is actually in effect
 @property (nonatomic) CGFloat fontSize;                  // keeps the top visible line when changed
 @property (class, nonatomic) CGFloat defaultFontSize;     // for editors created later (default 13)
+@property (class, nonatomic) BOOL autoCloseBrackets;      // typing ( [ { and quotes adds the closing one (default YES)
+@property (nonatomic, readonly) NSUInteger cursorCount;  // 1 unless there are multiple cursors
+@property (nonatomic, strong) NSPasteboard *pasteboard;  // the general one unless set (tests)
 
+@end
+
+// Multiple cursors and line commands; menu items send these to the first responder.
+@interface TextEditorView (Commands)
+- (void)addCursorAbove:(id)sender;          // ⌥⌘↑
+- (void)addCursorBelow:(id)sender;          // ⌥⌘↓
+- (void)addNextOccurrence:(id)sender;       // ⌘D
+- (void)skipToNextOccurrence:(id)sender;    // ⇧⌘D
+- (void)selectAllOccurrences:(id)sender;    // ⇧⌘L
+- (void)addCursorsToLineEnds:(id)sender;    // ⌥⌘I
+- (void)undoCursor:(id)sender;              // ⌘U
+- (void)moveLinesUp:(id)sender;             // ⌥↑
+- (void)moveLinesDown:(id)sender;           // ⌥↓
+- (void)copyLinesUp:(id)sender;             // ⇧⌥↑
+- (void)copyLinesDown:(id)sender;           // ⇧⌥↓
+- (void)deleteLines:(id)sender;             // ⇧⌘K
+- (void)insertLineBelow:(id)sender;         // ⌘↩
+- (void)insertLineAbove:(id)sender;         // ⇧⌘↩
+- (void)indentLines:(id)sender;             // ⌘]
+- (void)outdentLines:(id)sender;            // ⌘[
+- (void)toggleLineComment:(id)sender;       // ⌘/
+- (void)joinLines:(id)sender;               // ⌃J
+- (void)sortLinesAscending:(id)sender;
+- (void)sortLinesDescending:(id)sender;
+- (void)trimTrailingWhitespace:(id)sender;
+- (void)jumpToBracket:(id)sender;           // ⇧⌘ backslash
 @end
 
 @interface TextEditorView (Document)

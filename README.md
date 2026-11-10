@@ -67,7 +67,7 @@ Measured on the same workspace with the same files; median of three runs. Memory
 
 | Area | Capabilities |
 |---|---|
-| Text and code | Editing with undo/redo, find and replace, go to line; soft wrap that follows the window width (word-aware, CJK-aware, indentation-preserving); minimap; highlighting for more than 40 languages; UTF-8, UTF-16, GB18030, Big5, Shift-JIS, EUC-KR and Windows-1252 detected and saved back unchanged; CRLF line endings preserved; Unicode-aware find |
+| Text and code | Editing with undo/redo, find and replace, go to line; multiple cursors (⌥-click, ⌘D, ⇧⌘L, column selection) and line commands (move, copy, delete, join, sort, comment); auto-closed brackets and quotes, bracket matching; soft wrap that follows the window width (word-aware, CJK-aware, indentation-preserving); minimap; highlighting for more than 40 languages; UTF-8, UTF-16, GB18030, Big5, Shift-JIS, EUC-KR and Windows-1252 detected and saved back unchanged; CRLF line endings preserved; Unicode-aware find |
 | Markdown | Native rendering (tables, task lists, highlighted code, images, badges); source, side-by-side and preview layouts with synchronized scrolling |
 | HTML | WebKit rendering with scripts and local resources; side-by-side source view |
 | CSV, TSV, JSON Lines | Table view with sorting, per-column filtering, copy as TSV and jump to source; up to 500,000 rows |
@@ -125,12 +125,15 @@ Each file opens in the view that suits it. Use **View → Preview** (⇧⌘V), *
 | Save / Save all | ⌘S / ⌥⌘S | Go to line | ⌘L |
 | Close tab / Reopen closed tab | ⌘W / ⇧⌘T | Preview / Side-by-side preview | ⇧⌘V / ⌥⌘V |
 | Word wrap | ⌥⌘Z | Minimap | ⌥⌘M |
+| Add next occurrence / select all | ⌘D / ⇧⌘L | Add cursor above / below | ⌥⌘↑ / ⌥⌘↓ |
+| Move line up / down | ⌥↑ / ⌥↓ | Copy line up / down | ⇧⌥↑ / ⇧⌥↓ |
+| Delete line | ⇧⌘K | Toggle line comment | ⌘/ |
 | Show hidden files | ⇧⌘. | Zoom in / out / reset | ⌘= / ⌘- / ⌘0 |
 | Open as text / hex | ⌥⌘1 / ⌥⌘2 | Settings | ⌘, |
 
 ## Configuration
 
-**Settings** (⌘,) controls the appearance (light, dark or system), whether hidden files are shown, names that are always hidden (for example `.git` and `.DS_Store`, wildcards allowed), folders skipped by search (for example `node_modules`), whether `.gitignore` is respected, auto-save, word wrap, the minimap, and whether the Markdown preview loads images from the web.
+**Settings** (⌘,) controls the appearance (light, dark or system), whether hidden files are shown, names that are always hidden (for example `.git` and `.DS_Store`, wildcards allowed), folders skipped by search (for example `node_modules`), whether `.gitignore` is respected, auto-save, word wrap, the minimap, auto-closing of brackets and quotes, and whether the Markdown preview loads images from the web.
 
 **FeatherView → Default Apps…** lets you choose which file types open in FeatherView when double-clicked in Finder; deselecting a type restores the previous application. Installing FeatherView never changes a default by itself.
 

@@ -12,7 +12,7 @@ static BOOL matchAt(const uint8_t *h, const uint8_t *n, NSUInteger len) {
 @implementation PieceTable (Search)
 
 // Scan match starts in [lo, hi). Forward returns the first, backward the last.
-- (NSUInteger)scan:(NSData *)needle lo:(NSUInteger)lo hi:(NSUInteger)hi backward:(BOOL)back {
+- (NSUInteger)scan:(NSData *)needle lo:(NSUInteger)lo hi:(NSUInteger)hi backward:(BOOL)back exact:(BOOL)exact {
     NSUInteger nl = needle.length, total = self.length;
     if (!nl || lo >= hi || nl > total) return NSNotFound;
     const NSUInteger chunk = 1 << 16;
@@ -24,7 +24,7 @@ static BOOL matchAt(const uint8_t *h, const uint8_t *n, NSUInteger len) {
             NSUInteger starts = MIN(chunk, hi - w);
             NSUInteger got = [self read:NSMakeRange(w, starts + nl - 1) into:buf];
             for (NSUInteger i = 0; i < starts && i + nl <= got; i++)
-                if (matchAt(buf + i, nb, nl)) { found = w + i; break; }
+                if (exact ? !memcmp(buf + i, nb, nl) : matchAt(buf + i, nb, nl)) { found = w + i; break; }
         }
     } else {
         NSUInteger w = hi;
@@ -32,7 +32,7 @@ static BOOL matchAt(const uint8_t *h, const uint8_t *n, NSUInteger len) {
             NSUInteger ws = (w - lo > chunk) ? w - chunk : lo, starts = w - ws;
             NSUInteger got = [self read:NSMakeRange(ws, starts + nl - 1) into:buf];
             for (NSUInteger i = starts; i-- > 0;)
-                if (i + nl <= got && matchAt(buf + i, nb, nl)) { found = ws + i; break; }
+                if (i + nl <= got && (exact ? !memcmp(buf + i, nb, nl) : matchAt(buf + i, nb, nl))) { found = ws + i; break; }
             w = ws;
         }
     }
@@ -43,11 +43,43 @@ static BOOL matchAt(const uint8_t *h, const uint8_t *n, NSUInteger len) {
 - (NSUInteger)find:(NSData *)needle from:(NSUInteger)off backward:(BOOL)back {
     NSUInteger len = self.length;
     off = MIN(off, len);
-    NSUInteger r = back ? [self scan:needle lo:0 hi:off backward:YES]
-                        : [self scan:needle lo:off hi:len backward:NO];
+    NSUInteger r = back ? [self scan:needle lo:0 hi:off backward:YES exact:NO]
+                        : [self scan:needle lo:off hi:len backward:NO exact:NO];
     if (r != NSNotFound) return r;
-    return back ? [self scan:needle lo:off hi:len backward:YES]
-                : [self scan:needle lo:0 hi:off backward:NO];
+    return back ? [self scan:needle lo:off hi:len backward:YES exact:NO]
+                : [self scan:needle lo:0 hi:off backward:NO exact:NO];
+}
+
+- (NSUInteger)findExact:(NSData *)needle from:(NSUInteger)off {
+    off = MIN(off, self.length);
+    NSUInteger r = [self scan:needle lo:off hi:self.length backward:NO exact:YES];
+    return r != NSNotFound ? r : [self scan:needle lo:0 hi:off backward:NO exact:YES];
+}
+
+- (NSData *)allExact:(NSData *)needle limit:(NSUInteger)limit {
+    NSMutableData *out = [NSMutableData data];
+    NSUInteger nl = needle.length, len = self.length;
+    if (!nl || nl > len) return out;
+    const NSUInteger chunk = 1 << 18;
+    uint8_t *buf = malloc(chunk + nl);
+    const uint8_t *nb = needle.bytes;
+    NSUInteger next = 0, found = 0;                       // matches must start at next or later
+    for (NSUInteger w = 0; w < len && found < limit; w += chunk) {
+        NSUInteger got = [self read:NSMakeRange(w, chunk + nl - 1) into:buf], end = MIN(chunk, got);
+        for (NSUInteger i = next > w ? next - w : 0; i < end && i + nl <= got; i++) {
+            const uint8_t *p = memchr(buf + i, nb[0], end - i);
+            if (!p) break;
+            i = (NSUInteger)(p - buf);
+            if (i + nl > got) break;
+            if (memcmp(p, nb, nl)) continue;
+            NSUInteger at = w + i;
+            [out appendBytes:&at length:sizeof at];
+            if (++found >= limit) break;
+            next = at + nl; i += nl - 1;
+        }
+    }
+    free(buf);
+    return out;
 }
 
 - (NSData *)dataReplacingAll:(NSData *)needle with:(NSData *)repl count:(NSUInteger *)count offset:(NSUInteger *)offset {

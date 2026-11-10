@@ -5,12 +5,106 @@
 #include <fcntl.h>
 #import "FileKind.h"
 
+
+@implementation EditBatch @end
+@implementation EditGroup @end
+
+@implementation EditList {
+    NSMutableData *_ranges;                 // NSRange[]
+    NSMutableArray<NSData *> *_data;
+    NSMutableData *_shift;                  // NSInteger[]: total length change of the items before i
+    BOOL _shiftValid;
+}
+
+- (instancetype)init {
+    if (!(self = [super init])) return nil;
+    _ranges = [NSMutableData data];
+    _data = [NSMutableArray array];
+    return self;
+}
+
+- (NSUInteger)count { return _data.count; }
+- (NSRange)rangeAt:(NSUInteger)i { return ((const NSRange *)_ranges.bytes)[i]; }
+- (NSData *)dataAt:(NSUInteger)i { return _data[i]; }
+
+- (NSUInteger)replace:(NSRange)r with:(NSString *)s {
+    return [self replace:r withData:[s dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data]];
+}
+
+- (NSUInteger)replace:(NSRange)r withData:(NSData *)d {
+    _shiftValid = NO;
+    NSMutableData *text = [d mutableCopy];
+    // an earlier item this one overlaps (or that ends inside it) becomes part of it
+    while (_data.count) {
+        NSRange p = [self rangeAt:_data.count - 1];
+        BOOL overlaps = r.location < NSMaxRange(p) || (r.location < p.location) ||
+                        (r.location == p.location && r.length && p.length);
+        if (!overlaps) break;
+        NSUInteger a = MIN(p.location, r.location), b = MAX(NSMaxRange(p), NSMaxRange(r));
+        NSMutableData *joined = [_data.lastObject mutableCopy];
+        [joined appendData:text];
+        text = joined;
+        r = NSMakeRange(a, b - a);
+        [_data removeLastObject];
+        _ranges.length -= sizeof(NSRange);
+    }
+    [_ranges appendBytes:&r length:sizeof r];
+    [_data addObject:text];
+    return _data.count - 1;
+}
+
+- (const NSInteger *)shifts {
+    if (!_shiftValid) {
+        NSUInteger n = _data.count;
+        _shift = [NSMutableData dataWithLength:(n + 1) * sizeof(NSInteger)];
+        NSInteger *sh = _shift.mutableBytes, acc = 0;
+        const NSRange *rs = _ranges.bytes;
+        for (NSUInteger i = 0; i < n; i++) { sh[i] = acc; acc += (NSInteger)_data[i].length - (NSInteger)rs[i].length; }
+        sh[n] = acc;
+        _shiftValid = YES;
+    }
+    return _shift.bytes;
+}
+
+- (NSUInteger)newStartOf:(NSUInteger)i { return (NSUInteger)((NSInteger)[self rangeAt:i].location + [self shifts][i]); }
+
+- (NSUInteger)map:(NSUInteger)off right:(BOOL)right {
+    NSUInteger n = _data.count;
+    const NSRange *rs = _ranges.bytes;
+    const NSInteger *sh = [self shifts];
+    // first item that doesn't end before off
+    NSUInteger lo = 0, hi = n;
+    while (lo < hi) { NSUInteger mid = (lo + hi) / 2; if (NSMaxRange(rs[mid]) < off) lo = mid + 1; else hi = mid; }
+    for (NSUInteger i = lo; i < n; i++) {
+        NSRange r = rs[i];
+        NSUInteger start = (NSUInteger)((NSInteger)r.location + sh[i]), end = start + _data[i].length;
+        if (off < r.location) return (NSUInteger)((NSInteger)off + sh[i]);
+        if (off > r.location && off < NSMaxRange(r)) return start;            // inside a replaced range
+        if (off == r.location && off == NSMaxRange(r)) {                     // an insertion here
+            if (!right) return start;
+            continue;
+        }
+        if (off == r.location) return start;                                  // a replacement starts here
+        if (right && i + 1 < n && rs[i + 1].location == off) continue;        // at its end, and another starts
+        return end;
+    }
+    return (NSUInteger)((NSInteger)off + sh[n]);
+}
+
+@end
+
 @implementation TextEditorView (Edit)
 
 - (NSRange)selection {
     NSUInteger a = MIN(_caret, _anchor), b = MAX(_caret, _anchor);
     return NSMakeRange(a, b - a);
 }
+
+- (NSString *)stringIn:(NSRange)r {
+    return [[NSString alloc] initWithData:[_buf dataInRange:r] encoding:NSUTF8StringEncoding] ?: @"";
+}
+
+- (NSString *)newline { return _buf.usesCRLF ? @"\r\n" : @"\n"; }
 
 - (PTUnicodeIndex *)unicodeIndexFor:(NSString *)needle {
     if (![PTUnicodeIndex needsUnicode:needle]) return nil;
@@ -28,24 +122,49 @@
 }
 
 - (void)moveCaretTo:(NSUInteger)off extend:(BOOL)extend {
+    [self dropExtraCursors];
     _caret = MIN(off, _buf.length);
     _desiredX = -1;                                            // vertical moves set it again afterwards
     if (!extend) _anchor = _caret;
     _coalesceBroken = YES;
+    [_autoClosed removeAllIndexes];
     [self scrollCaretVisible];
     [self notifyChange];
 }
 
-- (void)applyOp:(EditOp *)op inverse:(BOOL)inv {
-    BOOL ins = op.isInsert != inv;
-    [self beginEdit:NSMakeRange(op.offset, ins ? 0 : op.bytes.length)];
-    if (ins) [_buf insertBytes:op.bytes.bytes length:op.bytes.length at:op.offset];
-    else [_buf deleteRange:NSMakeRange(op.offset, op.bytes.length)];
-    [self endEdit];
+#pragma mark Applying edits
+
+// The batch as replacements of the current text: forward, or undoing it (the text it produced back).
+- (void)applyBatch:(EditBatch *)b inverse:(BOOL)inv {
+    NSUInteger n = b.edits.length / sizeof(BatchEdit);
+    const BatchEdit *e = b.edits.bytes;
+    const uint8_t *rem = b.removed.bytes, *ins = b.inserted.bytes;
+    PTEdit *pe = malloc(MAX(n, (NSUInteger)1) * sizeof(PTEdit));
+    NSUInteger ro = 0, io = 0;
+    NSInteger delta = 0;
+    for (NSUInteger k = 0; k < n; k++) {
+        if (inv) pe[k] = (PTEdit){(NSUInteger)((NSInteger)e[k].location + delta), e[k].inserted, rem + ro, e[k].removed};
+        else pe[k] = (PTEdit){e[k].location, e[k].removed, ins + io, e[k].inserted};
+        if (inv) delta += (NSInteger)e[k].inserted - (NSInteger)e[k].removed;
+        ro += e[k].removed; io += e[k].inserted;
+    }
+    [self applyBufferEdits:pe count:n];
+    free(pe);
+}
+
+- (void)applyBufferEdits:(const PTEdit *)pe count:(NSUInteger)n {
+    if (!n) return;
+    if (n == 1) {
+        [self beginEdit:NSMakeRange(pe[0].location, pe[0].removed)];
+        [_buf applyEdits:pe count:1];
+        [self endEdit];
+    } else {
+        [self wrapApplyEdits:pe count:n];
+    }
     _editCount++;
 }
 
-// Undo / redo of a group; big groups (replace all) rebuild the wrap table once.
+// Undo / redo of a group; Replace All swaps the whole buffer.
 - (void)applyGroup:(EditGroup *)g inverse:(BOOL)inv {
     if (g.swapBuffer) {
         CGFloat top = [self beginBulkEdit];
@@ -56,48 +175,168 @@
         [self endBulkEdit:top];
         return;
     }
-    BOOL bulk = g.ops.count > 64;
-    CGFloat top = bulk ? [self beginBulkEdit] : 0;
-    for (EditOp *op in (inv ? g.ops.reverseObjectEnumerator : g.ops.objectEnumerator)) [self applyOp:op inverse:inv];
-    if (bulk) [self endBulkEdit:top];
+    [self applyBatch:g.batch inverse:inv];
 }
 
-- (void)replaceRange:(NSRange)r withString:(NSString *)s kind:(GroupKind)kind {
-    NSData *ins = [s dataUsingEncoding:NSUTF8StringEncoding];
+static BOOL sameCursors(NSData *a, NSUInteger pa, NSData *b, NSUInteger pb) {
+    if (a.length != b.length || pa != pb) return NO;
+    const Sel *x = a.bytes, *y = b.bytes;
+    for (NSUInteger i = 0; i < a.length / sizeof(Sel); i++) if (x[i].anchor != y[i].anchor || x[i].caret != y[i].caret) return NO;
+    return YES;
+}
+
+// Typing / backspacing at the same cursors as the last batch continues it: each new edit must start
+// where that edit's text ends (it may eat back into it, or past it into the text before).
+static BOOL mergeInto(EditBatch *p, EditBatch *b) {
+    NSUInteger n = p.edits.length / sizeof(BatchEdit);
+    if (b.edits.length != p.edits.length) return NO;
+    const BatchEdit *pe = p.edits.bytes, *ne = b.edits.bytes;
+    NSMutableData *edits = [NSMutableData dataWithLength:p.edits.length];
+    BatchEdit *out = edits.mutableBytes;
+    NSMutableData *removed = [NSMutableData data], *inserted = [NSMutableData data];
+    const uint8_t *prem = p.removed.bytes, *pins = p.inserted.bytes, *nrem = b.removed.bytes, *nins = b.inserted.bytes;
+    NSUInteger pro = 0, pio = 0, nro = 0, nio = 0, prevEnd = 0;     // prevEnd: in the old text
+    NSInteger shift = 0;                                            // p's length change before edit k
+    for (NSUInteger k = 0; k < n; k++) {
+        NSUInteger P = (NSUInteger)((NSInteger)pe[k].location + shift);   // where edit k's text starts now
+        NSUInteger end = P + pe[k].inserted;
+        if (ne[k].location + ne[k].removed != end) return NO;
+        if (ne[k].removed && ne[k].inserted) return NO;
+        NSUInteger eat = ne[k].removed, keep = pe[k].inserted, extra = 0;
+        if (eat > keep) { extra = eat - keep; keep = 0; } else keep -= eat;
+        if (extra > pe[k].location || pe[k].location - extra < prevEnd) return NO;
+        BatchEdit m = {pe[k].location - extra, pe[k].removed + extra, keep + ne[k].inserted};
+        out[k] = m;
+        // removed: the bytes the new edit took from before p's text, then p's own
+        if (extra) [removed appendBytes:nrem + nro length:extra];
+        [removed appendBytes:prem + pro length:pe[k].removed];
+        [inserted appendBytes:pins + pio length:keep];
+        [inserted appendBytes:nins + nio length:ne[k].inserted];
+        prevEnd = m.location + m.removed;
+        shift += (NSInteger)pe[k].inserted - (NSInteger)pe[k].removed;
+        pro += pe[k].removed; pio += pe[k].inserted; nro += ne[k].removed; nio += ne[k].inserted;
+    }
+    p.edits = edits; p.removed = removed; p.inserted = inserted;
+    return YES;
+}
+
+- (void)commit:(EditList *)edits selections:(const Sel *)after count:(NSUInteger)na primary:(NSUInteger)pa kind:(GroupKind)kind {
+    NSUInteger pb = 0;
+    NSMutableData *before = [self cursors:&pb];
+    NSMutableData *mapped = nil;
+    if (!after) {
+        NSUInteger n = before.length / sizeof(Sel);
+        mapped = [NSMutableData dataWithLength:before.length];
+        const Sel *b = before.bytes;
+        Sel *m = mapped.mutableBytes;
+        for (NSUInteger i = 0; i < n; i++) {
+            if (b[i].anchor == b[i].caret) { NSUInteger c = [edits map:b[i].caret right:YES]; m[i] = SelMake(c, c); continue; }
+            BOOL fwd = b[i].caret > b[i].anchor;
+            NSUInteger s0 = [edits map:SelStart(b[i]) right:NO], s1 = [edits map:SelEnd(b[i]) right:YES];
+            m[i] = fwd ? SelMake(s0, s1) : SelMake(s1, s0);
+        }
+        after = mapped.bytes; na = n; pa = pb;
+    }
+
+    // the edits that change something, in the buffer's terms
+    EditBatch *batch = [EditBatch new];
+    batch.edits = [NSMutableData data]; batch.removed = [NSMutableData data]; batch.inserted = [NSMutableData data];
+    NSUInteger n = edits.count;
+    PTEdit *pe = malloc(MAX(n, (NSUInteger)1) * sizeof(PTEdit));
+    NSUInteger k = 0;
+    for (NSUInteger i = 0; i < n; i++) {
+        NSRange r = [edits rangeAt:i];
+        NSData *d = [edits dataAt:i];
+        if (NSMaxRange(r) > _buf.length) r = NSIntersectionRange(r, NSMakeRange(0, _buf.length));
+        if (!r.length && !d.length) continue;
+        NSData *old = r.length ? [_buf dataInRange:r] : nil;
+        if (old && [old isEqualToData:d]) continue;
+        BatchEdit be = {r.location, r.length, d.length};
+        [batch.edits appendBytes:&be length:sizeof be];
+        if (old) [batch.removed appendData:old];
+        [batch.inserted appendData:d];
+        pe[k++] = (PTEdit){r.location, r.length, d.bytes, d.length};
+    }
+    if (!k) {
+        free(pe);
+        [self setCursors:after count:na primary:pa];
+        _coalesceBroken = YES;
+        [self cursorsChanged];
+        return;
+    }
+
     EditGroup *g = _undo.lastObject;
-    BOOL coalesce = !_coalesceBroken && g && g.kind == kind && kind != GroupOther && g.caretAfter == _caret &&
-                    ((kind == GroupTyping && r.length == 0 && r.location == _caret) ||
-                     (kind == GroupBackspace && NSMaxRange(r) == _caret && !ins.length));
+    BOOL coalesce = !_coalesceBroken && g && !g.swapBuffer && g.kind == kind && kind != GroupOther &&
+                    sameCursors(g.selsAfter, g.primaryAfter, before, pb) && mergeInto(g.batch, batch);
     if (!coalesce) {
         g = [EditGroup new];
-        g.ops = [NSMutableArray array];
-        g.caretBefore = _caret;
+        g.batch = batch;
+        g.selsBefore = before;
+        g.primaryBefore = pb;
         g.kind = kind;
         g.serial = ++_serial;
         [self pushUndo:g];
     }
     [_redo removeAllObjects];
-    [self beginEdit:r];
-    if (r.length) {
-        EditOp *d = [EditOp new];
-        d.isInsert = NO; d.offset = r.location; d.bytes = [_buf dataInRange:r];
-        [_buf deleteRange:r];
-        [g.ops addObject:d];
-    }
-    if (ins.length) {
-        EditOp *i = [EditOp new];
-        i.isInsert = YES; i.offset = r.location; i.bytes = ins;
-        [_buf insertBytes:ins.bytes length:ins.length at:r.location];
-        [g.ops addObject:i];
-    }
-    [self endEdit];
-    _caret = _anchor = r.location + ins.length;
-    g.caretAfter = _caret;
+    [self applyBufferEdits:pe count:k];
+    free(pe);
+    [self shiftAutoClosed:edits];
+    [self setCursors:after count:na primary:pa];
+    NSUInteger pNow = 0;
+    g.selsAfter = [self cursors:&pNow];
+    g.primaryAfter = pNow;
     _coalesceBroken = NO;
-    if (r.length || ins.length) _editCount++;
     _desiredX = -1;
-    [self scrollCaretVisible];
-    [self notifyChange];
+    [_cursorHistory removeAllObjects];
+    [self cursorsChanged];
+}
+
+- (void)replaceRange:(NSRange)r withString:(NSString *)s kind:(GroupKind)kind {
+    [self dropExtraCursors];
+    EditList *e = [EditList new];
+    [e replace:r with:s];
+    NSUInteger c = r.location + [s lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    Sel after = SelMake(c, c);
+    [self commit:e selections:&after count:1 primary:0 kind:kind];
+}
+
+- (void)editCursors:(CursorEdit)f kind:(GroupKind)kind {
+    NSUInteger primary = 0;
+    NSMutableData *cur = [self cursors:&primary];
+    NSUInteger n = cur.length / sizeof(Sel);
+    const Sel *c = cur.bytes;
+    EditList *e = [EditList new];
+    // per cursor: the item it edited (or NSNotFound) and its new selection relative to that item's start
+    NSMutableData *meta = [NSMutableData dataWithLength:n * 3 * sizeof(NSInteger)];
+    NSInteger *m = meta.mutableBytes;
+    for (NSUInteger i = 0; i < n; i++) {
+        NSString *text = @"";
+        NSInteger a = NSIntegerMin, b = NSIntegerMin;
+        NSRange r = f(c[i], &text, &a, &b);
+        if (r.location == NSNotFound) { m[3 * i] = -1; continue; }
+        NSUInteger len = [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        NSUInteger before = e.count;
+        NSUInteger item = [e replace:r with:text];
+        // merged into an earlier item: the selection goes after this text, at the item's end
+        NSInteger base = 0;
+        if (e.count <= before) base = (NSInteger)([e dataAt:item].length - len);
+        if (a == NSIntegerMin) a = (NSInteger)len;
+        if (b == NSIntegerMin) b = a;
+        m[3 * i] = (NSInteger)item; m[3 * i + 1] = base + a; m[3 * i + 2] = base + b;
+    }
+    NSMutableData *after = [NSMutableData dataWithLength:n * sizeof(Sel)];
+    Sel *s = after.mutableBytes;
+    for (NSUInteger i = 0; i < n; i++) {
+        if (m[3 * i] < 0) {
+            BOOL fwd = c[i].caret >= c[i].anchor;
+            NSUInteger s0 = [e map:SelStart(c[i]) right:NO], s1 = [e map:SelEnd(c[i]) right:c[i].anchor != c[i].caret];
+            s[i] = fwd ? SelMake(s0, s1) : SelMake(s1, s0);
+            continue;
+        }
+        NSUInteger start = [e newStartOf:(NSUInteger)m[3 * i]];
+        s[i] = SelMake((NSUInteger)MAX(0, (NSInteger)start + m[3 * i + 1]), (NSUInteger)MAX(0, (NSInteger)start + m[3 * i + 2]));
+    }
+    [self commit:e selections:s count:n primary:primary kind:kind];
 }
 
 // The oldest group is dropped past the limit. The saved state is "the serial on top of the stack", so it
@@ -112,16 +351,21 @@
     else if (_savedSerial == dropped.serial) _savedSerial = 0;
 }
 
+- (void)restoreCursors:(NSData *)sels primary:(NSUInteger)p {
+    [self setCursors:sels.bytes count:sels.length / sizeof(Sel) primary:p];
+    _coalesceBroken = YES;
+    [_autoClosed removeAllIndexes];
+    [_cursorHistory removeAllObjects];
+    [self cursorsChanged];
+}
+
 - (void)undo:(id)sender {
     EditGroup *g = _undo.lastObject;
     if (!g) { NSBeep(); return; }
     [_undo removeLastObject];
     [self applyGroup:g inverse:YES];
     [_redo addObject:g];
-    _caret = _anchor = MIN(g.caretBefore, _buf.length);
-    _coalesceBroken = YES;
-    [self scrollCaretVisible];
-    [self notifyChange];
+    [self restoreCursors:g.selsBefore primary:g.primaryBefore];
 }
 
 - (void)redo:(id)sender {
@@ -130,10 +374,7 @@
     [_redo removeLastObject];
     [self applyGroup:g inverse:NO];
     [_undo addObject:g];
-    _caret = _anchor = MIN(g.caretAfter, _buf.length);
-    _coalesceBroken = YES;
-    [self scrollCaretVisible];
-    [self notifyChange];
+    [self restoreCursors:g.selsAfter primary:g.primaryAfter];
 }
 
 - (NSString *)selectedString {
@@ -141,37 +382,11 @@
     return r.length ? [[NSString alloc] initWithData:[_buf dataInRange:r] encoding:NSUTF8StringEncoding] : nil;
 }
 
-- (void)copy:(id)sender {
-    NSString *s = self.selectedString;
-    if (!s) return;
-    [NSPasteboard.generalPasteboard clearContents];
-    [NSPasteboard.generalPasteboard setString:s forType:NSPasteboardTypeString];
-}
-
-- (void)cut:(id)sender {
-    if (!self.selection.length) return;
-    [self copy:sender];
-    [self replaceRange:self.selection withString:@"" kind:GroupOther];
-}
-
-- (void)paste:(id)sender {
-    NSString *s = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
-    if (!s.length) return;
-    s = [s stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
-    if (_buf.usesCRLF) s = [s stringByReplacingOccurrencesOfString:@"\n" withString:@"\r\n"];
-    [self replaceRange:self.selection withString:s kind:GroupOther];
-}
-
-- (void)selectAll:(id)sender {
-    _anchor = 0; _caret = _buf.length;
-    [self notifyChange];
-}
-
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     SEL a = item.action;
     if (a == @selector(undo:)) return _undo.count > 0;
     if (a == @selector(redo:)) return _redo.count > 0;
-    if (a == @selector(copy:) || a == @selector(cut:)) return self.selection.length > 0;
+    if (a == @selector(undoCursor:)) return _cursorHistory.count > 0;
     return YES;
 }
 
@@ -187,6 +402,7 @@
     PTUnicodeIndex *ui = [self unicodeIndexFor:s];
     NSRange hit = ui ? [ui find:s from:from backward:back] : NSMakeRange([_buf find:n from:from backward:back], n.length);
     if (hit.location == NSNotFound) { NSBeep(); return NO; }
+    [self dropExtraCursors];
     _anchor = hit.location; _caret = NSMaxRange(hit);
     _coalesceBroken = YES;
     [self scrollCaretVisible];

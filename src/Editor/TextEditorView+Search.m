@@ -34,6 +34,7 @@ static inline uint8_t lcb(uint8_t c) { return (c >= 'A' && c <= 'Z') ? c + 32 : 
     NSUInteger a = [self charBoundary:MIN(ls + (col ? col - 1 : 0), le) lo:ls];
     NSUInteger b = MIN(a + len, le);
     if (b < le) { NSUInteger nb = b; while (nb < le && ([_buf byteAt:nb] & 0xC0) == 0x80) nb++; b = nb; }
+    [self dropExtraCursors];
     _anchor = a; _caret = b;
     _coalesceBroken = YES;
     _desiredX = -1;
@@ -78,14 +79,18 @@ static inline uint8_t lcb(uint8_t c) { return (c >= 'A' && c <= 'Z') ? c + 32 : 
                      : [_buf dataReplacingAll:f with:r count:&count offset:&caret];
     if (!count) return 0;
     EditGroup *g = [EditGroup new];
-    g.ops = [NSMutableArray array];
-    g.caretBefore = _caret;
+    NSUInteger p = 0;
+    g.selsBefore = [self cursors:&p];
+    g.primaryBefore = p;
     g.kind = GroupOther;
     g.swapBuffer = [[PieceTable alloc] initWithData:out];
     [self applyGroup:g inverse:NO];                    // g.swapBuffer now holds the text before
     g.serial = ++_serial;
+    [self dropExtraCursors];
     _caret = _anchor = MIN(caret, _buf.length);
-    g.caretAfter = _caret;
+    _desiredX = -1;
+    g.selsAfter = [self cursors:&p];
+    g.primaryAfter = p;
     [self pushUndo:g];
     [_redo removeAllObjects];
     _coalesceBroken = YES;
