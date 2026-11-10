@@ -73,6 +73,8 @@ Measured on the same workspace with the same files; median of three runs. Memory
 | CSV, TSV, JSON Lines | Table view with sorting, per-column filtering, copy as TSV and jump to source; up to 500,000 rows |
 | JSON, plist, notebooks | Collapsible tree preserving key order, with paths and line numbers; `.ipynb` cells and outputs rendered |
 | Images, SVG, PDF | Zoom and rotation; vector SVG rendering; PDF thumbnails, two-page layout and search |
+| Excel | Spreadsheet view with formats, styles, merged cells, frozen panes and sheet tabs; editing that writes back only the changed cells |
+| Word | Page view from the system's Office renderer, with zoom and find; read-only, with "Open in Pages / Word" |
 | SQLite | Read-only browsing of tables and views, schema display, ad-hoc SQL queries |
 | Archives | Listing of zip, tar.gz, 7z, rar, jar, apk, whl, deb, iso and other formats; double-click to extract and open a single entry |
 | Workspace | File tree that follows changes made outside the app, multi-selection and batch operations, drag and drop, untitled drafts, session restore, light/dark/system appearance, auto-save |
@@ -142,8 +144,8 @@ src/App       Application delegate, window, menus, tabs and document management,
 src/Editor    Text buffer (piece table), editor view, syntax highlighting
 src/Files     File tree, folder watching, traversal and filtering, file operations, type detection
 src/Search    Workspace search, Quick Open
-src/Preview   Markdown, HTML, table, tree and notebook views
-src/Viewers   Image, SVG, PDF, hex, SQLite and archive viewers
+src/Preview   Markdown, HTML, table, tree and notebook views; the Excel workbook model
+src/Viewers   Image, SVG, PDF, hex, SQLite, archive, spreadsheet and Word viewers
 Resources     Localized strings (en, zh-Hans)
 tests         Logic, Markdown and live-view test suites
 scripts       Installation, release packaging, benchmark, localization check

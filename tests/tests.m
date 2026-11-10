@@ -7,6 +7,10 @@
 #import "TableModel.h"
 #import "JSONTree.h"
 #import "Notebook.h"
+#import "XLWorkbook.h"
+#import "XLNumberFormat.h"
+#import "XLXML.h"
+#include "xlsx_fixture.h"
 
 static int failures = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
@@ -471,6 +475,91 @@ static void notebooks(void) {
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
 }
 
+
+static void numberFormats(void) {
+    struct { double v; const char *code, *want; } cases[] = {
+        {1234.5, "General", "1234.5"}, {0.1 + 0.2, "General", "0.3"}, {123456789012, "General", "1.23457E+11"}, {1.0 / 3, "General", "0.333333333"},
+        {1234.567, "0", "1235"}, {1234.567, "0.00", "1234.57"}, {1234.567, "#,##0", "1,235"}, {1234567.891, "#,##0.00", "1,234,567.89"},
+        {0.5, "#.##", ".5"}, {12, "#.##", "12."}, {5, "000", "005"}, {-1234.5, "#,##0.00", "-1,234.50"},
+        {0.1234, "0%", "12%"}, {0.1234, "0.0%", "12.3%"}, {12345.678, "0.00E+00", "1.23E+04"}, {0.000123, "0.00E+00", "1.23E-04"},
+        {-1234.5, "\"$\"#,##0.00", "-$1,234.50"}, {-1234.5, "#,##0.00;[Red](#,##0.00)", "(1,234.50)"}, {0, "#,##0;-#,##0;\"-\"", "-"},
+        {1500000, "#,##0,\"K\"", "1,500K"}, {1500000, "0.0,,\"M\"", "1.5M"}, {1234.5, "[$€-407]#,##0.00", "€1,234.50"},
+        {1234.5, "_(* #,##0.00_);_(* (#,##0.00);_(* \"-\"??_);_(@_)", " 1,234.50 "},
+        {46027, "yyyy-mm-dd", "2026-01-05"}, {46027, "d-mmm-yy", "5-Jan-26"}, {46027, "mmmm d, yyyy", "January 5, 2026"}, {46027, "dddd", "Monday"},
+        {46027.75, "yyyy-mm-dd hh:mm", "2026-01-05 18:00"}, {0.75, "h:mm AM/PM", "6:00 PM"}, {1.5, "[h]:mm:ss", "36:00:00"},
+        {46027, "yyyy\"年\"m\"月\"d\"日\"", "2026年1月5日"}, {60, "yyyy-mm-dd", "1900-02-29"}, {61, "yyyy-mm-dd", "1900-03-01"},
+        {42, "[>100]\"big\";[<=100]\"small\"", "small"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        NSString *got = XLFormatNumber(cases[i].v, @(cases[i].code), NO, NULL);
+        CHECK([got isEqualToString:@(cases[i].want)], "format %g with %s: want %s, got %s", cases[i].v, cases[i].code, cases[i].want, got.UTF8String);
+    }
+    CHECK(XLFormatIsDate(@"yyyy-mm-dd") && !XLFormatIsDate(@"0.00") && !XLFormatIsDate(@"\"day\"0") && XLFormatIsDate(@"[h]:mm"), "date formats recognised");
+    CHECK(XLDateToSerial(2026, 1, 5, 0, NO) == 46027 && XLDateToSerial(2026, 1, 5, 0, YES) == 46027 - 1462, "date serials, both systems");
+    uint32_t colour = 0; XLFormatNumber(-1, @"0;[Red]-0", NO, &colour);
+    CHECK(colour == 0xFFFF0000, "[Red] section colour");
+}
+
+static void workbooks(void) {
+    NSData *src = XLFixture();
+    NSString *err = nil;
+    XLWorkbook *wb = [[XLWorkbook alloc] initWithData:src error:&err];
+    CHECK(wb && wb.sheets.count == 2, "fixture opens: %s", err.UTF8String);
+    XLSheet *s = wb.sheets.firstObject;
+    CHECK([s.name isEqual:@"Data 数据"] && s.frozenRows == 1 && s.frozenColumns == 0, "sheet name and frozen row");
+    CHECK([[s displayAt:0 col:0 colour:NULL] isEqual:@"Name"] && [[s displayAt:1 col:0 colour:NULL] isEqual:@"Bold part"] &&
+          [[s displayAt:2 col:0 colour:NULL] isEqual:@" a & b "], "shared strings, rich text joined, phonetic hint dropped, entities: %s", [s displayAt:1 col:0 colour:NULL].UTF8String);
+    CHECK([[s displayAt:1 col:1 colour:NULL] isEqual:@"1,234.50"] && [[s displayAt:2 col:1 colour:NULL] isEqual:@"12.50%"] &&
+          [[s displayAt:1 col:2 colour:NULL] isEqual:@"2026-01-05"] && [[s displayAt:3 col:0 colour:NULL] isEqual:@"TRUE"] &&
+          [[s displayAt:3 col:1 colour:NULL] isEqual:@"#DIV/0!"], "number formats, booleans and errors as Excel shows them");
+    XLStyle *head = [s styleAt:0 col:0];
+    CHECK(head.bold && head.fillColor == 0xFF4472C4 && head.fontColor == 0xFFFFFFFF && head.hAlign == XLAlignCenter && head.left == XLLineThin &&
+          head.bottom == XLLineMedium && head.leftColor == 0xFF999999, "fonts, fills, borders and alignment");
+    CHECK([s widthOfColumn:0] > [s widthOfColumn:1] && [s widthOfColumn:3] == 0, "column widths, hidden column");
+    CHECK([[s editTextAt:2 col:3] isEqual:@"=B3*2"] && [[s editTextAt:1 col:3] isEqual:@"=B2*2"], "a shared formula's child shows its shifted formula: %s", [s editTextAt:2 col:3].UTF8String);
+    CHECK([s whyReadOnlyAt:1 col:3] && ![s whyReadOnlyAt:2 col:3] && [s whyReadOnlyAt:4 col:2] && [s whyReadOnlyAt:9 col:5] &&
+          [s whyReadOnlyAt:6 col:1] && ![s whyReadOnlyAt:6 col:0] && ![s whyReadOnlyAt:10 col:5],
+          "shared-formula master, array formula, table header and merged cells are read-only; their neighbours aren't");
+    CHECK([XLShiftFormula(@"SUM($A$1:A2)+'My Sheet'!B3+\"A1\"+LOG10(C4)", 2, 1) isEqual:@"SUM($A$1:B4)+'My Sheet'!C5+\"A1\"+LOG10(D6)"], "formula references shift, anchored and quoted parts don't");
+
+    CHECK([s setText:@"1,234.50" atRow:1 col:1 error:NULL] && !wb.hasEdits, "typing the same value again is no edit");
+    NSString *e = nil;
+    BOOL ok = [s setText:@"Renamed" atRow:0 col:0 error:&e] && [s setText:@"2026-03-01" atRow:1 col:2 error:&e] && [s setText:@"=SUM(B2:B3)" atRow:5 col:1 error:&e]
+           && [s setText:@"'007" atRow:4 col:0 error:&e] && [s setText:@"new" atRow:3 col:3 error:&e] && [s setText:@"between" atRow:7 col:0 error:&e]
+           && [s setText:@"" atRow:3 col:1 error:&e] && [wb.sheets[1] setText:@"into the prefixed sheet" atRow:2 col:1 error:&e];
+    CHECK(ok && wb.hasEdits && wb.hasFormulaEdits, "edits accepted: %s", e.UTF8String);
+    CHECK(![s setText:@"x" atRow:1 col:3 error:&e] && e.length, "a shared formula's master is refused: %s", e.UTF8String);
+    NSData *out = [wb savedData:&e];
+    CHECK(out != nil, "saved: %s", e.UTF8String);
+    XLWorkbook *back = [[XLWorkbook alloc] initWithData:out error:&err];
+    XLSheet *b = back.sheets.firstObject;
+    CHECK([[b displayAt:0 col:0 colour:NULL] isEqual:@"Renamed"] && [b styleAt:0 col:0].bold, "replaced cell keeps its style");
+    CHECK([[b displayAt:1 col:2 colour:NULL] isEqual:@"2026-03-01"] && [b typeAt:1 col:2] == XLNumber, "a date typed into a date cell is a date");
+    CHECK([[b editTextAt:5 col:1] isEqual:@"=SUM(B2:B3)"] && [[b editTextAt:4 col:0] isEqual:@"'007"] && [b typeAt:4 col:0] == XLString, "formula and literal text");
+    CHECK([[b displayAt:3 col:3 colour:NULL] isEqual:@"new"] && [[b displayAt:7 col:0 colour:NULL] isEqual:@"between"] && [b typeAt:3 col:1] == XLEmpty,
+          "new cell inside a row, a new row, a cleared cell");
+    CHECK([[back.sheets[1] displayAt:2 col:1 colour:NULL] isEqual:@"into the prefixed sheet"], "a self-closing <x:sheetData/> gains its first row");
+    CHECK([[b editTextAt:2 col:3] isEqual:@"=B3*2"] && [[b displayAt:1 col:0 colour:NULL] isEqual:@"Bold part"], "untouched cells read back the same");
+    ZipArchive *z0 = [[ZipArchive alloc] initWithData:src error:NULL], *z1 = [[ZipArchive alloc] initWithData:out error:NULL];
+    NSMutableArray *changed = [NSMutableArray array];
+    for (NSString *n in z0.entryNames) if (![[z0 dataForEntry:n] isEqual:[z1 dataForEntry:n]]) [changed addObject:n];
+    NSArray *want = @[@"[Content_Types].xml", @"xl/_rels/workbook.xml.rels", @"xl/workbook.xml", @"xl/worksheets/sheet1.xml", @"xl/worksheets/sheet2.xml", @"xl/calcChain.xml"];
+    CHECK([[NSSet setWithArray:changed] isEqualToSet:[NSSet setWithArray:want]], "only the edited sheets, the workbook and the calc chain parts change: %s",
+          [changed componentsJoinedByString:@", "].UTF8String);
+    CHECK(![z1 hasEntry:@"xl/calcChain.xml"] && ![[[NSString alloc] initWithData:[z1 dataForEntry:@"[Content_Types].xml"] encoding:NSUTF8StringEncoding] containsString:@"calcChain"] &&
+          [[[NSString alloc] initWithData:[z1 dataForEntry:@"xl/workbook.xml"] encoding:NSUTF8StringEncoding] containsString:@"<calcPr fullCalcOnLoad=\"1\"/></workbook>"],
+          "the calc chain is removed and the workbook asks to be recalculated");
+    NSString *s1 = [[NSString alloc] initWithData:[z1 dataForEntry:@"xl/worksheets/sheet1.xml"] encoding:NSUTF8StringEncoding];
+    CHECK([s1 containsString:@"<dimension ref=\"A1:D8\"/>"] && [s1 rangeOfString:@"r=\"D4\""].location > [s1 rangeOfString:@"r=\"C4\""].location &&
+          [s1 rangeOfString:@"<row r=\"8\">"].location > [s1 rangeOfString:@"<row r=\"6\""].location, "dimension grows; new cells and rows go in order");
+    CHECK([[[NSString alloc] initWithData:[z1 dataForEntry:@"xl/worksheets/sheet2.xml"] encoding:NSUTF8StringEncoding] containsString:@"<x:sheetData><x:row r=\"3\"><x:c r=\"B3\" t=\"inlineStr\">"],
+          "new elements use the sheet's namespace prefix");
+    CHECK([[[NSString alloc] initWithData:[z1 dataForEntry:@"docProps/untouched.bin"] encoding:NSUTF8StringEncoding] isEqual:@"keep these bytes exactly"], "other parts are kept");
+
+    for (NSData *junk in @[[NSData data], [@"PK not a zip" dataUsingEncoding:NSUTF8StringEncoding], [src subdataWithRange:NSMakeRange(0, src.length / 2)]])
+        CHECK(![[XLWorkbook alloc] initWithData:junk error:&err] && err.length, "a damaged file is refused, not a crash");
+}
+
 static void hiddenLists(void) {
     NSString *root = [[NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString] stringByResolvingSymlinksInPath];
     for (NSString *rel in @[@".git/config", @".env", @"a/.DS_Store", @"a/x.pyc", @"a/x.py", @"node_modules/m/i.js", @"vendor/v.js"]) {
@@ -518,6 +607,8 @@ int main(void) {
         csvTables();
         jsonTrees();
         notebooks();
+        numberFormats();
+        workbooks();
         hiddenLists();
         searchSafety(NO);
         if ([WorkspaceSearch ripgrepPath]) searchOptions(YES);

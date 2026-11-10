@@ -12,6 +12,7 @@
 #import "BinaryPreviews.h"
 #import "JSONTree.h"
 #import "DataPreviews.h"
+#import "OfficeViews.h"
 #include <sys/stat.h>
 
 static const CGFloat kStatusH = 22, kFindH = 32, kTabH = 30;
@@ -24,6 +25,7 @@ static const NSUInteger kAutoSaveMaxBytes = 32u << 20;     // bigger files only 
 @property (nonatomic, strong) NSView *viewer;       // nil until first activation
 @property (nonatomic, strong) TextEditorView *editor;   // text docs: kept while the tab is open
 @property (nonatomic, strong) MarkupContainer *markup;  // .md / .html: editor + preview
+@property (nonatomic, strong) NSView<FTSavable> *savable;  // a spreadsheet: its own edits, saved with ⌘S
 @property (nonatomic) BOOL viewerIsQL, hasLayout;
 @property (nonatomic) MarkupLayout layout;          // remembered across viewer reloads
 @property (nonatomic, copy) NSString *status, *saveError;
@@ -245,7 +247,7 @@ static NSString *sizeString(off_t n) {
 - (NSString *)statusText { return _status.stringValue; }
 - (void)stateChanged { if (self.onStateChange) self.onStateChange(); }
 
-static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor.isDirty; }
+static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savable ? d.savable.isDirty : d.editor.isDirty; }
 
 #pragma mark Markup layout
 
@@ -349,6 +351,8 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
         case ViewerTree:      [self loadPlistTree:d]; break;
         case ViewerSQLite:    [self loadSQLite:d]; break;
         case ViewerArchive:   [self loadArchive:d]; break;
+        case ViewerSpreadsheet: [self loadSpreadsheet:d]; break;
+        case ViewerDocument:  [self loadDocument:d]; break;
         case ViewerImage:     [self loadImage:d]; break;
         case ViewerQuickLook: [self loadQuickLook:d]; break;
         case ViewerPDF:       [self loadPDF:d]; break;
@@ -524,6 +528,50 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     d.status = v.status;
 }
 
+- (void)loadSpreadsheet:(Doc *)d {
+    NSString *err = nil;
+    SpreadsheetPreview *v = [[SpreadsheetPreview alloc] initWithFrame:NSZeroRect path:d.path error:&err];
+    if (!v) { [self loadQuickLook:d]; if (err) d.status = [NSString stringWithFormat:@"%@   ⚠️ %@", d.status, err]; return; }
+    __weak ContentController *weakSelf = self;
+    __weak Doc *weakDoc = d;
+    v.onMessage = ^(NSString *m) { [weakSelf flashStatus:m]; };
+    v.onChange = ^{ [weakSelf savableChanged:weakDoc]; };
+    d.viewer = v;
+    d.savable = v;
+    d.status = v.status;
+}
+
+- (void)loadDocument:(Doc *)d {
+    DocumentPreview *v = [[DocumentPreview alloc] initWithFrame:NSZeroRect path:d.path];
+    __weak ContentController *weakSelf = self;
+    __weak Doc *weakDoc = d;
+    __weak DocumentPreview *weakV = v;
+    v.onChange = ^{
+        ContentController *me = weakSelf; Doc *doc = weakDoc;
+        if (!me || !doc) return;
+        doc.status = [NSString stringWithFormat:@"%@   %@", weakV.status, sizeString(doc.size)];
+        if (doc == me->_active) me->_status.stringValue = doc.status;
+    };
+    d.viewer = v;
+    d.status = [NSString stringWithFormat:@"%@   %@", v.status, sizeString(d.size)];
+}
+
+- (void)savableChanged:(Doc *)d {
+    if (!d) return;
+    BOOL dirty = d.savable.isDirty;
+    NSString *warn = d.saveError ? [@"   ⚠️ " stringByAppendingString:d.saveError] : d.changedOnDisk ? FTL(@"   ⚠️ Changed on disk") : @"";
+    d.status = [NSString stringWithFormat:@"%@   %@%@", d.savable.status, sizeString(d.size), warn];
+    if (d == _active) _status.stringValue = d.status;
+    if (dirty != d.wasDirty) {
+        d.wasDirty = dirty;
+        if (dirty) d.preview = NO;
+        [self reloadTabs];
+        [self stateChanged];
+    }
+}
+
+- (BOOL)activeIsDirty { return _active && docDirty(_active); }
+
 - (void)loadQuickLook:(Doc *)d {
     NSView *ql = FKCreateQuickLookView(NSZeroRect, d.path);
     if (!ql) { [self loadText:d]; return; }
@@ -541,6 +589,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     d.viewer = nil;
     d.editor = nil;
     d.markup = nil;
+    d.savable = nil;
     d.viewerIsQL = NO;
 }
 
@@ -568,7 +617,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     [d.markup ensurePreview];
     _status.stringValue = d.status ?: @"";
     _statusBar.tools = [v conformsToProtocol:@protocol(FTZoomable)] ? [(id<FTZoomable>)v toolsView] : nil;
-    _findBar.findOnly = self.activePDF != nil;
+    _findBar.findOnly = !d.editor;                         // PDF, workbook, document: find without replace
     TextEditorView *ed = self.editor;
     if (ed && d.restoreLine) { [ed gotoLine:d.restoreLine]; d.restoreLine = 0; [d.markup editorScrolled]; }
     NSView *fv = d.markup ? d.markup.focusView : [v conformsToProtocol:@protocol(FTZoomable)] ? [(id<FTZoomable>)v focusView] : v;
@@ -681,7 +730,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     if (prev != d && prev && [_docs containsObject:prev]) {
         if (_autoSaveMode != AutoSaveOff || prev.untitled) [self autoSave:prev];   // leaving a file saves it
         if (prev.markup) [prev.markup releasePreview];                 // keep the editor, drop the preview
-        else if (!prev.editor) [self releaseViewer:prev];
+        else if (!prev.editor && !(prev.savable && prev.savable.isDirty)) [self releaseViewer:prev];   // keep unsaved cells
     }
     _active = d;
     [self installActive:focus];
@@ -952,7 +1001,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
         if (d.missing) { d.missing = NO; changed = YES; }
         if (mt.tv_sec == d.mtime.tv_sec && mt.tv_nsec == d.mtime.tv_nsec && sz == d.size) continue;
         if (docDirty(d)) {
-            if (!d.changedOnDisk) { d.changedOnDisk = YES; d.editor.onChange(); }
+            if (!d.changedOnDisk) { d.changedOnDisk = YES; if (d.editor) d.editor.onChange(); else [self savableChanged:d]; }
             continue;
         }
         [self reloadViewerOf:d];
@@ -972,7 +1021,8 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
     d.missing = NO; d.changedOnDisk = NO; d.saveError = nil;
     [d.saveTimer invalidate];
     d.saveTimer = nil;
-    d.editor.onChange();
+    if (d.editor) d.editor.onChange();
+    if (d.savable) [self savableChanged:d];
     [d.markup didSave];
     [self reloadTabs];
     [self stateChanged];
@@ -998,6 +1048,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 - (BOOL)autoSave:(Doc *)d {
     [d.saveTimer invalidate];
     d.saveTimer = nil;
+    if (d.savable) return !d.savable.isDirty;                              // a workbook is only written by ⌘S
     TextEditorView *ed = d.editor;
     if (!ed.isDirty) return YES;
     if (ed.isComposing) { [self scheduleAutoSave:d]; return NO; }          // wait for the IME
@@ -1037,6 +1088,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
 
 - (BOOL)saveDoc:(Doc *)d {
     if (d.untitled) return [self saveUntitled:d];
+    if (d.savable) return [self saveSavable:d];
     TextEditorView *ed = d.editor;
     if (!ed) return YES;
     if ([self diskChanged:d]) {
@@ -1053,6 +1105,30 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.editor
         a.messageText = FTL(@"Couldn’t Save");
         a.informativeText = err ?: FTL(@"Unknown error");
         [self runAlert:a];
+        return NO;
+    }
+    [self didSave:d];
+    return YES;
+}
+
+- (BOOL)saveSavable:(Doc *)d {
+    if (!d.savable.isDirty) return YES;
+    if ([self diskChanged:d]) {
+        NSAlert *a = [NSAlert new];
+        a.messageText = [NSString stringWithFormat:FTL(@"“%@” has changed on disk"), d.path.lastPathComponent];
+        a.informativeText = FTL(@"Saving will overwrite the newer version on disk.");
+        [a addButtonWithTitle:FTL(@"Overwrite")];
+        [a addButtonWithTitle:FTL(@"Cancel")];
+        if ([self runAlert:a] != NSAlertFirstButtonReturn) return NO;
+    }
+    NSString *err = nil;
+    if (![d.savable saveReturningError:&err]) {
+        NSAlert *a = [NSAlert new];
+        a.messageText = FTL(@"Couldn’t Save");
+        a.informativeText = err ?: FTL(@"Unknown error");
+        [self runAlert:a];
+        d.saveError = err;
+        [self savableChanged:d];
         return NO;
     }
     [self didSave:d];
@@ -1224,6 +1300,8 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
 // Find in whatever is shown: the PDF text, or the editor buffer.
 - (BOOL)findInActive:(NSString *)s backward:(BOOL)back {
     if (self.activePDF) return [self.activePDF find:s backward:back];
+    if (_active.savable) return [_active.savable find:s backward:back];
+    if ([_active.viewer isKindOfClass:DocumentPreview.class]) return [(DocumentPreview *)_active.viewer find:s backward:back];
     return [self.editor findString:s backward:back];
 }
 
@@ -1272,6 +1350,7 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
         if (!FOPathIsWithin(d.path, from)) continue;
         d.path = [to stringByAppendingString:[d.path substringFromIndex:from.length]];
         if (d.editor) { [d.editor setDocumentPath:d.path]; d.markup.path = d.path; }
+        else if ([d.savable isKindOfClass:SpreadsheetPreview.class]) [(SpreadsheetPreview *)d.savable setPath:d.path];   // keeps unsaved cells
         else if (d.viewer) [self reloadViewerOf:d];
         any = YES;
     }

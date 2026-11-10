@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <copyfile.h>
+#include <errno.h>
 
 static NSString *errnoMessage(int e) {
     switch (e) {
@@ -61,4 +63,43 @@ BOOL FOPathIsWithin(NSString *path, NSString *base) {
     if ([path isEqualToString:base]) return YES;
     NSString *b = [base hasSuffix:@"/"] ? base : [base stringByAppendingString:@"/"];
     return [path hasPrefix:b];
+}
+
+static BOOL writeAllFD(int fd, const void *p, size_t n) {
+    const uint8_t *b = p;
+    while (n) {
+        ssize_t w = write(fd, b, n);
+        if (w < 0) { if (errno == EINTR) continue; return NO; }
+        b += w; n -= (size_t)w;
+    }
+    return YES;
+}
+
+NSString *FOWriteFile(NSString *path, NSData *data) {
+    NSString *real = path.stringByResolvingSymlinksInPath;
+    const char *rp = real.fileSystemRepresentation;
+    if (access(rp, W_OK) != 0 && errno != ENOENT) return errno == EROFS ? FTL(@"The disk is read-only") : FTL(@"The file is read-only");
+    struct stat st;
+    BOOL exists = stat(rp, &st) == 0;
+    char tmp[PATH_MAX];
+    strlcpy(tmp, [real.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".feather-XXXXXX"].fileSystemRepresentation, sizeof tmp);
+    int fd = exists && st.st_nlink > 1 ? -1 : mkstemp(tmp);
+    if (fd < 0 && (!exists || (st.st_nlink <= 1 && errno != EACCES))) return FTL(@"Couldn’t create a temporary file in this folder");
+    if (fd < 0) {                                                                   // in place
+        int out = open(rp, O_WRONLY | O_TRUNC);
+        if (out < 0) return FTL(@"Write failed");
+        BOOL ok = writeAllFD(out, data.bytes, data.length) && fsync(out) == 0;
+        close(out);
+        return ok ? nil : FTL(@"Write failed");
+    }
+    BOOL ok = writeAllFD(fd, data.bytes, data.length);
+    if (ok && exists) {
+        fchmod(fd, st.st_mode & 07777);
+        int from = open(rp, O_RDONLY);
+        if (from >= 0) { copyfile_state_t cs = copyfile_state_alloc(); fcopyfile(from, fd, cs, COPYFILE_XATTR | COPYFILE_ACL); copyfile_state_free(cs); close(from); }
+    }
+    ok = ok && fsync(fd) == 0;
+    close(fd);
+    if (!ok || rename(tmp, rp) != 0) { unlink(tmp); return FTL(@"Write failed"); }
+    return nil;
 }

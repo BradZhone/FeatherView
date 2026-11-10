@@ -73,6 +73,8 @@ FeatherView 不是 IDE。它有意不提供语言服务器、调试器、Git 集
 | CSV、TSV、JSON Lines | 表格视图：排序、按列筛选、复制为 TSV、跳转到源码；最多 50 万行 |
 | JSON、plist、Notebook | 可折叠的树，保留键的顺序，显示路径与行号；渲染 `.ipynb` 的单元格与输出 |
 | 图片、SVG、PDF | 缩放与旋转；SVG 矢量渲染；PDF 缩略图、双页显示与查找 |
+| Excel | 表格视图，保留格式、样式、合并单元格、冻结窗格和工作表标签；可编辑，只写回改动的单元格 |
+| Word | 由系统 Office 渲染器按页面显示，支持缩放和查找；只读，可“在 Pages / Word 中打开” |
 | SQLite | 只读浏览表与视图，查看结构，执行 SQL 查询 |
 | 压缩包 | 列出 zip、tar.gz、7z、rar、jar、apk、whl、deb、iso 等格式的内容；双击解压并打开单个文件 |
 | 工作区 | 文件树随外部修改自动更新、多选与批量操作、拖放打开、未命名草稿、会话恢复、浅色 / 深色 / 跟随系统外观、自动保存 |
@@ -142,8 +144,8 @@ src/App       应用入口、窗口、菜单、标签页与文档管理、设置
 src/Editor    文本缓冲区（piece table）、编辑器视图、语法高亮
 src/Files     文件树、文件夹监视、遍历与过滤、文件操作、类型识别
 src/Search    工作区搜索、快速打开
-src/Preview   Markdown、HTML、表格、树形与 Notebook 视图
-src/Viewers   图片、SVG、PDF、十六进制、SQLite、压缩包查看器
+src/Preview   Markdown、HTML、表格、树形与 Notebook 视图；Excel 工作簿模型
+src/Viewers   图片、SVG、PDF、十六进制、SQLite、压缩包、电子表格与 Word 查看器
 Resources     界面文字的翻译（en、zh-Hans）
 tests         逻辑、Markdown 与真实视图三组测试
 scripts       安装、发布打包、资源占用对比、本地化检查

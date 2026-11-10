@@ -19,6 +19,10 @@
 #import "Settings.h"
 #import "SettingsWindow.h"
 #import "Localization.h"
+#import "OfficeViews.h"
+#import "SheetGrid.h"
+#import "XLWorkbook.h"
+#include "xlsx_fixture.h"
 #include <sqlite3.h>
 #import <PDFKit/PDFKit.h>
 #include <sys/stat.h>
@@ -1669,6 +1673,80 @@ static void recentAndAppearance(NSString *dir) {
     for (NSString *k in @[@"lastRoot", @"recentRoots", @"sessions", @"appearance", @"NSWindow Frame FeatherMain"]) [ud removeObjectForKey:k];
 }
 
+
+#pragma mark Office files
+
+static void officeFiles(NSString *dir) {
+    NSWindow *w; ContentController *t = offscreenController(&w);
+    __block NSUInteger asked = 0;
+    __block NSModalResponse answer = NSAlertSecondButtonReturn;
+    t.alertHandler = ^NSModalResponse(NSAlert *a) { asked++; return answer; };
+    t.autoSaveMode = AutoSaveAfterDelay;
+    t.autoSaveDelay = 0.05;
+    NSString *xp = [dir stringByAppendingPathComponent:@"book.xlsx"];
+    [XLFixture() writeToFile:xp atomically:YES];
+    setxattr(xp.fileSystemRepresentation, "com.example.feather-test", "tag", 3, 0, 0);
+    [t openPath:xp preview:NO focus:NO];
+    SpreadsheetPreview *sp = findView(t.view, SpreadsheetPreview.class);
+    CHECK(sp && !t.editor && sp.workbook.sheets.count == 2, "an .xlsx opens in the spreadsheet view");
+    CHECK([t.statusText containsString:@"Excel workbook"], "status: %s", t.statusText.UTF8String);
+    SheetGrid *g = sp.grid;
+    g.frame = NSMakeRect(0, 0, 900, 500);
+    NSBitmapImageRep *rep = [g bitmapImageRepForCachingDisplayInRect:g.bounds];
+    [g cacheDisplayInRect:g.bounds toBitmapImageRep:rep];
+    NSRect a1 = [g rectForRow:0 col:0];
+    CGFloat px = rep.pixelsWide / g.bounds.size.width;                              // Retina: 2 pixels per point
+    NSColor *fill = [[rep colorAtX:(NSInteger)((NSMinX(a1) + 4) * px) y:(NSInteger)((NSMinY(a1) + 3) * px)] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    CGFloat digit = [@"0" sizeWithAttributes:@{NSFontAttributeName: [g fontFor:[sp.workbook.sheets[0] styleAt:1 col:1]]}].width;
+    CHECK(digit <= 7.2 * g.zoom && digit > 6 * g.zoom, "the stand-in for Calibri has Excel's 7 px digit, so column widths hold the same text (%.2f)", digit);
+    CHECK(fill.blueComponent > 0.6 && fill.redComponent < 0.4, "the header cell is drawn with its fill (%.2f %.2f %.2f)", fill.redComponent, fill.greenComponent, fill.blueComponent);
+    if (getenv("FV_SHOT")) [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:@(getenv("FV_SHOT")) atomically:YES];
+
+    [g selectRow:1 col:1 extend:NO];
+    CHECK([sp setText:@"99" row:1 col:1] && t.dirtyCount == 1, "an edit marks the tab unsaved");
+    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.3]];
+    XLWorkbook *onDisk = [[XLWorkbook alloc] initWithData:[NSData dataWithContentsOfFile:xp] error:NULL];
+    CHECK([[onDisk.sheets[0] displayAt:1 col:1 colour:NULL] isEqual:@"1,234.50"], "auto-save never writes a workbook");
+    [sp undo:nil];
+    CHECK(t.dirtyCount == 0 && [[sp.workbook.sheets[0] displayAt:1 col:1 colour:NULL] isEqual:@"1,234.50"], "undo restores the cell and the clean state");
+    [sp redo:nil];
+    CHECK(![sp setText:@"x" row:1 col:3] && t.dirtyCount == 1, "a read-only cell refuses the edit");
+    asked = 0; answer = NSAlertSecondButtonReturn;
+    CHECK(![t closeActive] && asked == 1, "closing with unsaved cells asks");
+    CHECK([t save] && t.dirtyCount == 0, "⌘S saves the workbook");
+    onDisk = [[XLWorkbook alloc] initWithData:[NSData dataWithContentsOfFile:xp] error:NULL];
+    char xv[8] = {0};
+    CHECK([[onDisk.sheets[0] displayAt:1 col:1 colour:NULL] isEqual:@"99.00"] && getxattr(xp.fileSystemRepresentation, "com.example.feather-test", xv, sizeof xv, 0, 0) == 3,
+          "the saved file has the edit and keeps its extended attributes");
+    [sp setText:@"7" row:2 col:1];                                               // dirty again, then into the background
+    [t openPath:mkfile(dir, @"other.txt", @"x\n") preview:NO focus:NO];
+    [t selectTabAtIndex:0];
+    CHECK(findView(t.view, SpreadsheetPreview.class) == sp, "switching tabs keeps an edited workbook's view");
+    sp.grid.pasteboard = [NSPasteboard pasteboardWithUniqueName];
+    [sp.grid selectRow:0 col:0 extend:NO]; [sp.grid selectRow:1 col:1 extend:YES];
+    [sp.grid copy:nil];
+    CHECK([[sp.grid.pasteboard stringForType:NSPasteboardTypeString] isEqualToString:@"Name\tAmount\nBold part\t99.00\n"], "copy gives tab-separated text: %s",
+          [sp.grid.pasteboard stringForType:NSPasteboardTypeString].UTF8String);
+    CHECK([t findInActive:@"between" backward:NO] == NO && [t findInActive:@"part" backward:NO] && sp.grid.row == 1 && sp.grid.col == 0, "find selects the matching cell");
+    answer = NSAlertThirdButtonReturn;
+    [t closeAll];
+
+    // Word: the system's Office renderer, shown read-only.
+    NSString *dp = [dir stringByAppendingPathComponent:@"doc.docx"];
+    NSAttributedString *as = [[NSAttributedString alloc] initWithString:@"Hello from a Word file"];
+    [[as dataFromRange:NSMakeRange(0, as.length) documentAttributes:@{NSDocumentTypeDocumentAttribute: NSOfficeOpenXMLTextDocumentType} error:nil] writeToFile:dp atomically:YES];
+    [t openPath:dp preview:NO focus:NO];
+    DocumentPreview *dv = findView(t.view, DocumentPreview.class);
+    CHECK(dv && !t.editor, "a .docx opens in the document view");
+    spinUntil(^BOOL { return dv.loaded; }, 20);
+    __block id body = nil;
+    [dv evaluate:@"document.body.innerText" done:^(id r) { body = r ?: @""; }];
+    spinUntil(^BOOL { return body != nil; }, 5);
+    CHECK(dv.loaded && [body containsString:@"Hello from a Word file"], "the document is rendered: %s", [body description].UTF8String);
+    CHECK([t.statusText containsString:@"read-only"] && t.dirtyCount == 0, "read-only status: %s", t.statusText.UTF8String);
+    [t closeAll];
+}
+
 #pragma mark Data safety
 
 static void dataSafety(NSString *dir) {
@@ -2437,6 +2515,7 @@ int main(void) {
         binaryViews(dir);
         hiddenFileSettings(dir);
         recentAndAppearance(dir);
+        officeFiles(dir);
         dataSafety(dir);
         appLifecycle(dir);
         localization(dir);

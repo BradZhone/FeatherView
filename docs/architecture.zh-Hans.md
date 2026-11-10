@@ -41,6 +41,8 @@ docs/        本文档与资源占用对比
 
 **用 FSEvents 监视工作区。** `FileWatcher` 报告工作区文件夹下的变化，以半秒为单位合并，并忽略 `.git`、`node_modules` 等跳过的文件夹。文件树随后在后台队列重新读取已展开的文件夹，只有列表变化时才刷新。
 
+**工作簿按字节区间拼接修改，而不是整体重写。** .xlsx 是由 XML 部件组成的 zip 包。`ZipArchive` 对未改动的条目连同压缩数据逐字节复制。`XLWorkbook` 在读取工作表时记录每个单元格元素的字节区间；保存时只替换被修改单元格的区间（或按顺序插入新元素），设置 `fullCalcOnLoad` 让 Excel 和 Numbers 重新计算，并移除可选的计算链。因此图表、数据透视表、宏、批注和条件格式都不会被触及。保存结果会先重新解析一遍，确认无误才替换原文件。Word 文档只做显示：由系统的 Office 转换器（Quick Look 使用的同一个）生成 HTML，在禁用脚本的网页视图中显示，因为 macOS 上没有任何转换器能在不丢失内容的情况下保存 .docx。
+
 **图片按显示尺寸解码。** ImageIO 只解码当前缩放级别所需的像素，放大时重新解码，上限为 2400 万像素。
 
 **不抢占默认打开方式。** `Info.plist` 中所有文档类型均使用 `LSHandlerRank None`。安装后 FeatherView 只会出现在“打开方式”菜单中，不会自行成为任何文件类型的默认应用；只有用户在“默认打开方式”面板中明确勾选时才会更改。`tests/tests.m` 会检查这一点。
@@ -55,7 +57,7 @@ make test
 
 - `scripts/l10n.py`：翻译覆盖率与格式说明符一致性。
 - `build/tests`：PieceTable、目录遍历与过滤、搜索参数，以及 CSV、JSON、Notebook 解析等逻辑测试。
-- `build/markdown_tests`：82 个 Markdown 用例，包括强调与链接的 CommonMark 示例、极端输入的耗时上限和嵌套上限。
+- `build/markdown_tests`：91 个 Markdown 用例，包括元数据、强调与链接的 CommonMark 示例、极端输入的耗时上限和嵌套上限。
 - `build/editor_tests`：在离屏窗口中驱动真实的编辑器、文件树、标签页、预览和各类查看器，检查行为、像素与性能，例如“10 万行文件中小地图每帧耗时低于 16 ms”“每次编辑后，增量维护的换行表与完整重建的结果一致”；并分别以两种语言渲染菜单和状态栏。
 
 `make sanitize` 用 AddressSanitizer 和 UndefinedBehaviorSanitizer 构建并运行三个测试程序；`make analyze` 运行 clang 静态分析器，有任何警告即失败。0.17.0 两项检查均无问题。
