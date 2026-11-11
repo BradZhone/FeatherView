@@ -20,6 +20,15 @@
         [self beginColumnSelectionAt:p];
         return;
     }
+    CGFloat g = self.gutterWidth;
+    if (p.x < g && p.x >= g - 18 && e.clickCount == 1) {                           // the fold control
+        NSUInteger L = [self lineAtPoint:p];
+        if (L != NSNotFound && ([self lineFolded:L] || [self startsRegion:L])) { [self toggleFoldAtLine:L]; return; }
+    }
+    if (_folds.length && p.x >= g) {                                                  // the ⋯ of a folded line
+        NSUInteger L = [self lineAtPoint:p];
+        if (L != NSNotFound && [self lineFolded:L] && NSPointInRect(p, [self foldBoxOfLine:L])) { [self toggleFoldAtLine:L]; return; }
+    }
     NSUInteger off = [self offsetAtPoint:p];
     _desiredX = -1;
     if (opt && e.clickCount == 1) { [self addCursorAt:off]; return; }              // adds (or removes) a cursor
@@ -39,6 +48,25 @@
         [self moveCaretTo:off extend:shift];
     }
 }
+
+- (NSUInteger)lineAtPoint:(NSPoint)p {
+    CGFloat y = p.y + self.scrollY - 4;
+    if (y < 0) return NSNotFound;
+    NSUInteger row = (NSUInteger)(y / _lineHeight);
+    return row < self.rowCount ? [self lineOfRow:row] : NSNotFound;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_tracking) [self removeTrackingArea:_tracking];
+    _tracking = [[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                 NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect owner:self userInfo:nil];
+    [self addTrackingArea:_tracking];
+}
+
+- (void)setGutterHover:(BOOL)h { if (h != _gutterHover) { _gutterHover = h; self.needsDisplay = YES; } }
+- (void)mouseMoved:(NSEvent *)e { [self setGutterHover:[self convertPoint:e.locationInWindow fromView:nil].x < self.gutterWidth]; }
+- (void)mouseExited:(NSEvent *)e { [self setGutterHover:NO]; }
 
 - (void)mouseUp:(NSEvent *)e {
     [_dragScroll invalidate]; _dragScroll = nil;
@@ -196,9 +224,9 @@ static BOOL anySelection(TextEditorView *v) {
 // Backspace in the indentation removes spaces back to the previous tab stop.
 - (NSUInteger)backspaceStart:(NSUInteger)caret {
     NSUInteger L = [_buf lineForOffset:caret], ls = [_buf lineStart:L];
-    if (caret == ls || ![_indentUnit isEqualToString:@"    "]) return [self prevCharOffset:caret];
+    if (caret == ls || [_indentUnit isEqualToString:@"\t"]) return [self prevCharOffset:caret];
     for (NSUInteger i = ls; i < caret; i++) if ([_buf byteAt:i] != ' ') return [self prevCharOffset:caret];
-    NSUInteger col = caret - ls, to = (col - 1) / 4 * 4;
+    NSUInteger w = MAX(_indentWidth, (NSUInteger)1), col = caret - ls, to = (col - 1) / w * w;
     return ls + to;
 }
 
@@ -329,9 +357,10 @@ static BOOL anySelection(TextEditorView *v) {
 - (void)insertTab:(id)s {
     if (self.anySelectionSpansLines) { [self indentLines:s]; return; }
     BOOL spaces = ![_indentUnit isEqualToString:@"\t"];
+    NSUInteger w = MAX(_indentWidth, (NSUInteger)1);
     [self editCursors:^NSRange(Sel sel, NSString **t, NSInteger *a, NSInteger *c) {
         NSUInteger col = [self columnOf:SelStart(sel)];
-        *t = spaces ? [@"    " substringToIndex:4 - col % 4] : @"\t";
+        *t = spaces ? [@"        " substringToIndex:w - col % w] : @"\t";
         return SelRange(sel);
     } kind:GroupTyping];
 }

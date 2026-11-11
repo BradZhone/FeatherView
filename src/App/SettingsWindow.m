@@ -3,7 +3,7 @@
 #import "Settings.h"
 
 @implementation SettingsWindow {
-    NSButton *_showHiddenBox, *_gitignoreBox, *_minimapBox, *_wrapBox, *_remoteBox, *_closeBox;
+    NSButton *_showHiddenBox, *_gitignoreBox, *_minimapBox, *_wrapBox, *_remoteBox, *_closeBox, *_guidesBox, *_spaceBox;
     NSTextField *_alwaysHiddenField, *_searchSkippedField;
     NSPopUpButton *_appearancePopup, *_autoSavePopup;
 }
@@ -73,6 +73,8 @@ static NSStackView *column(NSArray<NSView *> *views) {
     _wrapBox = [NSButton checkboxWithTitle:FTL(@"Wrap lines to the window width") target:self action:@selector(boxChanged:)];
     _remoteBox = [NSButton checkboxWithTitle:FTL(@"Load images from the web in Markdown previews") target:self action:@selector(boxChanged:)];
     _closeBox = [NSButton checkboxWithTitle:FTL(@"Auto-close brackets and quotes") target:self action:@selector(boxChanged:)];
+    _guidesBox = [NSButton checkboxWithTitle:FTL(@"Show indent guides") target:self action:@selector(boxChanged:)];
+    _spaceBox = [NSButton checkboxWithTitle:FTL(@"Show whitespace") target:self action:@selector(boxChanged:)];
 
     NSGridView *grid = [NSGridView gridViewWithViews:@[
         @[heading(FTL(@"Appearance")), NSGridCell.emptyContentView],
@@ -85,7 +87,7 @@ static NSStackView *column(NSArray<NSView *> *views) {
         @[heading(FTL(@"Editor")), NSGridCell.emptyContentView],
         @[rowLabel(FTL(@"Auto save:")), _autoSavePopup],
         @[NSGridCell.emptyContentView, column(@[_wrapBox, note(FTL(@"Toggle with ⌥⌘Z. Files over 1 million lines or 32 MB are not wrapped."))])],
-        @[NSGridCell.emptyContentView, _minimapBox],
+        @[NSGridCell.emptyContentView, column(@[_minimapBox, _guidesBox, _spaceBox])],
         @[NSGridCell.emptyContentView, column(@[_closeBox, note(FTL(@"Quotes are not closed in plain text and Markdown."))])],
         @[heading(FTL(@"Previews")), NSGridCell.emptyContentView],
         @[NSGridCell.emptyContentView, column(@[_remoteBox, note(FTL(@"Off: images such as README badges show their description instead, and nothing is downloaded."))])]]];
@@ -146,6 +148,8 @@ static NSStackView *column(NSArray<NSView *> *views) {
     _wrapBox.state = s.wordWrap;
     _remoteBox.state = s.remoteImages;
     _closeBox.state = s.autoCloseBrackets;
+    _guidesBox.state = s.showIndentGuides;
+    _spaceBox.state = s.showWhitespace;
     [_autoSavePopup selectItemAtIndex:MIN(2, MAX(0, s.autoSaveMode))];
     if (self.window.firstResponder != _alwaysHiddenField.currentEditor) _alwaysHiddenField.stringValue = [s.alwaysHidden componentsJoinedByString:@", "];
     if (self.window.firstResponder != _searchSkippedField.currentEditor) _searchSkippedField.stringValue = [s.searchSkipped componentsJoinedByString:@", "];
@@ -161,6 +165,8 @@ static NSStackView *column(NSArray<NSView *> *views) {
     else if (b == _wrapBox) s.wordWrap = b.state == NSControlStateValueOn;
     else if (b == _remoteBox) s.remoteImages = b.state == NSControlStateValueOn;
     else if (b == _closeBox) s.autoCloseBrackets = b.state == NSControlStateValueOn;
+    else if (b == _guidesBox) s.showIndentGuides = b.state == NSControlStateValueOn;
+    else if (b == _spaceBox) s.showWhitespace = b.state == NSControlStateValueOn;
 }
 
 - (void)commitFields {

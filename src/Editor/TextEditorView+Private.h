@@ -92,14 +92,43 @@ typedef struct { NSUInteger location, removed, inserted; } BatchEdit;
     BOOL _bracketValid;
     NSData *_occurrenceSels;                           // cursors right after the last ⌘D
     BOOL _occurrenceWhole;                             // that ⌘D series started from a caret: whole words
+    // Folding: folded regions (Fold[], sorted by header, may nest) and the lines they hide (NSRange[], merged).
+    // Hidden lines have no rows, so the row table is in use whenever something is folded.
+    BOOL _wrapText;                                    // rows come from wrapping (else one per visible line)
+    NSMutableData *_folds, *_hidden;
+    NSMutableData *_pendingFolds;                      // folds as offsets across an edit (see prepareFoldsForEdits:)
+    BOOL _foldsDropped;
+    NSUInteger _indentWidth;                           // columns per indentation level (2, 4 or 8)
+    NSMutableArray<NSData *> *_expandStack;            // cursors before each ⌃⇧⌘→, for ⌃⇧⌘←
+    NSData *_expandLast;
+    BOOL _gutterHover;                                 // fold controls show while the mouse is over the gutter
+    NSTrackingArea *_tracking;
 }
 @end
 
 // Rows of one logical line: UTF-16 start index of each row, plus the indent of continuation rows.
 typedef struct { NSUInteger count; uint32_t *starts; CGFloat indent; } WrapRows;
 
+typedef struct { NSUInteger header, last; } Fold;   // lines header+1 … last are hidden
+
+@interface TextEditorView (Fold)
+- (BOOL)lineHidden:(NSUInteger)L;
+- (BOOL)lineFolded:(NSUInteger)L;              // a folded region starts here
+- (NSUInteger)foldEndOf:(NSUInteger)L;         // last line of the region starting at L; NSNotFound if none
+- (BOOL)startsRegion:(NSUInteger)L;            // cheap check for the gutter
+- (NSUInteger)indentColumns:(NSUInteger)L blank:(BOOL *)blank;
+- (void)toggleFoldAtLine:(NSUInteger)L;
+- (void)revealCursors;                         // unfolds what hides a caret
+- (void)prepareFoldsForEdits:(const PTEdit *)e count:(NSUInteger)n;   // before the buffer changes
+- (void)applyPendingFolds;                     // right after it changed
+- (void)clearFolds;
+- (NSRect)foldBoxOfLine:(NSUInteger)L;         // the ⋯ after a folded line, view coordinates
+- (NSRange)hiddenRangeAt:(NSUInteger)L;        // the hidden lines around L, location NSNotFound if visible
+@end
+
 @interface TextEditorView (Wrap)
-- (BOOL)wrapOn;                                 // rebuilds the row table if needed
+- (BOOL)wrapOn;                                 // rebuilds the row table if needed (wrapping or folds)
+- (BOOL)wrapsText;                              // lines are actually wrapped
 - (NSUInteger)rowCount;
 - (NSUInteger)firstRowOfLine:(NSUInteger)L;
 - (NSUInteger)lineOfRow:(NSUInteger)row;
@@ -180,6 +209,8 @@ typedef NSRange (^CursorEdit)(Sel s, NSString **text, NSInteger *anchor, NSInteg
 typedef NSUInteger (^CaretMove)(Sel *s);                   // new caret of one cursor; may set s->x
 - (void)moveCursors:(CaretMove)f extend:(BOOL)extend keepColumn:(BOOL)keepColumn;
 - (void)rememberCursors;                                   // for ⌘U
+- (NSData *)cursorSnapshot;                                // primary index + Sel[]
+- (void)restoreCursorSnapshot:(NSData *)d;
 - (void)addCursorAt:(NSUInteger)off;                       // ⌥ click: adds, or removes the one there
 - (NSRange)wordAroundCaret:(NSUInteger)off;                // the word the caret is in or right after; empty if none
 - (void)copy:(id)sender;                                   // the selections, or the cursors' lines
@@ -201,6 +232,7 @@ typedef NSUInteger (^CaretMove)(Sel *s);                   // new caret of one c
 - (void)shiftAutoClosed:(EditList *)edits;
 - (void)updateBracketPair;
 - (NSString *)highlightedWord:(BOOL *)wholeWord;          // what other occurrences are marked for
+- (NSRange)expandedRangeOf:(NSRange)r;                    // the next larger syntactic range (⌃⇧⌘→)
 @end
 
 @interface TextEditorView (Input) <NSTextInputClient>

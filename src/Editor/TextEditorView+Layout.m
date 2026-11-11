@@ -7,7 +7,7 @@ static const NSUInteger kMaxLineBytes = 32 * 1024;   // pathological minified li
 - (CGFloat)gutterWidth {
     NSUInteger digits = 1;
     for (NSUInteger n = _buf.lineCount; n >= 10; n /= 10) digits++;
-    return ceil(MAX(3, digits) * _charWidth + 20);
+    return ceil(MAX(3, digits) * _charWidth + 30);                // numbers, then the fold control
 }
 
 - (CGFloat)textOriginX { return self.gutterWidth + 8 - self.scrollX; }
@@ -87,6 +87,7 @@ static const NSUInteger kMaxLineBytes = 32 * 1024;   // pathological minified li
 }
 
 - (void)scrollCaretVisible {
+    [self revealCursors];
     CGFloat x = 0;
     NSUInteger row = [self rowOfOffset:_caret x:&x];
     CGFloat top = 4 + row * _lineHeight, h = self.bounds.size.height;

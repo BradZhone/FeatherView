@@ -241,6 +241,73 @@ static BOOL opens(uint8_t c) { return c == '(' || c == '[' || c == '{'; }
     [self moveCaretTo:m extend:NO];
 }
 
+#pragma mark Expanding the selection
+
+// The opening bracket of the innermost pair that contains [a, b), and its match; NO if none.
+- (BOOL)bracketsAround:(NSRange)r open:(NSUInteger *)o close:(NSUInteger *)c {
+    NSInteger depth[3] = {0, 0, 0};
+    NSUInteger L = [_buf lineForOffset:r.location];
+    for (NSUInteger step = 0; step < kBracketScanLines; step++) {
+        NSData *bytes = nil;
+        NSData *mask = [self codeMaskOf:L bytes:&bytes];
+        const uint8_t *b = bytes.bytes, *mk = mask.bytes;
+        NSUInteger base = [_buf lineStart:L], from = step ? bytes.length : MIN(r.location - base, bytes.length);
+        for (NSUInteger i = from; i-- > 0;) {
+            if (!mk[i]) continue;
+            int k = b[i] == '(' || b[i] == ')' ? 0 : b[i] == '[' || b[i] == ']' ? 1 : b[i] == '{' || b[i] == '}' ? 2 : -1;
+            if (k < 0) continue;
+            if (!opens(b[i])) { depth[k]++; continue; }
+            if (depth[k]) { depth[k]--; continue; }
+            NSUInteger m = [self matchOfBracketAt:base + i];
+            if (m != NSNotFound && m >= NSMaxRange(r)) { *o = base + i; *c = m; return YES; }
+        }
+        if (L == 0) break;
+        L--;
+    }
+    return NO;
+}
+
+- (NSRange)expandedRangeOf:(NSRange)r {
+    NSMutableArray<NSValue *> *cand = [NSMutableArray array];
+    void (^add)(NSUInteger, NSUInteger) = ^(NSUInteger a, NSUInteger b) { if (b >= a) [cand addObject:[NSValue valueWithRange:NSMakeRange(a, b - a)]]; };
+    NSRange w = [self wordAroundCaret:r.location];
+    if (w.length) add(w.location, NSMaxRange(w));
+    // a string token on the line: its text, then with the quotes
+    NSUInteger L = [_buf lineForOffset:r.location], ls = [_buf lineStart:L];
+    if (_hl && NSMaxRange(r) <= [_buf lineEnd:L]) {
+        NSString *s = [self lineString:L];
+        __block NSRange str = NSMakeRange(NSNotFound, 0);
+        NSUInteger ua = [self utf16Index:r.location inLine:L], ub = [self utf16Index:NSMaxRange(r) inLine:L];
+        [_hl tokenize:s emit:^(NSRange t, TokenKind k) { if (k == TokString && t.location <= ua && NSMaxRange(t) >= ub && t.length >= 2) str = t; }];
+        if (str.location != NSNotFound) {
+            NSUInteger a = [self byteOffsetForUTF16:str.location inLine:L], b = [self byteOffsetForUTF16:NSMaxRange(str) inLine:L];
+            add(a + 1, b - 1);
+            add(a, b);
+        }
+    }
+    // brackets, inner then outer, outwards
+    NSRange at = r;
+    for (int depth = 0; depth < 64; depth++) {
+        NSUInteger o, c;
+        if (![self bracketsAround:at open:&o close:&c]) break;
+        add(o + 1, c);
+        add(o, c + 1);
+        at = NSMakeRange(o, c + 1 - o);
+    }
+    NSUInteger L1 = [_buf lineForOffset:NSMaxRange(r)];
+    add([self firstNonBlankOf:L], [_buf lineEnd:L1]);
+    add(ls, [_buf lineEnd:L1]);
+    add(ls, L1 + 1 < _buf.lineCount ? [_buf lineStart:L1 + 1] : _buf.length);
+    add(0, _buf.length);
+    NSRange best = NSMakeRange(0, _buf.length);
+    for (NSValue *v in cand) {
+        NSRange x = v.rangeValue;
+        BOOL contains = x.location <= r.location && NSMaxRange(x) >= NSMaxRange(r) && x.length > r.length;
+        if (contains && x.length < best.length) best = x;
+    }
+    return best;
+}
+
 #pragma mark Other occurrences
 
 // The selected text (one line, not too long), or the word at the caret; nil when nothing qualifies.

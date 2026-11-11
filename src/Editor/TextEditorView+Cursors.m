@@ -118,14 +118,26 @@ static int byStart(const void *x, const void *y) {
 
 #pragma mark Cursor history (⌘U)
 
+- (NSData *)cursorSnapshot {
+    NSUInteger p = 0;
+    NSData *c = [self cursors:&p];
+    NSMutableData *d = [NSMutableData dataWithBytes:&p length:sizeof p];
+    [d appendData:c];
+    return d;
+}
+
+- (void)restoreCursorSnapshot:(NSData *)d {
+    NSUInteger p;
+    memcpy(&p, d.bytes, sizeof p);
+    [self setCursors:(const Sel *)((const uint8_t *)d.bytes + sizeof p) count:(d.length - sizeof p) / sizeof(Sel) primary:p];
+    _coalesceBroken = YES;
+    [_autoClosed removeAllIndexes];
+    [self cursorsChanged];
+}
+
 - (void)rememberCursors {
     if (!_cursorHistory) _cursorHistory = [NSMutableArray array];
-    NSUInteger p = 0;
-    NSMutableData *d = [NSMutableData dataWithBytes:&p length:sizeof p];
-    NSData *c = [self cursors:&p];
-    memcpy(d.mutableBytes, &p, sizeof p);
-    [d appendData:c];
-    [_cursorHistory addObject:d];
+    [_cursorHistory addObject:self.cursorSnapshot];
     if (_cursorHistory.count > 50) [_cursorHistory removeObjectAtIndex:0];
 }
 
@@ -133,11 +145,7 @@ static int byStart(const void *x, const void *y) {
     NSData *d = _cursorHistory.lastObject;
     if (!d) { NSBeep(); return; }
     [_cursorHistory removeLastObject];
-    NSUInteger p;
-    memcpy(&p, d.bytes, sizeof p);
-    [self setCursors:(const Sel *)((const uint8_t *)d.bytes + sizeof p) count:(d.length - sizeof p) / sizeof(Sel) primary:p];
-    _coalesceBroken = YES;
-    [self cursorsChanged];
+    [self restoreCursorSnapshot:d];
 }
 
 #pragma mark Adding cursors
@@ -362,6 +370,37 @@ static NSUInteger cursorOverlapping(const Sel *c, NSUInteger n, NSRange r) {
     _occurrenceWhole = whole;
     [self setCursors:out.bytes count:out.length / sizeof(Sel) primary:primary];
     [self endOccurrenceStep];
+}
+
+#pragma mark Expand / shrink (⌃⇧⌘→ / ⌃⇧⌘←)
+
+- (void)expandSelection:(id)sender {
+    NSData *now = self.cursorSnapshot;
+    if (!_expandLast || ![_expandLast isEqualToData:now]) _expandStack = [NSMutableArray array];
+    NSUInteger primary = 0;
+    NSMutableData *cur = [self cursors:&primary];
+    Sel *c = cur.mutableBytes;
+    BOOL grew = NO;
+    for (NSUInteger i = 0; i < cur.length / sizeof(Sel); i++) {
+        NSRange r = [self expandedRangeOf:SelRange(c[i])];
+        if (r.length == SelRange(c[i]).length) continue;
+        c[i] = SelMake(r.location, NSMaxRange(r));
+        grew = YES;
+    }
+    if (!grew) { NSBeep(); return; }
+    [_expandStack addObject:now];
+    [self setCursors:c count:cur.length / sizeof(Sel) primary:primary];
+    _coalesceBroken = YES;
+    [self cursorsChanged];
+    _expandLast = self.cursorSnapshot;
+}
+
+- (void)shrinkSelection:(id)sender {
+    if (!_expandStack.count || ![_expandLast isEqualToData:self.cursorSnapshot]) { NSBeep(); return; }
+    NSData *d = _expandStack.lastObject;
+    [_expandStack removeLastObject];
+    [self restoreCursorSnapshot:d];
+    _expandLast = self.cursorSnapshot;
 }
 
 #pragma mark Column selection (⇧⌥ drag)
