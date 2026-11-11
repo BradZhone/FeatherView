@@ -221,6 +221,11 @@ static const CGFloat kSidebarW = 260;
     _content.showsMinimap = st.showsMinimap;
     _content.wordWrap = st.wordWrap;
     TextEditorView.autoCloseBrackets = st.autoCloseBrackets;
+    if (TextEditorView.showsIndentGuides != st.showIndentGuides || TextEditorView.showsWhitespace != st.showWhitespace) {
+        TextEditorView.showsIndentGuides = st.showIndentGuides;
+        TextEditorView.showsWhitespace = st.showWhitespace;
+        [_content redrawEditors];
+    }
     MarkdownRenderer.loadsRemoteImages = st.remoteImages;
     _search.includeHidden = st.showHidden;
     _search.respectGitignore = st.respectGitignore;

@@ -154,6 +154,7 @@
 
 - (void)applyBufferEdits:(const PTEdit *)pe count:(NSUInteger)n {
     if (!n) return;
+    [self prepareFoldsForEdits:pe count:n];
     if (n == 1) {
         [self beginEdit:NSMakeRange(pe[0].location, pe[0].removed)];
         [_buf applyEdits:pe count:1];
@@ -167,6 +168,7 @@
 // Undo / redo of a group; Replace All swaps the whole buffer.
 - (void)applyGroup:(EditGroup *)g inverse:(BOOL)inv {
     if (g.swapBuffer) {
+        [self clearFolds];
         CGFloat top = [self beginBulkEdit];
         PieceTable *other = g.swapBuffer;
         g.swapBuffer = _buf;

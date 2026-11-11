@@ -445,6 +445,113 @@ static void typingAids(void) {
     CHECK([[ed highlightedWord:&whole] isEqualToString:@"ba"] && !whole, "or the selected text");
 }
 
+#pragma mark Folding and the rest of phase 4
+
+static NSUInteger foldCount(TextEditorView *ed) { return ed->_folds.length / sizeof(Fold); }
+
+static void folding(void) {
+    TextEditorView *ed = editor(@"a {|\n    b\n    c\n}\nd", @"x.c");
+    CHECK([ed startsRegion:0] && ![ed startsRegion:1] && [ed foldEndOf:0] == 2, "a region from indentation (ends %lu)", (unsigned long)[ed foldEndOf:0]);
+    [ed fold:nil];
+    CHECK(foldCount(ed) == 1 && ed.rowCount == 3 && [ed lineHidden:1] && [ed lineHidden:2] && ![ed lineHidden:3], "⌥⌘[ folds it (%lu rows)", (unsigned long)ed.rowCount);
+    CHECK([ed lineOfRow:1] == 3 && !ed.wrapsLines, "rows skip the hidden lines, and nothing is wrapped");
+    [ed displayIfNeeded];
+    [ed moveDown:nil];
+    CHECK([ed->_buf lineForOffset:ed->_caret] == 3 && foldCount(ed) == 1, "↓ goes past the folded lines");
+    // edits elsewhere move the fold along
+    [ed moveCaretTo:0 extend:NO];
+    [ed insertText:@"z\n" replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK(foldCount(ed) == 1 && ((Fold *)ed->_folds.bytes)->header == 1 && [ed lineHidden:2] && ed.rowCount == 4, "a line added above moves the fold down");
+    [ed undo:nil];
+    CHECK(foldCount(ed) == 1 && ((Fold *)ed->_folds.bytes)->header == 0 && ed.rowCount == 3, "and undo moves it back");
+    [ed moveCaretTo:1 extend:NO];
+    type(ed, @"x");
+    CHECK(foldCount(ed) == 1 && [text(ed) hasPrefix:@"ax {"], "typing on the folded line keeps the fold (%lu, %s)", (unsigned long)foldCount(ed), text(ed).UTF8String);
+    // a caret that goes into the hidden lines unfolds them
+    [ed gotoLine:2];
+    CHECK(foldCount(ed) == 0 && ed.rowCount == 5, "going to a hidden line unfolds it");
+    // a fold whose lines are deleted goes
+    ed = editor(@"a {|\n    b\n}\nd", @"x.c");
+    [ed fold:nil];
+    [ed deleteLines:nil];
+    CHECK(foldCount(ed) == 0 && ed.rowCount == ed->_buf.lineCount, "deleting the folded line drops the fold");
+    // the caret inside a region folds the region around it, and lands on its first line
+    ed = editor(@"a {\n    b\n    c|\n}", @"x.c");
+    [ed fold:nil];
+    CHECK(foldCount(ed) == 1 && ed->_caret == 3, "folding from inside puts the caret at the end of the first line (%lu)", (unsigned long)ed->_caret);
+    [ed unfold:nil];
+    CHECK(foldCount(ed) == 0, "⌥⌘] unfolds");
+
+    ed = editor(@"a:|\n  b:\n    c\n  d\ne", @"x.yaml");
+    CHECK(ed->_indentWidth == 2, "two-space indentation is detected (%lu)", (unsigned long)ed->_indentWidth);
+    [ed foldAll:nil];
+    CHECK(foldCount(ed) == 2 && ed.rowCount == 2, "fold all folds the nested regions too (%lu rows)", (unsigned long)ed.rowCount);
+    [ed unfold:nil];
+    CHECK(foldCount(ed) == 1 && ed.rowCount == 4, "unfolding the outer one keeps the inner one folded (%lu rows)", (unsigned long)ed.rowCount);
+    [ed unfoldAll:nil];
+    CHECK(foldCount(ed) == 0 && ed.rowCount == 5, "unfold all");
+
+    ed = editor(@"# A|\ntext\n## B\nmore\n\n# C\n```\n# not\n```\n", @"x.md");
+    CHECK([ed foldEndOf:0] == 3 && [ed foldEndOf:2] == 3 && [ed foldEndOf:5] == 8, "Markdown folds by heading, not inside code (%lu %lu %lu)",
+          (unsigned long)[ed foldEndOf:0], (unsigned long)[ed foldEndOf:2], (unsigned long)[ed foldEndOf:5]);
+
+    // the gutter control
+    ed = editor(@"a {|\n    b\n}", @"x.c");
+    [ed displayIfNeeded];
+    NSPoint at = [ed convertPoint:NSMakePoint(ed.gutterWidth - 9, 4 + ed->_lineHeight / 2) toView:nil];
+    NSEvent *click = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:at modifierFlags:0
+                                       timestamp:0 windowNumber:win.windowNumber context:nil eventNumber:0 clickCount:1 pressure:1];
+    [ed canvasMouseDown:click];
+    CHECK(foldCount(ed) == 1, "clicking the fold control folds");
+    NSRect box = [ed foldBoxOfLine:0];
+    NSEvent *onBox = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:[ed convertPoint:NSMakePoint(NSMidX(box), NSMidY(box)) toView:nil]
+                                   modifierFlags:0 timestamp:0 windowNumber:win.windowNumber context:nil eventNumber:0 clickCount:1 pressure:1];
+    [ed canvasMouseDown:onBox];
+    CHECK(foldCount(ed) == 0, "clicking the ⋯ unfolds");
+
+    ed = editor(@"a|\n  b\n", nil);
+    [ed moveDown:nil];
+    [ed moveToRightEndOfLine:nil];
+    [ed insertTab:nil];
+    CHECK([text(ed) isEqualToString:@"a\n  b \n"], "Tab goes to the file's two-column stop: %s", text(ed).UTF8String);
+}
+
+static void expandSelection(void) {
+    TextEditorView *ed = editor(@"x = f(a, \"b|c d\", {y});", @"x.c");
+    NSArray *steps = @[@"x = f(a, \"[bc|] d\", {y});", @"x = f(a, \"[bc d|]\", {y});", @"x = f(a, [\"bc d\"|], {y});",
+                       @"x = f([a, \"bc d\", {y}|]);", @"x = f[(a, \"bc d\", {y})|];", @"[x = f(a, \"bc d\", {y});|]"];
+    for (NSString *want in steps) { [ed expandSelection:nil]; SHOWS(ed, want, "⌃⇧⌘→ step"); }
+    for (NSUInteger i = steps.count - 1; i-- > 0;) { [ed shrinkSelection:nil]; SHOWS(ed, steps[i], "⌃⇧⌘← step"); }
+    [ed shrinkSelection:nil];
+    SHOWS(ed, @"x = f(a, \"b|c d\", {y});", "back to the caret");
+}
+
+static void guidesAndWhitespace(void) {
+    TextEditorView *ed = editor(@"a\n    x\n        b c|\n", nil);
+    TextEditorView.showsIndentGuides = YES;
+    TextEditorView.showsWhitespace = YES;
+    [ed displayIfNeeded];
+    NSBitmapImageRep *rep = [ed bitmapImageRepForCachingDisplayInRect:ed.bounds];
+    [ed cacheDisplayInRect:ed.bounds toBitmapImageRep:rep];
+    CGFloat sx = rep.pixelsWide / ed.bounds.size.width, x0 = ed.textOriginX, cw = ed->_charWidth, lh = ed->_lineHeight;
+    NSColor *(^px)(CGFloat, CGFloat) = ^NSColor *(CGFloat x, CGFloat y) {
+        return [[rep colorAtX:(NSInteger)(x * sx) y:(NSInteger)(y * sx)] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    };
+    NSColor *bg = px(x0 + 40 * cw, 4 + lh / 2);                  // light or dark, whichever the process draws in
+    double (^ink)(CGFloat, CGFloat) = ^double(CGFloat x, CGFloat y) {
+        NSColor *c = px(x, y);
+        return fabs(c.redComponent - bg.redComponent) + fabs(c.greenComponent - bg.greenComponent) + fabs(c.blueComponent - bg.blueComponent);
+    };
+    CGFloat row1 = 4 + 2 * lh + lh / 2;            // the line indented twice
+    CHECK(ink(floor(x0 + 4 * cw) + 0.5, row1 - lh / 3) > 0.05, "an indent guide at the second level (%.2f)", ink(floor(x0 + 4 * cw) + 0.5, row1 - lh / 3));
+    CHECK(ink(x0 + 2.5 * cw, row1) > 0.05, "a dot for a space (%.2f)", ink(x0 + 2.5 * cw, row1));
+    TextEditorView.showsWhitespace = NO; TextEditorView.showsIndentGuides = NO;
+    ed.needsDisplay = YES; [ed displayIfNeeded]; [ed cacheDisplayInRect:ed.bounds toBitmapImageRep:rep];
+    CHECK(ink(floor(x0 + 4 * cw) + 0.5, row1 - lh / 3) < 0.05 && ink(x0 + 2.5 * cw, row1) < 0.05, "both are gone when turned off");
+    TextEditorView.showsIndentGuides = YES;
+    CHECK(ink(floor(x0 + 4 * cw) + 0.5, 4 + lh / 2) < 0.05, "no guide on a line without indentation (%.2f)", ink(floor(x0 + 4 * cw) + 0.5, 4 + lh / 2));
+}
+
 #pragma mark Drawing, wrapping, scale
 
 static void drawing(void) {
@@ -487,6 +594,8 @@ static void wrapFuzz(void) {
         if (ins.length) [ed insertText:ins replacementRange:NSMakeRange(NSNotFound, 0)];
         else [ed deleteBackward:nil];
         if (random() % 5 == 0) [ed undo:nil];
+        if (random() % 4 == 0) [ed toggleFoldAtLine:random() % ed->_buf.lineCount];
+        if (random() % 9 == 0) [ed unfoldAll:nil];
         NSUInteger lines = ed->_wrapLines;
         NSData *incremental = [NSData dataWithBytes:ed->_rowStart length:(lines + 1) * sizeof(uint64_t)];
         BOOL valid = ed->_wrapValid;
@@ -541,6 +650,9 @@ int main(void) {
         lineCommands();
         typingAids();
         drawing();
+        folding();
+        expandSelection();
+        guidesAndWhitespace();
         wrapFuzz();
         manyCursors();
         [pb releaseGlobally];

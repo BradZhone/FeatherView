@@ -471,3 +471,15 @@
 "Capitalize" = "首字母大写";
 "Auto-close brackets and quotes" = "自动补全括号和引号";
 "Quotes are not closed in plain text and Markdown." = "纯文本和 Markdown 中不自动补全引号。";
+
+/* Folding, guides, whitespace, smart selection */
+"Fold" = "折叠";
+"Unfold" = "展开";
+"Fold All" = "全部折叠";
+"Unfold All" = "全部展开";
+"Show Indent Guides" = "显示缩进参考线";
+"Show Whitespace" = "显示空白字符";
+"Show indent guides" = "显示缩进参考线";
+"Show whitespace" = "显示空白字符（空格显示为圆点，制表符显示为箭头）";
+"Expand Selection" = "扩大选区";
+"Shrink Selection" = "缩小选区";

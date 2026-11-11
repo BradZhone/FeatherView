@@ -103,7 +103,14 @@ static __weak NSResponder *gFocusOverride;
                     NSMenuItem.separatorItem,
                     item(FTL(@"Word Wrap"), @selector(toggleWordWrap:), @"z", C | O),     // not ⌥Z: that types Ω, or ż on Polish keyboards
                     item(FTL(@"Show Minimap"), @selector(toggleMinimap:), @"m", NSEventModifierFlagCommand | NSEventModifierFlagOption),
+                    item(FTL(@"Show Indent Guides"), @selector(toggleIndentGuides:), nil, 0),
+                    item(FTL(@"Show Whitespace"), @selector(toggleWhitespace:), nil, 0),
                     [self appearanceMenuItem],
+                    NSMenuItem.separatorItem,
+                    item(FTL(@"Fold"), @selector(fold:), @"[", C | O),
+                    item(FTL(@"Unfold"), @selector(unfold:), @"]", C | O),
+                    item(FTL(@"Fold All"), @selector(foldAll:), @"[", C | O | S),
+                    item(FTL(@"Unfold All"), @selector(unfoldAll:), @"]", C | O | S),
                     NSMenuItem.separatorItem,
                     item(FTL(@"File Tree"), @selector(showFilesTab:), @"e", C | S),
                     item(FTL(@"Search"), @selector(searchWorkspace:), nil, 0),
@@ -164,6 +171,8 @@ static __weak NSResponder *gFocusOverride;
              item(FTL(@"Move Last Selection to Next Occurrence"), @selector(skipToNextOccurrence:), @"d", C | S),
              item(FTL(@"Select All Occurrences"), @selector(selectAllOccurrences:), @"l", C | S),
              item(FTL(@"Undo Cursor"), @selector(undoCursor:), @"u", C),
+             item(FTL(@"Expand Selection"), @selector(expandSelection:), [NSString stringWithFormat:@"%C", (unichar)NSRightArrowFunctionKey], C | S | K),
+             item(FTL(@"Shrink Selection"), @selector(shrinkSelection:), [NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey], C | S | K),
              NSMenuItem.separatorItem,
              item(FTL(@"Move Line Up"), @selector(moveLinesUp:), up, O),
              item(FTL(@"Move Line Down"), @selector(moveLinesDown:), down, O),
@@ -301,6 +310,8 @@ static __weak NSResponder *gFocusOverride;
     if (a == @selector(toggleHidden:)) { mi.state = _tree.showHidden ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
     if (a == @selector(togglePreviewTabs:)) { mi.state = _content.previewEnabled ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
     if (a == @selector(toggleWordWrap:)) { mi.state = _content.wordWrap ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
+    if (a == @selector(toggleIndentGuides:)) { mi.state = FTSettings.shared.showIndentGuides ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
+    if (a == @selector(toggleWhitespace:)) { mi.state = FTSettings.shared.showWhitespace ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
     if (a == @selector(toggleMinimap:)) { mi.state = _content.showsMinimap ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
     // A draft is always savable (⌘S asks where): its edits go to a backup file, so the editor reads as clean.
     if (a == @selector(saveDocument:)) return _content.tabCount > 0;     // a clean file: ⌘S does nothing, without a beep
@@ -440,6 +451,8 @@ static __weak NSResponder *gFocusOverride;
 }
 - (void)splitPreview:(id)s { _content.activeMarkupLayout = _content.activeMarkupLayout == MarkupSplit ? MarkupSource : MarkupSplit; }
 - (void)sourceOnly:(id)s { _content.activeMarkupLayout = MarkupSource; }
+- (void)toggleIndentGuides:(id)s { FTSettings.shared.showIndentGuides = !FTSettings.shared.showIndentGuides; }
+- (void)toggleWhitespace:(id)s { FTSettings.shared.showWhitespace = !FTSettings.shared.showWhitespace; }
 - (void)toggleMinimap:(id)s { FTSettings.shared.showsMinimap = !_content.showsMinimap; }
 - (void)toggleWordWrap:(id)s { FTSettings.shared.wordWrap = !_content.wordWrap; }
 - (void)showReplace:(id)s { [_content showReplaceBar]; }

@@ -302,6 +302,8 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
     for (Doc *d in _docs) d.editor.showsMinimap = s;
 }
 
+- (void)redrawEditors { for (Doc *d in _docs) d.editor.needsDisplay = YES; }
+
 - (void)setWordWrap:(BOOL)w {
     _wordWrap = w;
     for (Doc *d in _docs) d.editor.wordWrap = w;

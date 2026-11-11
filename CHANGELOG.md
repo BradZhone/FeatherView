@@ -4,6 +4,15 @@
 
 All notable changes to FeatherView are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may contain incompatible changes.
 
+## [0.20.0] — 2026-11-11
+
+### Added
+
+- Code folding. Regions follow indentation (Markdown: headings, skipping code blocks). Fold (⌥⌘[), Unfold (⌥⌘]), Fold All (⇧⌥⌘[) and Unfold All (⇧⌥⌘]) are in the View menu; the control next to the line number folds a region, and clicking the ⋯ after a folded line opens it. Folds follow edits made elsewhere, and a caret that reaches folded lines (Go to Line, find, undo) opens them.
+- Indent guides, on by default, and Show Whitespace (dots for spaces, arrows for tabs), off by default; both are in the View menu and in Settings.
+- Expand Selection (⌃⇧⌘→) grows each selection to the word, the string, the bracket contents, the brackets, the line and the whole text; Shrink Selection (⌃⇧⌘←) goes back.
+- The indentation step of a file (2, 4 or 8 spaces) is detected, and Tab, backspace in the indentation and the indent guides use it.
+
 ## [0.19.0] — 2026-11-10
 
 ### Added

@@ -13,6 +13,8 @@ extern NSNotificationName const FTSettingsDidChange;
 @property (nonatomic) NSInteger autoSaveMode;                     // AutoSaveMode
 @property (nonatomic) BOOL showsMinimap;
 @property (nonatomic) BOOL wordWrap;                              // soft wrap in the editor (default YES)
+@property (nonatomic) BOOL showIndentGuides;                      // default YES
+@property (nonatomic) BOOL showWhitespace;                        // default NO
 @property (nonatomic) BOOL autoCloseBrackets;                     // typing ( [ { and quotes adds the closing one (default YES)
 @property (nonatomic) BOOL remoteImages;                          // Markdown preview loads https images (default YES)
 - (void)resetFileLists;

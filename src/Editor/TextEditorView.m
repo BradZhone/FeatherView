@@ -12,6 +12,11 @@ static CGFloat gDefaultFontSize = 13;
 BOOL FTEditorAutoClose = YES;
 + (BOOL)autoCloseBrackets { return FTEditorAutoClose; }
 + (void)setAutoCloseBrackets:(BOOL)on { FTEditorAutoClose = on; }
+static BOOL gIndentGuides = YES, gShowWhitespace = NO;
++ (BOOL)showsIndentGuides { return gIndentGuides; }
++ (void)setShowsIndentGuides:(BOOL)on { gIndentGuides = on; }
++ (BOOL)showsWhitespace { return gShowWhitespace; }
++ (void)setShowsWhitespace:(BOOL)on { gShowWhitespace = on; }
 
 - (instancetype)initWithFrame:(NSRect)frame buffer:(PieceTable *)buffer
                          path:(NSString *)path encoding:(NSStringEncoding)encoding {
@@ -28,8 +33,32 @@ BOOL FTEditorAutoClose = YES;
 
     uint8_t probe[65536];
     NSUInteger n = [_buf read:NSMakeRange(0, sizeof probe) into:probe];
-    _indentUnit = memchr(probe, '\t', n) ? @"\t" : @"    ";
+    _indentWidth = detectIndentWidth(probe, n);
+    _indentUnit = memchr(probe, '\t', n) ? @"\t" : [@"        " substringToIndex:_indentWidth];
     return self;
+}
+
+// Spaces per indentation level: the most common step between the indentation of consecutive lines.
+static NSUInteger detectIndentWidth(const uint8_t *b, NSUInteger n) {
+    NSUInteger votes[9] = {0}, prev = 0;
+    for (NSUInteger i = 0; i < n;) {
+        NSUInteger sp = 0;
+        while (i + sp < n && b[i + sp] == ' ') sp++;
+        NSUInteger j = i + sp;
+        BOOL blank = j >= n || b[j] == '\n' || b[j] == '\r';
+        BOOL tab = j < n && b[j] == '\t';
+        if (!blank && !tab) {
+            NSUInteger d = sp > prev ? sp - prev : 0;
+            if (d == 2 || d == 4 || d == 8) votes[d]++;
+            prev = sp;
+        }
+        const uint8_t *nl = memchr(b + j, '\n', n - MIN(j, n));
+        if (!nl) break;
+        i = (NSUInteger)(nl - b) + 1;
+    }
+    if (votes[2] > votes[4] && votes[2] >= votes[8]) return 2;
+    if (votes[8] > votes[4] && votes[8] > votes[2]) return 8;
+    return 4;
 }
 
 - (void)dealloc {
@@ -95,7 +124,7 @@ static CTFontRef variant(CTFontRef base, CTFontSymbolicTraits trait, CGFloat cha
     [self notifyChange];
 }
 
-- (BOOL)wrapsLines { return self.wrapOn; }
+- (BOOL)wrapsLines { return self.wrapsText; }
 
 // Every scroll / resize path ends here: rebuild the row table for the new width first.
 - (void)clampScroll {
@@ -109,7 +138,7 @@ static CTFontRef variant(CTFontRef base, CTFontSymbolicTraits trait, CGFloat cha
 
 - (CGFloat)contentHeight { return (self.rowCount + 3) * _lineHeight + 8; }
 - (CGFloat)maxScrollX {
-    if (self.wrapOn) return 0;
+    if (self.wrapsText) return 0;
     CGFloat avail = self.bounds.size.width - self.gutterWidth - self.rightInset - 16;
     return MAX(0, _widestLine - avail);
 }
@@ -146,7 +175,7 @@ static inline BOOL wordUnit(unichar c) { return c >= 0x80 || c == '_' || (c >= '
     NSRectFill(dirty);
 
     CGFloat gutter = self.gutterWidth, x0 = self.textOriginX;
-    BOOL wrap = self.wrapOn;
+    BOOL table = self.wrapOn, wrap = table && _wrapText;
     NSUInteger rows = self.rowCount;
     NSUInteger firstRow = (NSUInteger)MAX(0, floor((self.scrollY + NSMinY(dirty) - 4) / _lineHeight));
     NSUInteger lastRow = MIN(rows, (NSUInteger)ceil((self.scrollY + NSMaxY(dirty) - 4) / _lineHeight) + 1);
@@ -171,10 +200,19 @@ static inline BOOL wordUnit(unichar c) { return c >= 0x80 || c == '_' || (c >= '
     NSColor *bracketColor = [NSColor.systemGrayColor colorWithAlphaComponent:0.35];
     CGFloat fullWidth = self.bounds.size.width;
     NSMutableData *spanData = [NSMutableData data];
+    NSColor *guideColor = [NSColor.labelColor colorWithAlphaComponent:0.12];
+    NSColor *spaceColor = NSColor.tertiaryLabelColor;
+    NSUInteger unit = MAX(_indentWidth, (NSUInteger)1), lines = _buf.lineCount;
+    CGFloat leftX = gutter, rightX = fullWidth - self.minimapWidth;
 
     CGContextSaveGState(cg);
     CGContextClipToRect(cg, NSMakeRect(gutter, NSMinY(dirty), self.bounds.size.width - gutter - self.minimapWidth, NSHeight(dirty)));
     for (NSUInteger L = first; L < last; L++) {
+        if (_hidden.length) {                            // skip folded lines
+            NSRange h = [self hiddenRangeAt:L];
+            if (h.location != NSNotFound) { L = NSMaxRange(h) - 1; continue; }
+        }
+        BOOL folded = _folds.length && [self lineFolded:L];
         NSUInteger row0 = [self firstRowOfLine:L];
         NSString *s = [self lineString:L];
         NSUInteger markAt = NSNotFound;
@@ -197,7 +235,21 @@ static inline BOOL wordUnit(unichar c) { return c >= 0x80 || c == '_' || (c >= '
                        range:NSMakeRange(markAt, _markedText.length)];
 
         WrapRows wr = [self rowsOf:s];
-        if (wrap && wr.count != [self firstRowOfLine:L + 1] - row0) {
+        // indent guides: one at the start of each level inside the indentation; a blank line takes the deeper
+        // of its neighbours, so guides run through the gaps in a block
+        NSUInteger guides = 0;
+        if (gIndentGuides) {
+            BOOL blank;
+            NSUInteger ind = [self indentColumns:L blank:&blank];
+            if (blank) {
+                NSUInteger up = 0, down = 0;
+                for (NSUInteger j = L; j-- > 0 && j + 100 > L;) { NSUInteger i = [self indentColumns:j blank:&blank]; if (!blank) { up = i; break; } }
+                for (NSUInteger j = L + 1; j < lines && j < L + 100; j++) { NSUInteger i = [self indentColumns:j blank:&blank]; if (!blank) { down = i; break; } }
+                ind = MAX(up, down);
+            }
+            guides = (ind + unit - 1) / unit;
+        }
+        if (wrap && !folded && wr.count != [self firstRowOfLine:L + 1] - row0) {
             // the table's estimate was off (unusual glyphs): fix it and draw again
             [self refreshRowsOfLine:L];
             healed = YES;
@@ -279,8 +331,54 @@ static inline BOOL wordUnit(unichar c) { return c >= 0x80 || c == '_' || (c >= '
                     NSRectFill(NSMakeRect(rx + xa, top, MAX(1, xb - xa), _lineHeight));
                 }
             }
+            if (guides) {
+                [guideColor setFill];
+                for (NSUInteger g = 0; g < guides; g++) {
+                    CGFloat gx = floor(x0 + g * unit * _charWidth) + 0.5;
+                    if (gx >= leftX) NSRectFillUsingOperation(NSMakeRect(gx, top, 1, _lineHeight), NSCompositingOperationSourceOver);
+                }
+            }
+            if (gShowWhitespace) {
+                // only the characters in view: a long line has many
+                CFIndex from = CTLineGetStringIndexForPosition(line, CGPointMake(leftX - rx, 0));
+                CFIndex to = CTLineGetStringIndexForPosition(line, CGPointMake(rightX - rx, 0));
+                NSUInteger p0 = from == kCFNotFound ? a : MAX(a, (NSUInteger)MAX(0, from - 1));
+                NSUInteger p1 = to == kCFNotFound ? b : MIN(b, (NSUInteger)to + 1);
+                [spaceColor setFill];
+                for (NSUInteger i = p0; i < p1; i++) {
+                    unichar ch = [s characterAtIndex:i];
+                    if (ch != ' ' && ch != '\t') continue;
+                    CGFloat xa = CTLineGetOffsetForStringIndex(line, i, NULL), xb = CTLineGetOffsetForStringIndex(line, i + 1, NULL);
+                    CGFloat cy = top + _lineHeight / 2;
+                    if (ch == ' ') {
+                        CGFloat d = MAX(1.5, _charWidth * 0.18);
+                        [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(rx + (xa + xb) / 2 - d / 2, cy - d / 2, d, d)] fill];
+                    } else {
+                        CGFloat ax = rx + xa + 2, bx = rx + MAX(xa + _charWidth, xb) - 2, h = MIN(3.0, _lineHeight / 5);
+                        NSBezierPath *arrow = [NSBezierPath bezierPath];
+                        [arrow moveToPoint:NSMakePoint(ax, cy)]; [arrow lineToPoint:NSMakePoint(bx, cy)];
+                        [arrow moveToPoint:NSMakePoint(bx - h, cy - h)]; [arrow lineToPoint:NSMakePoint(bx, cy)]; [arrow lineToPoint:NSMakePoint(bx - h, cy + h)];
+                        arrow.lineWidth = 1;
+                        [spaceColor setStroke];
+                        [arrow stroke];
+                    }
+                }
+            }
             CGContextSetTextPosition(cg, rx, top + _ascent + 1);
             CTLineDraw(line, cg);
+            if (folded && lastRowOfLine) {                // ⋯ after a folded line
+                CGFloat ex = rx + CTLineGetTypographicBounds(line, NULL, NULL, NULL) + 6;
+                NSRect box = NSMakeRect(ex, top + 2, ceil(2.6 * _charWidth), _lineHeight - 4);
+                [[NSColor.systemGrayColor colorWithAlphaComponent:0.25] setFill];
+                [[NSBezierPath bezierPathWithRoundedRect:box xRadius:3 yRadius:3] fill];
+                NSAttributedString *dots = [[NSAttributedString alloc] initWithString:@"⋯" attributes:@{
+                    (id)kCTFontAttributeName: (__bridge id)_font, (id)kCTForegroundColorAttributeName: (__bridge id)NSColor.secondaryLabelColor.CGColor}];
+                CTLineRef dl = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)dots);
+                CGFloat dw = CTLineGetTypographicBounds(dl, NULL, NULL, NULL);
+                CGContextSetTextPosition(cg, NSMidX(box) - dw / 2, top + _ascent + 1);
+                CTLineDraw(dl, cg);
+                CFRelease(dl);
+            }
             if (!wrap) _widestLine = MAX(_widestLine, CTLineGetTypographicBounds(line, NULL, NULL, NULL));
             for (int m = 0; m < 2; m++) {
                 if (brk[m] == NSNotFound || brk[m] < a || brk[m] >= b) continue;
@@ -314,14 +412,31 @@ static inline BOOL wordUnit(unichar c) { return c >= 0x80 || c == '_' || (c >= '
     NSRectFill(NSMakeRect(0, NSMinY(dirty), g, NSHeight(dirty)));
     [NSColor.separatorColor setFill];
     NSRectFill(NSMakeRect(g - 1, NSMinY(dirty), 1, NSHeight(dirty)));
+    BOOL hover = _gutterHover;
+    CGFloat cs = MIN(9.0, _lineHeight * 0.45);
     for (NSUInteger L = first; L < last; L++) {          // number on the first row of each line only
+        if (_hidden.length) {
+            NSRange h = [self hiddenRangeAt:L];
+            if (h.location != NSNotFound) { L = NSMaxRange(h) - 1; continue; }
+        }
+        CGFloat top = 4 + [self firstRowOfLine:L] * _lineHeight - self.scrollY;
+        BOOL folded = _folds.length && [self lineFolded:L];
+        if (folded || (hover && [self startsRegion:L])) {     // fold control
+            CGFloat cx = g - 9, cy = top + _lineHeight / 2;
+            NSBezierPath *p = [NSBezierPath bezierPath];
+            if (folded) { [p moveToPoint:NSMakePoint(cx - cs / 4, cy - cs / 2)]; [p lineToPoint:NSMakePoint(cx + cs / 4, cy)]; [p lineToPoint:NSMakePoint(cx - cs / 4, cy + cs / 2)]; }
+            else { [p moveToPoint:NSMakePoint(cx - cs / 2, cy - cs / 4)]; [p lineToPoint:NSMakePoint(cx, cy + cs / 4)]; [p lineToPoint:NSMakePoint(cx + cs / 2, cy - cs / 4)]; }
+            p.lineWidth = 1.5; p.lineCapStyle = NSLineCapStyleRound; p.lineJoinStyle = NSLineJoinStyleRound;
+            [(folded ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor) setStroke];
+            [p stroke];
+        }
         NSString *num = [NSString stringWithFormat:@"%lu", (unsigned long)L + 1];
         CGColorRef c = (L == caretLine ? NSColor.labelColor : NSColor.tertiaryLabelColor).CGColor;
         NSAttributedString *as = [[NSAttributedString alloc] initWithString:num attributes:@{
             (id)kCTFontAttributeName: (__bridge id)_font, (id)kCTForegroundColorAttributeName: (__bridge id)c}];
         CTLineRef line = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)as);
         CGFloat w = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
-        CGContextSetTextPosition(cg, g - 8 - w, 4 + [self firstRowOfLine:L] * _lineHeight - self.scrollY + _ascent + 1);
+        CGContextSetTextPosition(cg, g - 18 - w, top + _ascent + 1);
         CTLineDraw(line, cg);
         CFRelease(line);
     }

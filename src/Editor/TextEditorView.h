@@ -20,6 +20,8 @@
 @property (nonatomic) CGFloat fontSize;                  // keeps the top visible line when changed
 @property (class, nonatomic) CGFloat defaultFontSize;     // for editors created later (default 13)
 @property (class, nonatomic) BOOL autoCloseBrackets;      // typing ( [ { and quotes adds the closing one (default YES)
+@property (class, nonatomic) BOOL showsIndentGuides;      // a line at each indentation level (default YES)
+@property (class, nonatomic) BOOL showsWhitespace;        // dots for spaces, arrows for tabs (default NO)
 @property (nonatomic, readonly) NSUInteger cursorCount;  // 1 unless there are multiple cursors
 @property (nonatomic, strong) NSPasteboard *pasteboard;  // the general one unless set (tests)
 
@@ -48,6 +50,12 @@
 - (void)sortLinesAscending:(id)sender;
 - (void)sortLinesDescending:(id)sender;
 - (void)trimTrailingWhitespace:(id)sender;
+- (void)expandSelection:(id)sender;         // ⌃⇧⌘→
+- (void)shrinkSelection:(id)sender;         // ⌃⇧⌘←
+- (void)fold:(id)sender;                    // ⌥⌘[
+- (void)unfold:(id)sender;                  // ⌥⌘]
+- (void)foldAll:(id)sender;                 // ⇧⌥⌘[
+- (void)unfoldAll:(id)sender;               // ⇧⌥⌘]
 - (void)jumpToBracket:(id)sender;           // ⇧⌘ backslash
 @end
 

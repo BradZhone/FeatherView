@@ -20,6 +20,7 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 @property (nonatomic, readonly) NSUInteger tabCount, dirtyCount;
 @property (nonatomic) BOOL previewEnabled;                     // VSCode-style preview tab (default YES)
 @property (nonatomic) BOOL showsMinimap;                       // applies to every open editor (default YES)
+- (void)redrawEditors;                                           // after a drawing setting changed
 @property (nonatomic) BOOL wordWrap;                           // applies to every open editor (default NO)
 @property (nonatomic, copy) void (^onStateChange)(void);       // title / dirty changed
 @property (nonatomic, copy) void (^onActivate)(NSString *path);// active tab changed

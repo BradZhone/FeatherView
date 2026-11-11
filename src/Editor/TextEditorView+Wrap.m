@@ -130,12 +130,14 @@ static NSUInteger findLine(const uint64_t *rowStart, NSUInteger n, uint64_t row)
 }
 
 - (WrapRows)rowsOf:(NSString *)s {
-    if (!_wrapActive) return (WrapRows){1, NULL, 0};
+    if (!_wrapActive || !_wrapText) return (WrapRows){1, NULL, 0};
     return [self rowsOf:s width:_wrapWidth];
 }
 
 // Rows of line L as stored in the buffer (IME text is added by refreshRowsOfLine:).
 - (NSUInteger)rowCountOfLine:(NSUInteger)L {
+    if (_hidden.length && [self lineHidden:L]) return 0;
+    if (!_wrapText) return 1;
     NSUInteger s = [_buf lineStart:L], e = [_buf lineEnd:L], len = e - s;
     CGFloat width = _wrapWidth;
     if (len * 4 * _charWidth <= width) return 1;        // a tab or a wide glyph is at most 4 columns per byte
@@ -174,7 +176,7 @@ static NSUInteger findLine(const uint64_t *rowStart, NSUInteger n, uint64_t row)
 }
 
 - (void)refreshRowsOfLine:(NSUInteger)L {
-    if (!_wrapActive || !_wrapValid) return;
+    if (!_wrapActive || !_wrapValid || !_wrapText || [self lineHidden:L]) return;
     WrapRows r = [self rowsOf:[self displayString:L]];
     free(r.starts);
     [self setRows:r.count forLine:L];
@@ -200,8 +202,10 @@ static NSUInteger findLine(const uint64_t *rowStart, NSUInteger n, uint64_t row)
 - (void)ensureWrap {
     if (_wrapBusy) return;
     CGFloat width = floor(self.wrapWidthNow);
-    BOOL want = _wordWrap && !self.wrapLimited && width >= kMinWrapWidth;
-    BOOL stale = want && (!_wrapActive || !_wrapValid || _wrapLines != _buf.lineCount || fabs(width - _wrapWidth) >= 0.5);
+    BOOL text = _wordWrap && !self.wrapLimited && width >= kMinWrapWidth;
+    BOOL want = text || _folds.length;                  // folds need the table too: hidden lines have no rows
+    BOOL stale = want && (!_wrapActive || !_wrapValid || _wrapLines != _buf.lineCount || text != _wrapText ||
+                          (text && fabs(width - _wrapWidth) >= 0.5));
     BOOL drop = !want && _wrapActive;
     if (!stale && !drop && _pendingTop < 0) return;
     _wrapBusy = YES;
@@ -210,6 +214,7 @@ static NSUInteger findLine(const uint64_t *rowStart, NSUInteger n, uint64_t row)
     _pendingTop = -1;
     if (stale) {
         _wrapWidth = width;
+        _wrapText = text;
         _wrapActive = YES;
         [self rebuildWrapTable];
     } else if (drop) {
@@ -244,6 +249,8 @@ static NSUInteger findLine(const uint64_t *rowStart, NSUInteger n, uint64_t row)
 
 // Re-measures the lines the edit produced and shifts the rows after them.
 - (void)endEdit {
+    [self applyPendingFolds];
+    if (_foldsDropped) { _foldsDropped = NO; _wrapValid = NO; _editLines = NSMakeRange(NSNotFound, 0); return; }
     if (_editLines.location == NSNotFound) return;
     NSUInteger a = _editLines.location, oldEnd = NSMaxRange(_editLines), n = _buf.lineCount;
     _editLines = NSMakeRange(NSNotFound, 0);
@@ -270,6 +277,8 @@ static NSUInteger findLine(const uint64_t *rowStart, NSUInteger n, uint64_t row)
     if (!track) {
         if (_wrapActive && !_bulkEdit) _wrapValid = NO;
         [_buf applyEdits:e count:n];
+        [self applyPendingFolds];
+        _foldsDropped = NO;
         return;
     }
     // touched line spans in old lines, merged; and how many lines each has afterwards
@@ -288,6 +297,8 @@ static NSUInteger findLine(const uint64_t *rowStart, NSUInteger n, uint64_t row)
         }
     }
     [_buf applyEdits:e count:n];
+    [self applyPendingFolds];
+    if (_foldsDropped) { _foldsDropped = NO; _wrapValid = NO; return; }
     NSUInteger newLines = _buf.lineCount, ns = spans.length / (3 * sizeof(NSUInteger));
     const NSUInteger *sp = spans.bytes;
     uint64_t *rows = malloc((newLines + 1) * sizeof(uint64_t)), acc = 0;
@@ -332,6 +343,7 @@ static NSUInteger findLine(const uint64_t *rowStart, NSUInteger n, uint64_t row)
 #pragma mark Geometry
 
 - (BOOL)wrapOn { [self ensureWrap]; return _wrapActive && _wrapValid; }
+- (BOOL)wrapsText { return self.wrapOn && _wrapText; }
 
 - (NSUInteger)rowCount { return self.wrapOn ? (NSUInteger)_rowStart[_wrapLines] : _buf.lineCount; }
 
@@ -383,7 +395,11 @@ static NSUInteger findLine(const uint64_t *rowStart, NSUInteger n, uint64_t row)
     }
     free(r.starts);
     NSUInteger first = [self firstRowOfLine:L];
-    if (self.wrapOn) k = MIN(k, (NSUInteger)(_rowStart[L + 1] - _rowStart[L]) - 1);
+    if (self.wrapOn) {
+        NSUInteger n = (NSUInteger)(_rowStart[L + 1] - _rowStart[L]);
+        if (!n) return first ? first - 1 : 0;             // a hidden line: the row of the fold above it
+        k = MIN(k, n - 1);
+    }
     return first + k;
 }
 

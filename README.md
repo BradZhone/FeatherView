@@ -67,7 +67,7 @@ Measured on the same workspace with the same files; median of three runs. Memory
 
 | Area | Capabilities |
 |---|---|
-| Text and code | Editing with undo/redo, find and replace, go to line; multiple cursors (⌥-click, ⌘D, ⇧⌘L, column selection) and line commands (move, copy, delete, join, sort, comment); auto-closed brackets and quotes, bracket matching; soft wrap that follows the window width (word-aware, CJK-aware, indentation-preserving); minimap; highlighting for more than 40 languages; UTF-8, UTF-16, GB18030, Big5, Shift-JIS, EUC-KR and Windows-1252 detected and saved back unchanged; CRLF line endings preserved; Unicode-aware find |
+| Text and code | Editing with undo/redo, find and replace, go to line; multiple cursors (⌥-click, ⌘D, ⇧⌘L, column selection) and line commands (move, copy, delete, join, sort, comment); auto-closed brackets and quotes, bracket matching; code folding, indent guides, visible whitespace; soft wrap that follows the window width (word-aware, CJK-aware, indentation-preserving); minimap; highlighting for more than 40 languages; UTF-8, UTF-16, GB18030, Big5, Shift-JIS, EUC-KR and Windows-1252 detected and saved back unchanged; CRLF line endings preserved; Unicode-aware find |
 | Markdown | Native rendering (tables, task lists, highlighted code, images, badges); source, side-by-side and preview layouts with synchronized scrolling |
 | HTML | WebKit rendering with scripts and local resources; side-by-side source view |
 | CSV, TSV, JSON Lines | Table view with sorting, per-column filtering, copy as TSV and jump to source; up to 500,000 rows |
@@ -128,6 +128,7 @@ Each file opens in the view that suits it. Use **View → Preview** (⇧⌘V), *
 | Add next occurrence / select all | ⌘D / ⇧⌘L | Add cursor above / below | ⌥⌘↑ / ⌥⌘↓ |
 | Move line up / down | ⌥↑ / ⌥↓ | Copy line up / down | ⇧⌥↑ / ⇧⌥↓ |
 | Delete line | ⇧⌘K | Toggle line comment | ⌘/ |
+| Fold / unfold | ⌥⌘[ / ⌥⌘] | Expand / shrink selection | ⌃⇧⌘→ / ⌃⇧⌘← |
 | Show hidden files | ⇧⌘. | Zoom in / out / reset | ⌘= / ⌘- / ⌘0 |
 | Open as text / hex | ⌥⌘1 / ⌥⌘2 | Settings | ⌘, |
 
