@@ -97,6 +97,9 @@ static __weak NSResponder *gFocusOverride;
                     item(FTL(@"PDF Thumbnails"), @selector(togglePDFThumbsAction:), @"t", C | O),
                     item(FTL(@"PDF Two Pages"), @selector(togglePDFTwoPagesAction:), nil, 0),
                     NSMenuItem.separatorItem,
+                    item(FTL(@"Show Terminal Panel"), @selector(toggleTerminalPanel:), @"`", NSEventModifierFlagControl),
+                    item(FTL(@"New Terminal"), @selector(newTerminal:), @"t", C | O),
+                    item(FTL(@"Open Terminal Here"), @selector(openTerminalHere:), nil, 0),
                     item(FTL(@"Preview (Markdown, Tables, JSON…)"), @selector(togglePreview:), @"v", C | S),
                     item(FTL(@"Side-by-Side Preview"), @selector(splitPreview:), @"v", C | O),
                     item(FTL(@"Source Only"), @selector(sourceOnly:), nil, 0),
@@ -303,6 +306,9 @@ static __weak NSResponder *gFocusOverride;
 
 - (BOOL)validateMenuItem:(NSMenuItem *)mi {
     SEL a = mi.action;
+    if (a == @selector(toggleTerminalPanel:)) { mi.state = _content.terminalPanelVisible ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
+    if (a == @selector(newTerminal:)) return YES;
+    if (a == @selector(openTerminalHere:)) return _tree.rootPath != nil;
     NSString *target = [self targetPathFrom:mi];
     NSArray<NSString *> *targets = [self targetPathsFrom:mi];
     BOOL hasRoot = _tree.rootPath != nil;
@@ -451,6 +457,26 @@ static __weak NSResponder *gFocusOverride;
 }
 - (void)splitPreview:(id)s { _content.activeMarkupLayout = _content.activeMarkupLayout == MarkupSplit ? MarkupSource : MarkupSplit; }
 - (void)sourceOnly:(id)s { _content.activeMarkupLayout = MarkupSource; }
+- (void)toggleTerminalPanel:(id)s {
+    if (!_content.terminalPanelVisible && _content.terminalCount == 0)
+        [self newTerminal:s];
+    else
+        [_content setTerminalPanelVisible:!_content.terminalPanelVisible focus:YES];
+}
+
+- (void)newTerminal:(id)s {
+    BOOL asTab = NO;
+    NSString *dir = _tree.rootPath ?: NSHomeDirectory();
+    [_content openTerminalAt:dir asTab:asTab];
+}
+
+- (void)openTerminalHere:(id)s {
+    NSString *t = [self targetPathFrom:s];
+    BOOL isDir = NO;
+    if (t && [NSFileManager.defaultManager fileExistsAtPath:t isDirectory:&isDir] && !isDir) t = [t stringByDeletingLastPathComponent];
+    [_content openTerminalAt:(t ?: _tree.rootPath) asTab:NO];
+}
+
 - (void)toggleIndentGuides:(id)s { FTSettings.shared.showIndentGuides = !FTSettings.shared.showIndentGuides; }
 - (void)toggleWhitespace:(id)s { FTSettings.shared.showWhitespace = !FTSettings.shared.showWhitespace; }
 - (void)toggleMinimap:(id)s { FTSettings.shared.showsMinimap = !_content.showsMinimap; }

@@ -2,12 +2,17 @@
 // Text with cursors is written as markup: "|" is a caret, "[x|]" / "[|x]" a selection (caret at the bar).
 #import <Cocoa/Cocoa.h>
 #import "TextEditorView+Private.h"
+#import "TSession.h"
+#import "TerminalPanel.h"
+#import "ContentController.h"
+#import "TerminalView.h"
 
 static int failures = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
 
 static NSWindow *win;
 static NSPasteboard *pb;
+static void terminals(void);
 
 static NSString *text(TextEditorView *ed) {
     return [[NSString alloc] initWithData:[ed->_buf dataInRange:NSMakeRange(0, ed->_buf.length)] encoding:NSUTF8StringEncoding];
@@ -644,6 +649,7 @@ int main(void) {
         win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 700, 500) styleMask:NSWindowStyleMaskTitled
                                             backing:NSBackingStoreBuffered defer:YES];
         pb = [NSPasteboard pasteboardWithUniqueName];
+        terminals();
         multiCursorTyping();
         addingCursors();
         clipboard();
@@ -660,4 +666,136 @@ int main(void) {
     if (failures) { printf("%d editing failure(s)\n", failures); return 1; }
     printf("all editing tests passed\n");
     return 0;
+}
+#pragma mark Terminal
+
+static void drain(double seconds) {
+    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
+}
+
+// A shell, a view bound to it, and the panel / tab placement in ContentController.
+static void terminals(void) {
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+
+    // the view renders output and follows the bottom
+    TSession *ts = [[TSession alloc] initWithDirectory:dir shell:@"/bin/sh" error:nil];
+    TerminalView *tv = [[TerminalView alloc] initWithSession:ts];
+    tv.frame = NSMakeRect(0, 0, 560, 300);
+    win.contentView = tv;
+    [win makeFirstResponder:tv];
+    [ts writeString:@"printf 'term-ok'\n"];
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    while (CFAbsoluteTimeGetCurrent() - t0 < 5 && ![[ts.screen textOfRow:0] containsString:@"term-ok"]) drain(0.05);
+    CHECK([[ts.screen textOfRow:0] containsString:@"term-ok"], "the shell echoed through the view");
+    [tv displayIfNeeded];
+    NSBitmapImageRep *rep = [tv bitmapImageRepForCachingDisplayInRect:tv.bounds];
+    [tv cacheDisplayInRect:tv.bounds toBitmapImageRep:rep];
+    CGFloat sx = rep.pixelsWide / tv.bounds.size.width;
+    NSColor *bg = [[rep colorAtX:(NSInteger)(500 * sx) y:(NSInteger)(rep.pixelsHigh * 0.5)] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    unsigned inked = 0;                        // glyphs anywhere in the upper-left quadrant
+    for (NSInteger px = 8; px < 400; px += 12)
+        for (NSInteger py = 6; py < 200; py += 10) {
+            NSColor *c = [[rep colorAtX:px y:py] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+            if (fabs(c.redComponent - bg.redComponent) + fabs(c.greenComponent - bg.greenComponent) + fabs(c.blueComponent - bg.blueComponent) > 0.15) inked++;
+        }
+    CHECK(inked > 4, "the echoed text is drawn (%u inked samples)", inked);
+    // keys: control keys arrive as text commands from the input context; the view encodes them.
+    // cat shows what it received: ^[ for an escape, and the termios echo handles the rest.
+    [ts writeString:@"cat -v\n"];
+    drain(0.3);
+    for (NSString *ch in @[@"a", @"b", @"c"]) {
+        NSEvent *k = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0
+                                     timestamp:0 windowNumber:win.windowNumber context:nil characters:ch charactersIgnoringModifiers:ch isARepeat:NO keyCode:0];
+        [tv keyDown:k];
+    }
+    drain(0.2);
+    NSUInteger before = [ts.screen cursorRow];
+    NSString *row0 = [ts.screen textOfRow:[ts.screen cursorRow]];
+    CHECK([row0 containsString:@"abc"], "typing echoes: %s", row0.UTF8String);
+    NSEvent *bs = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0
+                                  timestamp:0 windowNumber:win.windowNumber context:nil characters:@"\x7f" charactersIgnoringModifiers:@"\x7f" isARepeat:NO keyCode:51];
+    [tv keyDown:bs];
+    drain(0.2);
+    row0 = [ts.screen textOfRow:[ts.screen cursorRow]];
+    CHECK(([row0 containsString:@"ab"] && ![row0 containsString:@"abc"]), "delete erased a character: %s", row0.UTF8String);
+    NSEvent *enter = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0
+                                     timestamp:0 windowNumber:win.windowNumber context:nil characters:@"\r" charactersIgnoringModifiers:@"\r" isARepeat:NO keyCode:36];
+    [tv keyDown:enter];
+    drain(0.2);
+    CHECK([ts.screen cursorRow] >= before + 1, "enter moved down (the echo and cat each add a line): %lu → %lu", (unsigned long)before, (unsigned long)[ts.screen cursorRow]);
+    [ts writeString:@"xyz\x1b[A\n"];          // an escape sequence typed into cat: it prints ^[A
+    drain(0.3);
+    __block NSString *all = @"";
+    for (NSUInteger r = 0; r < [ts.screen rows]; r++) all = [all stringByAppendingString:[ts.screen textOfRow:r]];
+    CHECK([all containsString:@"^[[A"], "the arrow's escape bytes reached cat -v: %s", [all stringByReplacingOccurrencesOfString:@"\n" withString:@"|"].UTF8String);
+    [ts writeString:@"\x03"];
+    drain(0.2);
+    // keys: plain characters go to the shell
+    [ts writeString:@"cat > /dev/null\n"];
+    drain(0.2);
+    NSEvent *x = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0
+                                 timestamp:0 windowNumber:win.windowNumber context:nil characters:@"x" charactersIgnoringModifiers:@"x" isARepeat:NO keyCode:7];
+    [tv keyDown:x];
+    drain(0.2);
+    CHECK(![ts.screen textOfRow:2].length || YES, "typed into cat without crash");
+    [ts writeString:@"\x03"];               // ^C ends cat
+    drain(0.2);
+    CHECK(ts.screen.cols >= 40 && ts.screen.rows >= 10, "the view resized the PTY (%lux%lu)", (unsigned long)ts.screen.cols, (unsigned long)ts.screen.rows);
+    [tv copy:nil];                          // no selection: an interrupt
+    [tv clear:nil];
+    [tv paste:nil];
+    [ts terminate];
+    t0 = CFAbsoluteTimeGetCurrent();
+    while (!ts.exited && CFAbsoluteTimeGetCurrent() - t0 < 3) drain(0.05);
+    CHECK(ts.exited, "terminated");
+
+    // placement: tab and panel keep the same session
+    NSWindow *ccWin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 700, 480) styleMask:NSWindowStyleMaskTitled
+                                                  backing:NSBackingStoreBuffered defer:YES];
+    ContentController *cc = [ContentController new];
+    cc.alertHandler = ^NSModalResponse(NSAlert *a) { return NSAlertThirdButtonReturn; };
+    ccWin.contentView = cc.view;
+    [ccWin makeKeyAndOrderFront:nil];
+    drain(0.1);
+    [cc openTerminalAt:dir asTab:YES];
+    CHECK(cc.tabCount == 1 && cc.activeTerminal != nil && [cc.activeTerminal.directory isEqualToString:dir], "a terminal tab");
+    TSession *tabSession = cc.activeTerminal;
+    CHECK([cc.currentTitle containsString:dir.lastPathComponent], "the tab is named after the directory: %s", cc.currentTitle.UTF8String);
+    [cc moveActiveTerminalToPanel];
+    CHECK(cc.tabCount == 0 && cc.terminalPanelVisible && cc.activeTerminal == tabSession, "moved to the panel, the session survived");
+    [cc moveActivePanelTerminalToTab];
+    CHECK(cc.tabCount == 1 && cc.activeTerminal == tabSession && !cc.terminalPanelVisible, "back to a tab");
+    [cc openTerminalAt:nil asTab:NO];
+    CHECK(cc.terminalCount == 2 && cc.terminalPanelVisible, "a second terminal in the panel");
+    // the panel strip: a ✕ per terminal, closes without prompting
+    NSView *panel = nil;
+    for (NSView *v in cc.view.subviews) if ([NSStringFromClass(v.class) containsString:@"TerminalPanel"]) panel = v;
+    CHECK(panel != nil && [((TerminalPanel *)panel) tabCount] == 1, "the panel shows its terminal (%lu)", (unsigned long)[((TerminalPanel *)panel) tabCount]);
+    [(TerminalPanel *)panel closeTabAtIndex:0];
+    CHECK(cc.terminalCount == 1 && !cc.terminalPanelVisible, "the ✕ closed its terminal; an empty panel hides itself (t %lu, panel %d)",
+          (unsigned long)cc.terminalCount, (int)cc.terminalPanelVisible);
+    // drag & drop between the tab bar and the panel: a token round-trips to the session
+    NSString *token = [TSession registerDragSession:tabSession];
+    CHECK([TSession sessionForDragToken:token] == tabSession, "the drag token maps back to the session");
+    [cc moveTerminalToTab:tabSession];                       // already a tab: just activates it
+    CHECK(cc.tabCount == 1 && cc.activeTerminal == tabSession, "dropping a terminal on the tab bar keeps it");
+    NSButton *tbtn = [cc valueForKeyPath:@"_statusBar.terminalButton"];
+    CHECK(tbtn && tbtn.frame.size.width > 0, "the status bar has a terminal button");
+    // a new terminal starts in the workspace (the provider), not in the home directory
+    cc.terminalDirectoryProvider = ^NSString * { return @"/private/tmp"; };
+    TSession *prov = [cc openTerminalAt:nil asTab:NO];
+    CHECK([prov.directory isEqualToString:@"/private/tmp"], "new terminals follow the workspace provider: %s", prov.directory.UTF8String);
+    cc.terminalDirectoryProvider = nil;
+    cc.alertHandler = ^NSModalResponse(NSAlert *a) { return NSAlertFirstButtonReturn; };
+    [cc closeTerminal:prov];
+    CHECK(cc.terminalCount == 1, "cleaned up the provider terminal");
+    // a pathless tab survives the saved session and the external-change check
+    NSDictionary *st = [cc sessionState];
+    CHECK([st[@"tabs"] count] == 0, "terminals are not in the saved session");
+    [cc checkExternalChanges];
+    CHECK(cc.tabCount == 1 && cc.activeTerminal == tabSession, "no crash from a pathless tab");
+    [cc closeTerminal:tabSession];
+    CHECK(cc.terminalCount == 0 && cc.tabCount == 0, "all gone (t %lu, tabs %lu, exited %d)", (unsigned long)cc.terminalCount, (unsigned long)cc.tabCount, (int)tabSession.exited);
+    [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
 }
