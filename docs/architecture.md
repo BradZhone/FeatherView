@@ -18,7 +18,7 @@ src/
   Preview/   Markdown parser and native renderer, HTML preview, table, tree and notebook views and their models
   Viewers/   Image, SVG, PDF, hex, SQLite and archive viewers
 Resources/   <lang>.lproj string tables
-tests/       Four test programs: Foundation-only logic, Markdown parsing, editing commands, live views in an offscreen window
+tests/       Five test programs: Foundation-only logic, Markdown parsing, terminal core, editing commands, live views in an offscreen window
 tools/       Application icon, drawn in code
 scripts/     Installation, release packaging, benchmark, localization check, Info.plist document types
 docs/        This document and the benchmark
@@ -42,6 +42,8 @@ Modules include each other's headers directly. The Makefile adds an `-I` flag fo
 
 **Multiple cursors are one change, not many.** The primary cursor is the editor's `_anchor` / `_caret`, so input methods, VoiceOver and find keep their single-cursor view; the others are a sorted array kept free of overlaps. Every command produces a list of replacements (`EditList`), which `PieceTable applyEdits:` applies in a single pass over the pieces and line starts, and the wrap table is updated in one pass that re-measures only the touched lines. The undo record is one batch per change, with the cursors before and after; consecutive keystrokes are merged into the same batch, so typing a word at 10,000 cursors is one undo step of 10,000 edits rather than 70,000. Piece lookups use a binary search over piece offsets, since many cursors leave many pieces.
 
+**The terminal is a PTY, a parser and a grid.** `TSession` opens a pseudo-terminal and runs the login shell; output is read on a background queue and parsed on the main thread in bounded chunks (256 KB per run-loop turn), so a program dumping megabytes never blocks the UI and the screen stays consistent with what the view draws. `VTEscape` is an escape-sequence state machine (CSI, OSC, DEC private modes, UTF-8 across feed boundaries) driving `TScreen`, a cell grid with a scroll region, deferred autowrap, an alternate screen and a 5,000-line scrollback. `TerminalView` draws grid runs with CoreText like the editor, sends keys and mouse events to the PTY, and hosts the input method at the cursor. Sessions are independent of views: the panel and a tab are two attachments of the same session, so moving one between them keeps the process and its output. Everything but the view is pure Foundation, which is why `build/terminal_tests` can drive a real shell without AppKit.
+
 **Folded lines have no rows.** Folding reuses the soft-wrap row table: a hidden line counts zero rows, so drawing, hit testing and moving up and down skip it without knowing about folds, and the table stays in use while anything is folded even with wrapping off. Before an edit each fold is turned into two offsets (the end of its first line and of its last hidden line), moved by the edits before them, and turned back into lines afterwards; an edit that reaches into the hidden lines drops the fold, and the incremental row update then gives way to a rebuild.
 
 **The workspace is watched with FSEvents.** `FileWatcher` reports changes under the workspace folder, coalesced over half a second and ignoring skipped folders such as `.git` and `node_modules`. The tree then re-reads the folders it has already shown on a background queue and reloads only if a listing changed.
@@ -63,9 +65,10 @@ make test
 - `scripts/l10n.py`: translation coverage and format-specifier consistency.
 - `build/tests`: logic tests for the piece table, traversal and filtering, search options, and CSV, JSON and notebook parsing.
 - `build/markdown_tests`: 91 Markdown cases, including front matter, CommonMark examples for emphasis and links, time limits for pathological input, and nesting caps.
+- `build/terminal_tests`: escape parsing into a grid (colors, regions, alternate screen, wide chars, UTF-8 recovery), random-byte fuzzing with a time bound, and a real `/bin/sh` on a PTY (echo, exit codes, a 20,000-line dump, termination).
 - `build/editing_tests`: multiple cursors, line commands and typing aids, written as text with the cursors marked in it (`"a|b\nc[d|]"`), plus a fuzz test of the wrap table under multi-cursor edits and a 10,000-cursor timing.
 - `build/editor_tests`: drives the real editor, file tree, tabs, previews and viewers in an offscreen window, checking behaviour, pixels and performance — for example, "a minimap frame on a 100,000-line file takes under 16 ms" and "after every edit, the incrementally maintained wrap table equals a full rebuild". It also renders the menus and status bar in both languages.
 
-`make sanitize` builds the four test programs with AddressSanitizer and UndefinedBehaviorSanitizer and runs them; `make analyze` runs the clang static analyzer and fails on any finding. Both were clean for 0.20.0.
+`make sanitize` builds the four test programs with AddressSanitizer and UndefinedBehaviorSanitizer and runs them; `make analyze` runs the clang static analyzer and fails on any finding. Both were clean for 0.21.0.
 
 The tests never touch the user's clipboard, Trash, untitled-document backups or real settings: they use a private pasteboard, an injectable trash handler and temporary directories.

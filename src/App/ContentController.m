@@ -3,6 +3,10 @@
 #import "TextEditorView.h"
 #import "PieceTable.h"
 #import "Viewers.h"
+#import "TSession.h"
+#import <signal.h>
+#import "TerminalView.h"
+#import "TerminalPanel.h"
 #import "FileOps.h"
 #import "TabBarView.h"
 #import "MarkupView.h"
@@ -34,12 +38,18 @@ static const NSUInteger kAutoSaveMaxBytes = 32u << 20;     // bigger files only 
 @property (nonatomic) NSUInteger restoreLine, lastEdit;
 @property (nonatomic, strong) NSTimer *saveTimer;
 @property (nonatomic) BOOL untitled;                  // path is a backup file, title is "未命名-N"
+@property (nonatomic, strong) TSession *terminal;      // a shell tab: no file, the session is the state
 @property (nonatomic) BOOL discarded;                 // the user chose "不保存"
 @property (nonatomic, copy) NSString *title;
 @end
 @implementation Doc @end
 
-static NSString *docName(Doc *d) { return d.untitled ? d.title : d.path.lastPathComponent; }
+static NSString *docName(Doc *d) { return d.terminal || d.untitled ? d.title : d.path.lastPathComponent; }
+
+static NSString *terminalTitle(TSession *t) {
+    NSString *dir = t.screen.cwd.length ? t.screen.cwd : t.directory;
+    return dir.lastPathComponent ?: @"/";
+}
 
 // An untitled tab counts as unsaved whenever it has text, even though its backup is up to date.
 static BOOL untitledHasText(Doc *d) {
@@ -60,7 +70,7 @@ static NSString *sizeString(off_t n) {
 }
 
 @interface PaneView : NSView
-@property (nonatomic) NSView *tabBar, *content, *findBar, *statusBar, *empty, *layoutSwitch;
+@property (nonatomic) NSView *tabBar, *content, *findBar, *statusBar, *empty, *layoutSwitch, *terminalPanel;
 @property (nonatomic) BOOL hasTabs, showsLayoutSwitch;
 @end
 
@@ -76,17 +86,25 @@ static NSString *sizeString(off_t n) {
 }
 - (void)layoutPane {
     NSRect b = self.bounds;
-    _tabBar.hidden = _statusBar.hidden = _content.hidden = !_hasTabs;
+    BOOL panelVisible = !_terminalPanel.hidden;
+    _tabBar.hidden = _content.hidden = !_hasTabs;
+    _statusBar.hidden = !_hasTabs && !panelVisible;    // the terminal button lives here
     _empty.hidden = _hasTabs;
     _layoutSwitch.hidden = !(_hasTabs && _showsLayoutSwitch);
-    if (!_hasTabs) { _findBar.hidden = YES; _empty.frame = b; return; }
+    CGFloat panelH = panelVisible ? MIN(_terminalPanel.frame.size.height, MAX(80, b.size.height - kTabH - kStatusH - 40)) : 0;
+    _terminalPanel.frame = NSMakeRect(0, b.size.height - kStatusH - panelH, b.size.width, panelH);
+    if (!_hasTabs) {                                   // no tabs: the welcome view, minus the terminal panel
+        _findBar.hidden = YES;
+        _empty.frame = NSMakeRect(0, 0, b.size.width, MAX(0, b.size.height - panelH));
+        return;
+    }
     CGFloat y = kTabH, sw = _layoutSwitch.hidden ? 0 : _layoutSwitch.frame.size.width + 16;
     _tabBar.frame = NSMakeRect(0, 0, b.size.width - sw, kTabH);
     if (sw) _layoutSwitch.frame = (NSRect){{b.size.width - sw + 8, floor((kTabH - _layoutSwitch.frame.size.height) / 2)}, _layoutSwitch.frame.size};
     self.needsDisplay = YES;
     if (!_findBar.hidden) { _findBar.frame = NSMakeRect(0, y, b.size.width, kFindH); y += kFindH; }
     _statusBar.frame = NSMakeRect(0, b.size.height - kStatusH, b.size.width, kStatusH);
-    _content.frame = NSMakeRect(0, y, b.size.width, MAX(0, b.size.height - y - kStatusH));
+    _content.frame = NSMakeRect(0, y, b.size.width, MAX(0, b.size.height - y - kStatusH - panelH));
 }
 @end
 
@@ -102,6 +120,7 @@ static NSString *sizeString(off_t n) {
 @interface StatusBarView : NSView
 @property (nonatomic) NSTextField *label;
 @property (nonatomic) NSView *tools;
+@property (nonatomic) NSButton *terminalButton;
 @end
 
 @implementation StatusBarView
@@ -118,8 +137,10 @@ static NSString *sizeString(off_t n) {
     CGFloat tw = _tools ? _tools.fittingSize.width : 0;
     if (tw > b.size.width - 160) tw = 0;               // too narrow: keep the status text, drop the tools
     _tools.hidden = tw == 0;
-    if (tw) _tools.frame = NSMakeRect(b.size.width - tw - 4, 1, tw, b.size.height - 2);
-    _label.frame = NSMakeRect(10, 3, MAX(0, b.size.width - 20 - (tw ? tw + 8 : 0)), 16);
+    CGFloat tb = _terminalButton.frame.size.width + 6;
+    if (tw) _tools.frame = NSMakeRect(b.size.width - tw - tb - 4, 1, tw, b.size.height - 2);
+    _terminalButton.frame = NSMakeRect(b.size.width - tb, 1, _terminalButton.frame.size.width, b.size.height - 2);
+    _label.frame = NSMakeRect(10, 3, MAX(0, b.size.width - 20 - tb - (tw ? tw + 8 : 0)), 16);
 }
 @end
 
@@ -159,6 +180,11 @@ static NSString *sizeString(off_t n) {
     StatusBarView *_statusBar;
     NSMutableArray<Doc *> *_docs;
     Doc *_active;
+    NSMutableArray<TSession *> *_panelTerminals;
+    NSInteger _activePanel;
+    TerminalPanel *_terminalPanel;
+    CGFloat _terminalPanelHeight;
+    BOOL _lastTerminalWasTab;
     NSMutableArray<NSString *> *_closed;
     BOOL _closingAll;
     NSUInteger _viewerLoads;                     // tests: how many viewers were built
@@ -206,6 +232,14 @@ static NSString *sizeString(off_t n) {
     _status.lineBreakMode = NSLineBreakByTruncatingTail;
     [bar addSubview:_status];
     bar.label = _status;
+    NSButton *tbtn = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"terminal" accessibilityDescription:FTL(@"Show Terminal Panel")]
+                                         target:NSApp.delegate action:@selector(toggleTerminalPanel:)];
+    tbtn.bordered = NO;
+    tbtn.toolTip = FTL(@"Show Terminal Panel");
+    [tbtn sizeToFit];
+    bar.terminalButton = tbtn;
+    [bar addSubview:tbtn];
+    [bar resizeSubviewsWithOldSize:bar.bounds.size];
     _statusBar = bar;
 
     NSArray *icons = @[@"doc.plaintext", @"rectangle.split.2x1", @"eye"];
@@ -221,10 +255,27 @@ static NSString *sizeString(off_t n) {
     [sw sizeToFit];
     sw.hidden = YES;
 
+    _panelTerminals = [NSMutableArray array];
+    _activePanel = -1;
+    _terminalPanelHeight = 260;
     _autoSaveDelay = 1.0;
     _showsMinimap = YES;
-    _pane.tabBar = _tabBar; _pane.findBar = find; _pane.statusBar = bar; _pane.layoutSwitch = sw;
-    for (NSView *v in @[_tabBar, find, bar, sw]) [_pane addSubview:v];
+    _terminalPanel = [[TerminalPanel alloc] initWithFrame:NSMakeRect(0, 0, 800, _terminalPanelHeight)];
+    _terminalPanel.hidden = YES;
+    __weak typeof(self) weakSelf = self;
+    _terminalPanel.onSelect = ^(TSession *t) { ContentController *me = weakSelf; if (!me) return; me->_activePanel = (NSInteger)[me->_panelTerminals indexOfObject:t]; [me attachPanelTerminal]; };
+    _terminalPanel.onClose = ^(TSession *t) { [weakSelf closeTerminal:t]; };
+    _terminalPanel.onNew = ^{ [weakSelf openTerminalAt:nil asTab:NO]; };
+    _terminalPanel.onHide = ^{ [weakSelf setTerminalPanelVisible:NO focus:NO]; };
+    _terminalPanel.onDropTerminal = ^(NSString *token) { [weakSelf moveTerminalToPanel:[TSession sessionForDragToken:token]]; };
+    _terminalPanel.onHeightChange = ^(CGFloat h) {
+        ContentController *me = weakSelf;
+        if (!me) return;
+        me->_terminalPanelHeight = h;
+        [me->_pane layoutPane];
+    };
+    _pane.tabBar = _tabBar; _pane.findBar = find; _pane.statusBar = bar; _pane.layoutSwitch = sw; _pane.terminalPanel = _terminalPanel;
+    for (NSView *v in @[_tabBar, find, bar, sw, _terminalPanel]) [_pane addSubview:v];
     self.emptyView = [[NSView alloc] initWithFrame:NSZeroRect];
     return self;
 }
@@ -233,7 +284,7 @@ static NSString *sizeString(off_t n) {
     [_emptyView removeFromSuperview];
     _emptyView = v;
     _pane.empty = v;
-    [_pane addSubview:v];
+    [_pane addSubview:v positioned:NSWindowBelow relativeTo:_pane.terminalPanel ?: nil];   // never over the terminal panel
     [_pane layoutPane];
 }
 
@@ -344,6 +395,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 
 - (void)loadViewer:(Doc *)d {
     _viewerLoads++;
+    if (d.mode == ViewerTerminal) { d.viewer = [[TerminalView alloc] initWithSession:d.terminal]; d.status = @""; return; }
     struct timespec mt = {0}; off_t sz = 0;
     d.missing = !statPath(d.path, &mt, &sz);
     if (d.missing) { d.viewer = [self placeholder:FTL(@"The file no longer exists")]; d.status = FTL(@"Deleted"); return; }
@@ -635,6 +687,8 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 
 // Which kind of zoom applies right now: the image / PDF itself, the rendered preview, or the editor font.
 - (NSInteger)zoomTarget {
+    if (_active.terminal) return 6;
+    if (!_active && [self terminalPanelVisible]) return 6;
     if ([_active.viewer conformsToProtocol:@protocol(FTZoomable)]) return 1;
     if ([_active.viewer isKindOfClass:TreePreview.class] || [_active.viewer isKindOfClass:SQLitePreview.class] ||
         [_active.viewer isKindOfClass:ArchivePreview.class]) return 5;
@@ -677,6 +731,13 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
             FTSetDataFontSize(dir ? FTDataFontSize() + dir : 12);
             [ud setDouble:FTDataFontSize() forKey:@"dataFontSize"];
             [self flashStatus:[NSString stringWithFormat:FTL(@"Table font size %.0f"), FTDataFontSize()]];
+            break;
+        }
+        case 6: {
+            TerminalView *tv = [_active.viewer isKindOfClass:TerminalView.class] ? (TerminalView *)_active.viewer : (TerminalView *)[self panelTerminalView];
+            CGFloat s = dir ? tv.fontSize + dir : 13;
+            tv.fontSize = s;
+            [self flashStatus:[NSString stringWithFormat:FTL(@"Terminal font size %.0f"), s]];
             break;
         }
         case 4: {
@@ -837,11 +898,12 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
     BOOL hadFocus = [_pane.window.firstResponder isKindOfClass:NSView.class] &&
                     [(NSView *)_pane.window.firstResponder isDescendantOf:_pane];
     if (d.untitled && !ask && !d.discarded) [self autoSave:d];          // keep the latest text
-    if (!d.untitled) {
+    if (!d.untitled && d.path) {
         [_closed addObject:d.path];
         if (_closed.count > 30) [_closed removeObjectAtIndex:0];
     }
     [_docs removeObjectAtIndex:i];
+    if (d.terminal) { [d.terminal terminate]; d.terminal.onTitleChange = nil; }
     if (_pane.content && _pane.content == d.viewer) _pane.content = nil;
     [self releaseViewer:d];
     if (d.untitled && (ask || d.discarded)) [NSFileManager.defaultManager removeItemAtPath:d.path error:nil];
@@ -858,6 +920,176 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 }
 
 - (BOOL)closeActive { return _active ? [self closeDoc:_active ask:YES] : NO; }
+
+#pragma mark Terminals
+
+- (nullable TSession *)openTerminalAt:(NSString *)directory asTab:(BOOL)asTab {
+    directory = directory ?: (self.terminalDirectoryProvider ? self.terminalDirectoryProvider() : nil);
+    NSString *err = nil;
+    TSession *t = [[TSession alloc] initWithDirectory:directory shell:nil error:&err];
+    if (!t) { _status.stringValue = err ?: FTL(@"The terminal could not be started"); return nil; }
+    __weak typeof(self) weakSelf = self;
+    t.onTitleChange = ^{ [weakSelf terminalTitlesChanged]; };
+    _lastTerminalWasTab = asTab;
+    if (asTab) {
+        Doc *d = [Doc new];
+        d.mode = ViewerTerminal;
+        d.terminal = t;
+        d.title = terminalTitle(t);
+        [_docs addObject:d];
+        [self reloadTabs];
+        [self activate:d focus:YES];
+        [self stateChanged];
+    } else {
+        [_panelTerminals addObject:t];
+        _activePanel = (NSInteger)_panelTerminals.count - 1;
+        [self setTerminalPanelVisible:YES focus:YES];
+    }
+    return t;
+}
+
+- (NSUInteger)terminalCount {
+    NSUInteger n = _panelTerminals.count;
+    for (Doc *d in _docs) if (d.terminal) n++;
+    return n;
+}
+
+- (NSArray<TSession *> *)terminals {
+    NSMutableArray *out = _panelTerminals.mutableCopy;
+    for (Doc *d in _docs) if (d.terminal) [out addObject:d.terminal];
+    return out;
+}
+
+- (BOOL)terminalPanelVisible { return !_terminalPanel.hidden; }
+
+- (void)setTerminalPanelVisible:(BOOL)visible focus:(BOOL)focus {
+    if (visible == !_terminalPanel.hidden) { if (visible && focus) [self attachPanelTerminal]; return; }
+    _terminalPanel.hidden = !visible;
+    _statusBar.terminalButton.contentTintColor = visible ? NSColor.controlAccentColor : NSColor.secondaryLabelColor;
+    if (visible) {
+        if (_activePanel >= (NSInteger)_panelTerminals.count || _activePanel < 0) _activePanel = _panelTerminals.count ? (NSInteger)_panelTerminals.count - 1 : -1;
+        NSRect f = _terminalPanel.frame;
+        f.size.height = _terminalPanelHeight;
+        _terminalPanel.frame = f;
+        [self attachPanelTerminal];
+        NSView *v = [self panelTerminalView];
+        if (focus && v) [_pane.window makeFirstResponder:v];
+    }
+    [_pane layoutPane];
+    [self stateChanged];
+}
+
+// The active panel session's terminal view.
+- (NSView *)panelTerminalView { return _terminalPanel.currentView; }
+
+// Puts the active panel session's view into the panel and refreshes the strip.
+- (void)attachPanelTerminal {
+    [_terminalPanel refresh:_panelTerminals active:_activePanel >= 0 && _activePanel < (NSInteger)_panelTerminals.count ? _panelTerminals[_activePanel] : nil];
+    TSession *t = _activePanel >= 0 && _activePanel < (NSInteger)_panelTerminals.count ? _panelTerminals[_activePanel] : nil;
+    [_terminalPanel setContentView:t ? [[TerminalView alloc] initWithSession:t] : nil];
+    [_pane layoutPane];
+}
+
+- (void)terminalTitlesChanged {
+    for (Doc *d in _docs) if (d.terminal) d.title = terminalTitle(d.terminal);
+    [self reloadTabs];
+    if ([_active.terminal isEqual:nil]) { }
+    [self stateChanged];
+}
+
+// Moving a session between the tab bar and the panel never touches the process; drag & drop uses these.
+- (void)moveTerminalToPanel:(TSession *)t {
+    if (!t) return;
+    Doc *d = nil;
+    for (Doc *x in _docs) if (x.terminal == t) d = x;
+    if (d) {
+        t.onTitleChange = nil;
+        NSUInteger i = [_docs indexOfObject:d];
+        [_docs removeObjectAtIndex:i];
+        if (_pane.content == d.viewer) _pane.content = nil;
+        [d.viewer removeFromSuperview];
+        d.viewer = nil;
+        if (d == _active) {
+            _active = nil;
+            if (_docs.count) [self activate:_docs[MIN(i, _docs.count - 1)] focus:NO];
+            else { [self installActive:NO]; if (self.onActivate) self.onActivate(nil); }
+        }
+    } else if ([_panelTerminals containsObject:t]) {
+        return;                                            // already in the panel
+    }
+    [_panelTerminals addObject:t];
+    _activePanel = (NSInteger)_panelTerminals.count - 1;
+    [self setTerminalPanelVisible:YES focus:NO];
+    [self reloadTabs];
+    [self stateChanged];
+}
+
+- (void)moveTerminalToTab:(TSession *)t {
+    if (!t) return;
+    for (Doc *x in _docs) if (x.terminal == t) { [self activate:x focus:YES]; return; }   // already a tab
+    [_panelTerminals removeObject:t];
+    _activePanel = MIN(_activePanel, (NSInteger)_panelTerminals.count - 1);
+    t.onTitleChange = ^{ [self terminalTitlesChanged]; };
+    Doc *d = [Doc new];
+    d.mode = ViewerTerminal;
+    d.terminal = t;
+    d.title = terminalTitle(t);
+    [_docs addObject:d];
+    if (!_panelTerminals.count) [self setTerminalPanelVisible:NO focus:NO];
+    else [self attachPanelTerminal];
+    [self reloadTabs];
+    [self activate:d focus:YES];
+    [self stateChanged];
+}
+
+- (void)moveActiveTerminalToPanel { [self moveTerminalToPanel:_active.terminal]; }
+
+- (void)moveActivePanelTerminalToTab {
+    if (_activePanel < 0 || _activePanel >= (NSInteger)_panelTerminals.count) return;
+    [self moveTerminalToTab:_panelTerminals[_activePanel]];
+}
+
+- (nullable TSession *)activeTerminal {
+    if (_active.terminal) return _active.terminal;
+    return _activePanel >= 0 && _activePanel < (NSInteger)_panelTerminals.count ? _panelTerminals[_activePanel] : nil;
+}
+
+- (void)closeTerminal:(TSession *)t {
+    if (!t) return;
+    [t terminate];
+    [_panelTerminals removeObject:t];
+    if (_activePanel >= (NSInteger)_panelTerminals.count) _activePanel = (NSInteger)_panelTerminals.count - 1;
+    Doc *d = nil;
+    for (Doc *x in _docs) if (x.terminal == t) d = x;
+    if (d) [self closeDoc:d ask:NO];
+    if (_panelTerminals.count) [self attachPanelTerminal];
+    else [self setTerminalPanelVisible:NO focus:NO];
+    [self stateChanged];
+}
+
+// Quit path: end every live session and give them a moment to exit, so nothing outlives the app.
+// The last resort is SIGKILL right here: shells with background jobs (gitstatusd …) ignore SIGHUP,
+// and the SIGKILL timer inside terminate would die with the app.
+- (void)shutdownTerminals {
+    NSMutableArray *live = [NSMutableArray array];
+    for (TSession *t in [self terminals]) {
+        if (t.exited) continue;
+        [t terminate];
+        [live addObject:t];
+    }
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    while (CFAbsoluteTimeGetCurrent() - t0 < 1.5) {
+        NSMutableArray *still = [NSMutableArray array];
+        for (TSession *t in live) if (!t.exited) [still addObject:t];
+        if (!still.count) return;
+        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        if (CFAbsoluteTimeGetCurrent() - t0 >= 1.5)
+            for (TSession *t in still) kill(t.pid, SIGKILL);
+    }
+}
+
+- (CGFloat)terminalPanelHeight { return _terminalPanelHeight; }
+- (void)setTerminalPanelHeight:(CGFloat)h { _terminalPanelHeight = MIN(MAX(h, 120), 800); [self->_pane layoutPane]; }
 
 - (BOOL)closeOthers {
     Doc *keep = _active;
@@ -959,6 +1191,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 - (NSDictionary *)sessionState {
     NSMutableArray *tabs = [NSMutableArray array];
     for (Doc *d in _docs) {
+        if (d.terminal) continue;                          // shells don't survive a relaunch
         NSUInteger line = d.editor ? d.editor.caretLine : d.restoreLine;
         if (d.untitled) [tabs addObject:@{@"path": d.path, @"untitled": d.title, @"line": @(line)}];
         else [tabs addObject:@{@"path": d.path, @"preview": @(d.preview), @"line": @(line)}];
@@ -996,7 +1229,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 - (void)checkExternalChanges {
     BOOL changed = NO;
     for (Doc *d in _docs.copy) {
-        if (!d.viewer || d.untitled) continue;                 // not loaded: read fresh on activation; backups are ours
+        if (!d.viewer || d.untitled || d.terminal) continue;   // not loaded / ours / no file
         struct timespec mt; off_t sz;
         BOOL exists = statPath(d.path, &mt, &sz);
         if (!exists) { if (!d.missing) { d.missing = YES; changed = YES; } continue; }
@@ -1365,6 +1598,12 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
     __weak ContentController *weakSelf = self;
     _tabBar.onSelect = ^(NSInteger i) { ContentController *me = weakSelf; if (me && i < (NSInteger)me->_docs.count) [me activate:me->_docs[i] focus:YES]; };
     _tabBar.onClose = ^(NSInteger i) { ContentController *me = weakSelf; if (me && i < (NSInteger)me->_docs.count) [me closeDoc:me->_docs[i] ask:YES]; };
+    _tabBar.dragTokenForIndex = ^NSString *(NSInteger i) {
+        ContentController *me = weakSelf;
+        if (!me || i < 0 || i >= (NSInteger)me->_docs.count) return nil;
+        return me->_docs[i].terminal ? [TSession registerDragSession:me->_docs[i].terminal] : nil;
+    };
+    _tabBar.dropTerminal = ^(NSString *token) { [weakSelf moveTerminalToTab:[TSession sessionForDragToken:token]]; };
     _tabBar.onPin = ^(NSInteger i) {
         ContentController *me = weakSelf;
         if (!me || i >= (NSInteger)me->_docs.count) return;

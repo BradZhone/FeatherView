@@ -483,3 +483,15 @@
 "Show whitespace" = "显示空白字符（空格显示为圆点，制表符显示为箭头）";
 "Expand Selection" = "扩大选区";
 "Shrink Selection" = "缩小选区";
+
+/* Terminal */
+"Show Terminal Panel" = "显示终端面板";
+"New Terminal" = "新建终端";
+"Open Terminal Here" = "在此处打开终端";
+"Terminal font size %.0f" = "终端字号 %.0f";
+"Clear" = "清屏";
+"ended" = "已结束";
+"The terminal could not be started" = "终端无法启动";
+
+/* Terminal panel controls */
+"Hide Terminal Panel" = "隐藏终端面板";

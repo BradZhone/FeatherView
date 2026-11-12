@@ -1,6 +1,7 @@
 #import "AppDelegate.h"
 #import "Localization.h"
 #import "TextEditorView.h"
+#import "TSession.h"
 #import "WorkspaceSearch.h"
 #import "FileOps.h"
 #import "MarkupView.h"
@@ -22,6 +23,7 @@ static const CGFloat kSidebarW = 260;
 
 - (void)applicationWillFinishLaunching:(NSNotification *)n {
     _pendingFiles = _pendingFiles ?: [NSMutableArray array];
+    [TSession sweepOrphanedShells];                  // shells left by an instance that exited earlier
     [FTSettings.shared apply];
     [AppDelegate applyAppearance:FTSettings.shared.appearance];          // before the window draws
     [self buildMenu];
@@ -138,9 +140,10 @@ static const CGFloat kSidebarW = 260;
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app { return YES; }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app {
-    if (_sessionSaved) return NSTerminateNow;            // window close already asked
+    if (_sessionSaved) { [_content shutdownTerminals]; return NSTerminateNow; }   // window close already asked
     if (![_content confirmCloseAll]) return NSTerminateCancel;
     [self saveSession];
+    [_content shutdownTerminals];                        // end every shell before the process exits
     return NSTerminateNow;
 }
 
@@ -317,6 +320,11 @@ static const CGFloat kSidebarW = 260;
     [_sidebar addSubview:_search.view];
 
     _content = [ContentController new];
+    __weak typeof(self) weakApp = self;
+    _content.terminalDirectoryProvider = ^NSString * {
+        AppDelegate *me = weakApp;
+        return me ? me->_tree.rootPath ?: NSHomeDirectory() : NSHomeDirectory();
+    };
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
     [ud registerDefaults:@{@"autoSaveMode": @(AutoSaveAfterDelay), @"autoSaveDelay": @1.0, @"showMinimap": @YES}];
     _content.previewEnabled = ![ud boolForKey:@"disablePreviewTabs"];

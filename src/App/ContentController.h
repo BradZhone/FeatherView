@@ -1,6 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import "FileKind.h"
-@class TextEditorView, PDFPreview, ImagePreviewView;
+@class TextEditorView, PDFPreview, ImagePreviewView, TSession;
 
 typedef NS_ENUM(NSInteger, AutoSaveMode) {
     AutoSaveOff = 0,
@@ -52,6 +52,23 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 // Untitled documents (⌘N): "未命名-N" tabs whose text lives in a backup file until the user saves it somewhere.
 // They stay with the workspace (switching away or quitting keeps them, nothing is asked); only closing such a
 // tab asks where to save it. currentPath is nil for them.
+// Terminals: a tab (like a document tab) or the bottom panel. The session survives placement
+// switches; closing one ends its process without asking.
+- (nullable TSession *)openTerminalAt:(nullable NSString *)directory asTab:(BOOL)asTab;
+@property (nonatomic, readonly) NSArray<TSession *> *terminals;
+@property (nonatomic, readonly) NSUInteger terminalCount;
+- (BOOL)terminalPanelVisible;
+- (void)setTerminalPanelVisible:(BOOL)visible focus:(BOOL)focus;
+- (void)moveActiveTerminalToPanel;
+- (void)moveActivePanelTerminalToTab;
+- (nullable TSession *)activeTerminal;
+- (void)closeTerminal:(TSession *)t;
+- (void)shutdownTerminals;                        // at quit: end every live session, waiting briefly
+@property (nonatomic) CGFloat terminalPanelHeight;
+// Where a new terminal starts (default: home). The app sets this to the workspace root.
+@property (nonatomic, copy, nullable) NSString *(^terminalDirectoryProvider)(void);
+- (void)moveTerminalToTab:(nullable TSession *)t;                 // drag & drop targets
+- (void)moveTerminalToPanel:(nullable TSession *)t;
 - (void)newUntitledDocument;
 @property (nonatomic, readonly) BOOL activeIsUntitled;
 @property (nonatomic, readonly) NSString *currentTitle;        // "未命名-1" or the file name

@@ -4,6 +4,14 @@
 
 All notable changes to FeatherView are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may contain incompatible changes.
 
+## [0.21.0] — 2026-11-12
+
+### Added
+
+- An integrated terminal. ⌃` shows or hides the bottom panel; ⌥⌘T opens a new terminal (a terminal button sits at the right end of the status bar); File → Open Terminal Here starts one in the selected folder (or the workspace root). New terminals start in the workspace; the terminal strip shows each shell's current directory. Terminals run your login shell with a 256-color + truecolor terminal emulator written for FeatherView, with scrollback of 5,000 lines per terminal.
+- A terminal lives either in the bottom panel (a strip of terminals, dragged taller from its top edge) or in a regular tab; moving between the two keeps the session, output and scrollback. Closing one ends its process without asking; quitting the app ends every open shell, and shells left behind by an earlier crash are cleaned up on the next launch.
+- Terminal input: all keys reach the shell (arrows, ⌃-combinations, ⌥-prefixes), Chinese and other input methods compose at the cursor, ⌘C copies the selection (or sends an interrupt without one), ⌘V pastes with bracketed-paste when the program asks, ⌘K clears screen and scrollback, ⌘= / ⌘- change the font size. Programs that turn on mouse reporting (less, htop) receive clicks and wheel events; otherwise the wheel scrolls back through history. URLs underline on hover and open on click. Colors follow the light / dark appearance.
+
 ## [0.20.0] — 2026-11-11
 
 ### Added

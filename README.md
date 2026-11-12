@@ -58,6 +58,7 @@ Measured on the same workspace with the same files; median of three runs. Memory
 - **Development on memory-constrained machines.** Keep the IDE for writing and debugging code; use FeatherView for everything that only needs to be opened and read.
 - **Reviewing AI-generated output.** HTML pages render with their styles and scripts, following the system's dark mode. Markdown is typeset natively, Jupyter notebooks show cells and outputs, and generated CSV or JSON files open as tables and trees.
 - **Configuration and notes.** YAML, TOML, JSON, `.env`, Dockerfiles and shell scripts are syntax-highlighted. New documents (⌘N) can be written before choosing where to save them.
+- **A terminal in the workspace.** ⌃` opens a terminal panel under the editor; terminals run your login shell in the workspace or any folder, in the panel or as a tab, with colors, mouse reporting and IME input.
 - **Log inspection.** Files of hundreds of megabytes open immediately because they are memory-mapped rather than copied; soft wrap, go-to-line and find work at that scale.
 - **Data inspection.** CSV, TSV and JSON Lines become sortable, filterable tables; SQLite databases can be browsed and queried read-only; property lists (including binary ones) and JSON become collapsible trees.
 - **Code and document review.** A file tree, Quick Open (⌘P) and workspace search (⇧⌘F) covering file names and contents, with regular expressions, whole-word matching and include/exclude scopes.
@@ -129,6 +130,7 @@ Each file opens in the view that suits it. Use **View → Preview** (⇧⌘V), *
 | Move line up / down | ⌥↑ / ⌥↓ | Copy line up / down | ⇧⌥↑ / ⇧⌥↓ |
 | Delete line | ⇧⌘K | Toggle line comment | ⌘/ |
 | Fold / unfold | ⌥⌘[ / ⌥⌘] | Expand / shrink selection | ⌃⇧⌘→ / ⌃⇧⌘← |
+| Terminal panel | ⌃` | New terminal | ⌥⌘T |
 | Show hidden files | ⇧⌘. | Zoom in / out / reset | ⌘= / ⌘- / ⌘0 |
 | Open as text / hex | ⌥⌘1 / ⌥⌘2 | Settings | ⌘, |
 

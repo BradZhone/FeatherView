@@ -11,6 +11,7 @@ typedef NS_ENUM(NSInteger, ViewerKind) {
     ViewerSQLite,
     ViewerArchive,
     ViewerSpreadsheet,   // .xlsx: own grid, editable
+    ViewerTerminal,      // an interactive shell (never guessed, created by the user)
     ViewerDocument,      // .docx: rendered pages, read-only
 };
 
