@@ -99,6 +99,7 @@
 "Close Window" = "关闭窗口";
 "Collapse" = "折叠";
 "Collapse All" = "全部折叠";
+"Collapse all folders" = "收起所有文件夹";
 "Comma ," = "逗号 ,";
 "Config and data" = "配置与数据";
 "Contents" = "内容";
@@ -178,6 +179,8 @@
 "Hex view, %lu byte" = "十六进制视图，%lu 字节";
 "Hex view, %lu bytes" = "十六进制视图，%lu 字节";
 "Hide FeatherView" = "隐藏 FeatherView";
+"Hide Sidebar" = "收起侧栏";
+"Show Sidebar" = "显示侧栏";
 "Hold ⌥ to remove one" = "按住 ⌥ 可单独移除";
 "HTML preview" = "HTML 预览";
 "image" = "图片";
@@ -483,6 +486,13 @@
 "Show whitespace" = "显示空白字符（空格显示为圆点，制表符显示为箭头）";
 "Expand Selection" = "扩大选区";
 "Shrink Selection" = "缩小选区";
+
+/* Split view */
+"Split Editor" = "分屏编辑器";
+"Focus Pane 1" = "聚焦第 1 栏";
+"Focus Pane 2" = "聚焦第 2 栏";
+"Focus Pane 3" = "聚焦第 3 栏";
+"Maximize Split" = "最大化分屏";
 
 /* Terminal */
 "Show Terminal Panel" = "显示终端面板";

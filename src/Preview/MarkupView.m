@@ -9,6 +9,11 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
 
 // Handles link clicks itself: works on the first click into an inactive window, and the link is
 // followed only after the click has finished (following it may switch tabs and free this view).
+// NSTextFinder scrolls ranges directly, bypassing the preview's anchor/source navigation.
+@interface MarkdownTextView ()
+@property (nonatomic, copy) void (^onNavigate)(void);
+@end
+
 @implementation MarkdownTextView {
     NSUInteger _pressedLink;
 }
@@ -16,6 +21,16 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
 - (instancetype)initWithFrame:(NSRect)f textContainer:(NSTextContainer *)c {
     if ((self = [super initWithFrame:f textContainer:c])) _pressedLink = NSNotFound;
     return self;
+}
+
+- (void)scrollRangeToVisible:(NSRange)range {
+    if (self.onNavigate) self.onNavigate();
+    [super scrollRangeToVisible:range];
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    if (self.onNavigate) self.onNavigate();
+    [super scrollWheel:event];
 }
 
 - (NSUInteger)linkIndexAtPoint:(NSPoint)p {
@@ -71,7 +86,7 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
     MarkdownRenderer *_renderer;
     NSString *_source, *_dir;
     CGFloat _renderedWidth;
-    BOOL _rerenderQueued;
+    BOOL _rerenderQueued, _initialPositionPending;
 }
 
 - (instancetype)initWithFrame:(NSRect)f {
@@ -112,14 +127,39 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
     [self addSubview:_scroll];
     _scale = gMarkdownScale;
     _renderer = [MarkdownRenderer new];
+    _initialPositionPending = YES;
     __weak MarkdownPreview *weakSelf = self;
+    _textView.onNavigate = ^{ [weakSelf cancelInitialPosition]; };
     _renderer.onImageLoaded = ^{ [weakSelf scheduleRerender]; };
     return self;
 }
 
 - (MarkdownRenderer *)renderer { return _renderer; }
+- (BOOL)isFlipped { return YES; }    // the scroll view and its text document share a top-left origin
 
 - (void)dealloc { _textView.delegate = nil; }      // NSTextView's delegate is not zeroing-weak
+
+- (void)cancelInitialPosition { _initialPositionPending = NO; }
+
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (_initialPositionPending) self.needsLayout = YES;
+}
+
+- (void)layout {
+    [super layout];
+    [self applyInitialPositionIfNeeded];
+}
+
+- (void)applyInitialPositionIfNeeded {
+    if (!_initialPositionPending || !_source || !self.window ||
+        _scroll.contentSize.width <= 0 || _scroll.contentSize.height <= 0) return;
+    // Establish real glyph geometry and document height before moving the flipped text document.
+    [_textView.layoutManager ensureLayoutForCharacterRange:NSMakeRange(0, MIN((NSUInteger)1, _storage.length))];
+    [_textView sizeToFit];
+    _initialPositionPending = NO;
+    [_textView scrollPoint:NSZeroPoint];
+}
 
 - (CGFloat)contentWidth { return MAX(200, self.bounds.size.width - 2 * _textView.textContainerInset.width - 20); }
 
@@ -131,6 +171,7 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
 - (void)setFrameSize:(NSSize)s {
     [super setFrameSize:s];
     [self updateInsets];
+    if (_initialPositionPending) self.needsLayout = YES;
     if (_source && fabs(self.contentWidth - _renderedWidth) > 40) [self scheduleRerender];
 }
 
@@ -151,7 +192,13 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
     if (fabs(_scale - 1) > 0.01) a = scaled(a, _scale);
     NSPoint keep = _scroll.contentView.bounds.origin;
     [_textView.textStorage setAttributedString:a];
+    // Replacing storage invalidates layout. Grow it before restoring the reading offset, otherwise
+    // AppKit may clamp the old offset against a temporarily short document (images/zoom do this too).
+    [_textView.layoutManager ensureLayoutForBoundingRect:NSMakeRect(0, 0, _textView.bounds.size.width,
+        MAX(_scroll.contentSize.height, keep.y + _scroll.contentSize.height)) inTextContainer:_textView.textContainer];
+    [_textView sizeToFit];
     [_textView scrollPoint:keep];
+    if (_initialPositionPending) self.needsLayout = YES;
 }
 
 // Text zoom: scales fonts, indents and spacing so the text re-flows; images keep their size.
@@ -206,6 +253,7 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k) {
 - (void)scrollToSourceLine:(CGFloat)line {
     NSArray<NSNumber *> *L = _renderer.mapLines, *C = _renderer.mapLocs;
     if (!L.count) return;
+    [self cancelInitialPosition];
     NSInteger lo = 0, hi = (NSInteger)L.count - 1;
     while (lo < hi) { NSInteger mid = (lo + hi + 1) / 2; if (L[mid].doubleValue <= line) lo = mid; else hi = mid - 1; }
     CGFloat y;
@@ -223,6 +271,7 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k) {
     NSString *s = (slug.stringByRemovingPercentEncoding ?: slug).lowercaseString;
     NSNumber *loc = _renderer.anchors[s] ?: _renderer.anchors[MDSlug(s)];
     if (!loc) return NO;
+    [self cancelInitialPosition];
     [_textView scrollPoint:NSMakePoint(0, MAX(0, [self yForLocation:loc.unsignedIntegerValue] - 12))];
     return YES;
 }

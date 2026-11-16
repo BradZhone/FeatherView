@@ -19,6 +19,9 @@
 @property (nonatomic, readonly) NSString *clickedPath;   // row under a right-click, or nil
 // Right-click on a selected row = the whole selection (like Finder); on another row = just that row.
 @property (nonatomic, readonly) NSArray<NSString *> *clickedPaths;
+// Header control; collapses folders without opening a file or changing the current document.
+@property (nonatomic, readonly) NSButton *collapseButton;
+- (void)collapseAll:(id)sender;
 // Programmatic selection below never triggers onOpen.
 - (void)reload;                       // keeps expansion state and the selection
 - (void)refreshInBackground;          // same, reading folders off the main thread (file system events)

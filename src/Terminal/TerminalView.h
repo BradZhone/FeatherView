@@ -2,8 +2,9 @@
 #import "CanvasView.h"
 #import "TSession.h"
 
-// A terminal view: draws its session's screen, sends keys and mouse events to the PTY. The session
-// owns all state; a view is just an attachment (placement switches build a new one).
+// A terminal view: draws its session's screen, sends keys and mouse events to the PTY. Reuse the
+// attachment across placements to retain selection and the user's scrollback position. Recognized
+// control/function key equivalents precede text bindings; Command shortcuts remain menu actions.
 @interface TerminalView : CanvasView
 
 - (instancetype)initWithSession:(TSession *)session;

@@ -2,6 +2,7 @@
 #import "FileOps.h"
 #import "FileIcons.h"
 #import "FileWalker.h"
+#import "Localization.h"
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -47,17 +48,43 @@
     ov.action = @selector(clicked:);
     ov.doubleAction = @selector(doubleClicked:);
     ov.allowsMultipleSelection = YES;
+    _collapseButton = [NSButton buttonWithTitle:FTL(@"Collapse All") target:self action:@selector(collapseAll:)];
+    _collapseButton.controlSize = NSControlSizeSmall;
+    _collapseButton.bezelStyle = NSBezelStyleRecessed;
+    _collapseButton.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    _collapseButton.toolTip = FTL(@"Collapse all folders");
+    _collapseButton.accessibilityLabel = _collapseButton.title;
+    _collapseButton.identifier = @"collapseAllFolders";
+    _collapseButton.enabled = NO;
+    [_collapseButton sizeToFit];
     return self;
+}
+
+- (void)updateCollapseButton {
+    BOOL expanded = NO;
+    for (NSInteger r = 0; r < _ov.numberOfRows; r++) {
+        FileNode *n = [_ov itemAtRow:r];
+        if (n.isDir && [_ov isItemExpanded:n]) { expanded = YES; break; }
+    }
+    _collapseButton.enabled = expanded;
+}
+
+- (void)collapseAll:(id)sender {
+    // Let the outline select a visible ancestor of a hidden row; revealing it would undo the collapse.
+    _suppressSelect++;
+    [_ov collapseItem:nil collapseChildren:YES];
+    _suppressSelect--;
+    [self updateCollapseButton];
 }
 
 - (void)setRootPath:(NSString *)p {
     _rootPath = [p copy];
-    _root = [FileNode new];
-    _root->_rootPath = _rootPath;
-    _root.isDir = YES;
+    _root = p.length ? [FileNode new] : nil;
+    if (_root) { _root->_rootPath = _rootPath; _root.isDir = YES; }
     _suppressSelect++;
     [_ov reloadData];
     _suppressSelect--;
+    [self updateCollapseButton];
 }
 
 - (void)reloadAndReveal:(NSString *)path {
@@ -66,6 +93,7 @@
     [_ov reloadData];
     _suppressSelect--;
     [self revealPath:path];
+    [self updateCollapseButton];
 }
 
 - (void)setShowHidden:(BOOL)h { _showHidden = h; [self reload]; }
@@ -165,6 +193,7 @@ static NSDictionary<NSString *, NSNumber *> *listFolder(NSString *dirPath, BOOL 
             [me->_ov reloadData];
             me->_suppressSelect--;
             if (sel.count) [me revealPaths:sel];
+            [me updateCollapseButton];
             if (me.onRefreshed) me.onRefreshed();
         });
     });
@@ -178,6 +207,7 @@ static NSDictionary<NSString *, NSNumber *> *listFolder(NSString *dirPath, BOOL 
     [_ov reloadData];
     _suppressSelect--;
     if (sel.count) [self revealPaths:sel];
+    [self updateCollapseButton];
 }
 
 - (NSString *)selectedPath {
@@ -263,6 +293,9 @@ static NSDictionary<NSString *, NSNumber *> *listFolder(NSString *dirPath, BOOL 
 }
 
 #pragma mark Data source / delegate
+
+- (void)outlineViewItemDidExpand:(NSNotification *)n { [self updateCollapseButton]; }
+- (void)outlineViewItemDidCollapse:(NSNotification *)n { [self updateCollapseButton]; }
 
 - (NSInteger)outlineView:(NSOutlineView *)ov numberOfChildrenOfItem:(FileNode *)item {
     if (!_root) return 0;

@@ -6,6 +6,19 @@
 #import "DefaultAppsPanel.h"
 #import "Settings.h"
 #import "SettingsWindow.h"
+#import "TerminalView.h"
+
+// Menu lookup precedes keyDown:. Give a focused terminal first refusal for its control/function
+// keys, while Command shortcuts and app controls such as Ctrl+` / Ctrl+1 stay in the menus.
+@interface FTMainMenu : NSMenu
+@end
+@implementation FTMainMenu
+- (BOOL)performKeyEquivalent:(NSEvent *)e {
+    NSResponder *fr = NSApp.keyWindow.firstResponder;
+    if ([fr isKindOfClass:TerminalView.class] && [(TerminalView *)fr performKeyEquivalent:e]) return YES;
+    return [super performKeyEquivalent:e];
+}
+@end
 
 static const NSInteger kContextTag = 7001;
 
@@ -97,6 +110,12 @@ static __weak NSResponder *gFocusOverride;
                     item(FTL(@"PDF Thumbnails"), @selector(togglePDFThumbsAction:), @"t", C | O),
                     item(FTL(@"PDF Two Pages"), @selector(togglePDFTwoPagesAction:), nil, 0),
                     NSMenuItem.separatorItem,
+                    item(FTL(@"Split Editor"), @selector(splitEditor:), @"\\", C),
+                    item(FTL(@"Focus Pane 1"), @selector(focusPane:), @"1", NSEventModifierFlagControl),
+                    item(FTL(@"Focus Pane 2"), @selector(focusPane:), @"2", NSEventModifierFlagControl),
+                    item(FTL(@"Focus Pane 3"), @selector(focusPane:), @"3", NSEventModifierFlagControl),
+                    item(FTL(@"Maximize Split"), @selector(toggleMaximizeSplit:), @"m", C | K),
+                    NSMenuItem.separatorItem,
                     item(FTL(@"Show Terminal Panel"), @selector(toggleTerminalPanel:), @"`", NSEventModifierFlagControl),
                     item(FTL(@"New Terminal"), @selector(newTerminal:), @"t", C | O),
                     item(FTL(@"Open Terminal Here"), @selector(openTerminalHere:), nil, 0),
@@ -116,6 +135,7 @@ static __weak NSResponder *gFocusOverride;
                     item(FTL(@"Unfold All"), @selector(unfoldAll:), @"]", C | O | S),
                     NSMenuItem.separatorItem,
                     item(FTL(@"File Tree"), @selector(showFilesTab:), @"e", C | S),
+                    item(FTL(@"Hide Sidebar"), @selector(toggleSidebar:), @"b", C),
                     item(FTL(@"Search"), @selector(searchWorkspace:), nil, 0),
                     NSMenuItem.separatorItem,
                     item(FTL(@"Automatic"), @selector(viewAuto:), @"0", C | O),
@@ -130,7 +150,7 @@ static __weak NSResponder *gFocusOverride;
                       NSMenuItem.separatorItem,
                       item(FTL(@"Bring All to Front"), @selector(arrangeInFront:), nil, 0)]],
     ];
-    NSMenu *bar = [NSMenu new];
+    NSMenu *bar = [FTMainMenu new];
     for (NSArray *m in spec) {
         NSMenuItem *top = [NSMenuItem new];
         BOOL editorOnly = [m[0] isEqualToString:FTL(@"Selection")];
@@ -147,6 +167,8 @@ static __weak NSResponder *gFocusOverride;
             plus.hidden = YES;
             plus.allowsKeyEquivalentWhenHidden = YES;
             [sub addItem:plus];
+            NSInteger paneTag = 0;
+            for (NSMenuItem *i in sub.itemArray) if (i.action == @selector(focusPane:)) i.tag = paneTag++;   // 0-based columns
         }
         top.submenu = sub;
         [bar addItem:top];
@@ -306,6 +328,13 @@ static __weak NSResponder *gFocusOverride;
 
 - (BOOL)validateMenuItem:(NSMenuItem *)mi {
     SEL a = mi.action;
+    if (a == @selector(toggleSidebar:)) { mi.title = _sidebar.hidden ? FTL(@"Show Sidebar") : FTL(@"Hide Sidebar"); return YES; }
+    if (a == @selector(splitEditor:)) return _content.tabCount > 0 && _content.paneCount < 3;
+    if (a == @selector(focusPane:)) return (NSUInteger)mi.tag < (NSUInteger)_content.paneCount;
+    if (a == @selector(toggleMaximizeSplit:)) {
+        mi.state = _content.focusedAreaMaximized ? NSControlStateValueOn : NSControlStateValueOff;
+        return _content.canToggleMaximize;
+    }
     if (a == @selector(toggleTerminalPanel:)) { mi.state = _content.terminalPanelVisible ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
     if (a == @selector(newTerminal:)) return YES;
     if (a == @selector(openTerminalHere:)) return _tree.rootPath != nil;
@@ -469,6 +498,10 @@ static __weak NSResponder *gFocusOverride;
     NSString *dir = _tree.rootPath ?: NSHomeDirectory();
     [_content openTerminalAt:dir asTab:asTab];
 }
+
+- (void)splitEditor:(id)s { [_content splitEditor]; }
+- (void)focusPane:(NSMenuItem *)s { [_content focusPane:s.tag]; }
+- (void)toggleMaximizeSplit:(id)s { [_content toggleMaximize]; }
 
 - (void)openTerminalHere:(id)s {
     NSString *t = [self targetPathFrom:s];

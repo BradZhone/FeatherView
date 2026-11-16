@@ -76,6 +76,7 @@ typedef enum { TMouseOff = 0, TMousePress, TMouseDrag, TMouseAny } TMouseMode;
 
 @property (nonatomic, readonly) NSUInteger cols, rows;
 @property (nonatomic, readonly) NSUInteger historyCount;     // lines pushed off the top
+@property (nonatomic, readonly) NSUInteger historyStart;     // logical index of oldest retained line; advances on eviction/clear
 @property (nonatomic) BOOL cursorVisible;                    // the app's choice (DECTCEM)
 
 // The cell grid, the scrollback, and what the parser has toggled. Reading from the same thread

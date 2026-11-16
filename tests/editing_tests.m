@@ -6,6 +6,11 @@
 #import "TerminalPanel.h"
 #import "ContentController.h"
 #import "TerminalView.h"
+#import "VTEscape.h"
+#import "FTSplitView.h"
+#import "FTTabDrag.h"
+#import "TabBarView.h"
+#include <signal.h>
 
 static int failures = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
@@ -13,6 +18,76 @@ static int failures = 0;
 static NSWindow *win;
 static NSPasteboard *pb;
 static void terminals(void);
+static void terminalRegressions(void);
+static void focusedSplitGroups(NSWindow *window);
+static void splits(void);
+static void drain(double seconds);
+static NSMutableArray<TSession *> *testShells;
+static NSMutableArray<ContentController *> *testControllers;
+static NSDraggingSession *testDragSession; // nil: source callbacks do not need a native offscreen session.
+
+// Exercise the real destination methods without starting a native drag in an offscreen window.
+@interface EditingDragInfo : NSObject <NSDraggingInfo>
+@property (nonatomic, strong) NSPasteboard *draggingPasteboard;
+@property (nonatomic, weak) NSWindow *draggingDestinationWindow;
+@property (nonatomic, strong) id draggingSource;
+@property (nonatomic) NSPoint draggingLocation, draggedImageLocation;
+@property (nonatomic, strong) NSImage *draggedImage;
+@property (nonatomic) NSDragOperation draggingSourceOperationMask;
+@property (nonatomic) NSInteger draggingSequenceNumber;
+@property NSInteger numberOfValidItemsForDrop;
+@property NSDraggingFormation draggingFormation;
+@property BOOL animatesToDestination;
+@end
+
+@implementation EditingDragInfo
+- (void)slideDraggedImageTo:(NSPoint)point { self.draggedImageLocation = point; }
+- (NSArray<NSString *> *)namesOfPromisedFilesDroppedAtDestination:(NSURL *)destination { return @[]; }
+- (NSSpringLoadingHighlight)springLoadingHighlight { return NSSpringLoadingHighlightNone; }
+- (void)resetSpringLoading {}
+- (void)enumerateDraggingItemsWithOptions:(NSDraggingItemEnumerationOptions)options forView:(NSView *)view
+                                classes:(NSArray<Class> *)classes searchOptions:(NSDictionary<NSPasteboardReadingOptionKey, id> *)searchOptions
+                             usingBlock:(void (^)(NSDraggingItem *, NSInteger, BOOL *))block {}
+- (void)dealloc { [_draggingPasteboard releaseGlobally]; }
+@end
+
+static TSession *trackShell(TSession *session) {
+    CHECK(session != nil, "the test shell was created");
+    if (session) [testShells addObject:session];
+    return session;
+}
+
+static ContentController *testController(void) {
+    ContentController *cc = [ContentController new];
+    cc.alertHandler = ^NSModalResponse(NSAlert *alert) { return NSAlertThirdButtonReturn; };
+    [testControllers addObject:cc];
+    return cc;
+}
+
+static void stopTestShells(void) {
+    for (ContentController *cc in testControllers) {
+        [cc shutdownTerminals];
+        [cc closeAllWithoutAsking];
+    }
+    // Also cover sessions already closed or accidentally detached by a failed move.
+    for (TSession *session in testShells) if (!session.exited) [session terminate];
+    CFAbsoluteTime until = CFAbsoluteTimeGetCurrent() + 3;
+    while (CFAbsoluteTimeGetCurrent() < until) {
+        BOOL live = NO;
+        for (TSession *session in testShells) if (!session.exited) live = YES;
+        if (!live) break;
+        drain(.05);
+    }
+    for (TSession *session in testShells) if (!session.exited && session.pid > 1) kill(session.pid, SIGKILL);
+    until = CFAbsoluteTimeGetCurrent() + 1;
+    while (CFAbsoluteTimeGetCurrent() < until) {
+        BOOL live = NO;
+        for (TSession *session in testShells) if (!session.exited) live = YES;
+        if (!live) break;
+        drain(.05);
+    }
+    for (TSession *session in testShells) CHECK(session.exited, "test shell %d exited during cleanup", session.pid);
+}
 
 static NSString *text(TextEditorView *ed) {
     return [[NSString alloc] initWithData:[ed->_buf dataInRange:NSMakeRange(0, ed->_buf.length)] encoding:NSUTF8StringEncoding];
@@ -649,25 +724,241 @@ int main(void) {
         win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 700, 500) styleMask:NSWindowStyleMaskTitled
                                             backing:NSBackingStoreBuffered defer:YES];
         pb = [NSPasteboard pasteboardWithUniqueName];
-        terminals();
-        multiCursorTyping();
-        addingCursors();
-        clipboard();
-        lineCommands();
-        typingAids();
-        drawing();
-        folding();
-        expandSelection();
-        guidesAndWhitespace();
-        wrapFuzz();
-        manyCursors();
-        [pb releaseGlobally];
+        testShells = [NSMutableArray array];
+        testControllers = [NSMutableArray array];
+        @try {
+            terminalRegressions();
+            if (getenv("FEATHER_TERMINAL_VIEW_TESTS_ONLY")) {
+                focusedSplitGroups(win);
+            } else {
+                terminals();
+                splits();
+            }
+            multiCursorTyping();
+            addingCursors();
+            clipboard();
+            lineCommands();
+            typingAids();
+            drawing();
+            folding();
+            expandSelection();
+            guidesAndWhitespace();
+            wrapFuzz();
+            manyCursors();
+        } @catch (NSException *exception) {
+            CHECK(NO, "uncaught %s: %s", exception.name.UTF8String, exception.reason.UTF8String);
+        } @finally {
+            stopTestShells();
+            [pb releaseGlobally];
+        }
     }
     if (failures) { printf("%d editing failure(s)\n", failures); return 1; }
     printf("all editing tests passed\n");
     return 0;
 }
 #pragma mark Terminal
+
+// Implements only the existing session surface: no PTY, subprocess or shared PID registry.
+@interface EditingTerminalSession : NSObject
+@property (nonatomic, strong) TScreen *screen;
+@property (nonatomic, strong) VTEscape *parser;
+@property (nonatomic, copy) void (^onChange)(void);
+@property (nonatomic, copy) void (^onExit)(void);
+@property (nonatomic) NSUInteger resizes;
+@property (nonatomic) BOOL exited;
+- (void)feed:(NSString *)text;
+- (void)resizeCols:(NSUInteger)cols rows:(NSUInteger)rows;
+@end
+@implementation EditingTerminalSession
+- (instancetype)init {
+    if ((self = [super init])) {
+        _screen = [[TScreen alloc] initWithCols:80 rows:24 scrollback:100];
+        _parser = [[VTEscape alloc] initWithEndpoint:_screen];
+    }
+    return self;
+}
+- (void)feed:(NSString *)text {
+    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+    [_parser feed:data.bytes length:data.length];
+    if (_onChange) _onChange();
+}
+- (void)resizeCols:(NSUInteger)cols rows:(NSUInteger)rows { _resizes++; [_screen resizeCols:cols rows:rows]; }
+@end
+
+@interface EditingWheelEvent : NSEvent
+@property (nonatomic) CGFloat dx, dy;
+@property (nonatomic) BOOL precise;
+@end
+@implementation EditingWheelEvent
+- (CGFloat)scrollingDeltaX { return _dx; }
+- (CGFloat)scrollingDeltaY { return _dy; }
+- (BOOL)hasPreciseScrollingDeltas { return _precise; }
+@end
+
+// Private color helpers are checked alongside rendered pixels, without adding test-only production API.
+@interface TerminalView (EditingTestColors)
+- (NSColor *)fgOf:(TCell)cell;
+- (NSColor *)bgOf:(TCell)cell;
+@end
+
+static uint32_t colorRGB(NSColor *color) {
+    NSColor *rgb = [color colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    return ((uint32_t)round(rgb.redComponent * 255) << 16) | ((uint32_t)round(rgb.greenComponent * 255) << 8) |
+           (uint32_t)round(rgb.blueComponent * 255);
+}
+
+static NSString *historyText(TScreen *screen, NSUInteger row) {
+    NSMutableString *text = [NSMutableString string];
+    const TCell *cells = [screen historyCells:row];
+    for (NSUInteger col = 0; col < [screen historyLength:row]; col++)
+        if (cells[col].ch && cells[col].ch < 128) [text appendFormat:@"%c", (char)cells[col].ch];
+    return text;
+}
+
+static BOOL screenContains(TScreen *screen, NSString *needle) {
+    for (NSUInteger row = 0; row < screen.rows; row++) if ([[screen textOfRow:row] containsString:needle]) return YES;
+    for (NSUInteger row = 0; row < screen.historyCount; row++) if ([historyText(screen, row) containsString:needle]) return YES;
+    return NO;
+}
+
+static void terminalRegressions(void) {
+    EditingTerminalSession *model = [EditingTerminalSession new];
+    TScreen *s = model.screen;
+    CHECK(s.palette[1] == 0xCD0000 && s.palette[0] == 0 && s.palette[15] == 0xFFFFFF,
+          "every unmounted screen starts with a deterministic ANSI palette");
+    CHECK([s cellAtRow:0 col:0].fg == TCDefault && [s cellAtRow:0 col:0].bg == TCDefault,
+          "initial blank cells use the default sentinel");
+    [s resizeCols:12 rows:4];
+    [model feed:@"one\r\ntwo\r\nthree\r\nfour"];
+    [s resizeCols:7 rows:2];
+    CHECK(s.historyCount == 2 && [[s textOfRow:0] hasPrefix:@"three"] && [[s textOfRow:1] hasPrefix:@"four"] && s.cursorRow == 1,
+          "shrinking keeps the cursor and recent rows and pushes earlier content to history");
+    CHECK([historyText(s, 0) isEqualToString:@"one"] && [historyText(s, 1) isEqualToString:@"two"], "resize history remains ordered");
+    [s resizeCols:12 rows:4];
+    CHECK(s.historyCount == 0 && [[s textOfRow:0] hasPrefix:@"one"] && [[s textOfRow:3] hasPrefix:@"four"] && s.cursorRow == 3,
+          "growing restores history and cursor position");
+    [s resizeCols:12 rows:8];
+    CHECK(s.scrollTop == 0 && s.scrollBottom == 7, "full scroll margins follow a grown screen");
+    [model feed:@"\r\nfive\r\nsix\r\nseven\r\neight\r\nnine"];
+    CHECK(s.historyCount == 1 && [[s textOfRow:7] hasPrefix:@"nine"], "output after growth uses the entire grid and grows history");
+    [s reset];
+    [model feed:@"abcdefghij\x1b[8;1Hbottom\x1b[1;1H"];
+    [s setScrollRegionTop:2 bottom:6];
+    [s resizeCols:4 rows:2];
+    CHECK(s.scrollTop <= s.scrollBottom && s.scrollBottom < s.rows && s.historyCount == 0,
+          "a custom region stays bounded through a tiny transient size without leaking into history");
+    [s scrollUp:3];
+    CHECK(s.historyCount == 0, "a clipped custom region never becomes full-screen scrollback");
+    [s resizeCols:12 rows:8];
+    CHECK(s.scrollTop == 2 && s.scrollBottom == 6 && [[s textOfRow:0] hasPrefix:@"abcdefghij"] && [[s textOfRow:7] hasPrefix:@"bottom"],
+          "growing recovers clipped columns, bottom rows and custom margins");
+    [s resizeCols:0 rows:0];
+    CHECK(s.cols == 12 && s.rows == 8, "zero geometry leaves the screen intact");
+
+    NSView *host = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 700, 500)];
+    win.contentView = host;
+    NSMutableArray<EditingTerminalSession *> *models = [NSMutableArray array];
+    NSMutableArray<TerminalView *> *views = [NSMutableArray array];
+    for (NSUInteger i = 0; i < 3; i++) {
+        EditingTerminalSession *session = [EditingTerminalSession new];
+        TerminalView *view = [[TerminalView alloc] initWithSession:(TSession *)(id)session];
+        view.frame = NSMakeRect(0, 0, 540, 220);
+        CHECK(session.resizes == 0 && session.screen.cols == 80 && session.screen.rows == 24,
+              "unmounted terminal %lu ignores frame geometry", (unsigned long)i);
+        [host addSubview:view];
+        CHECK(session.resizes == 1 && session.screen.cols > 30 && session.screen.rows > 2,
+              "terminal %lu synchronizes on its first usable mount", (unsigned long)i);
+        view.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+        [session feed:@"\x1b[31mRED\x1b[32mGREEN\x1b[0m\r\n\x1b[48;2;0;0;0m          \x1b[0m"];
+        NSBitmapImageRep *rep = [view bitmapImageRepForCachingDisplayInRect:view.bounds];
+        [view cacheDisplayInRect:view.bounds toBitmapImageRep:rep];
+        CHECK(session.screen.palette[1] == 0xC13B32 && session.screen.palette[2] == 0x338A22 &&
+              session.screen.defaultBg == 0xFFFFFF && session.screen.defaultFg == 0x24292E,
+              "light terminal %lu initializes its own ANSI and default colors", (unsigned long)i);
+        CGFloat scale = rep.pixelsWide / view.bounds.size.width;
+        CGFloat cellH = [[view valueForKey:@"_cellH"] doubleValue];
+        CHECK(colorRGB([rep colorAtX:(NSInteger)(12 * scale) y:(NSInteger)((8 + cellH + 4 - view.scrollY) * scale)]) == 0,
+              "terminal %lu paints a literal RGB zero background black", (unsigned long)i);
+        CHECK(colorRGB([view fgOf:(TCell){'x', 0, TCDefault, 0}]) == 0 &&
+              colorRGB([view fgOf:(TCell){'x', TCPal | 16, TCDefault, 0}]) == 0,
+              "literal and indexed black foregrounds remain black in terminal %lu", (unsigned long)i);
+        [models addObject:session]; [views addObject:view];
+    }
+    for (NSUInteger i = 0; i < 3; i++) {
+        views[i].appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+        [views[i] displayIfNeeded];
+        NSBitmapImageRep *rep = [views[i] bitmapImageRepForCachingDisplayInRect:views[i].bounds];
+        [views[i] cacheDisplayInRect:views[i].bounds toBitmapImageRep:rep];
+        CHECK(models[i].screen.palette[1] == 0xE06C60 && models[i].screen.palette[2] == 0x7DBE50 && models[i].screen.defaultBg == 0x1B1E23,
+              "dark terminal %lu updates independently", (unsigned long)i);
+    }
+    views[0].appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    [views[0] viewDidChangeEffectiveAppearance];
+    CHECK(models[0].screen.palette[1] == 0xC13B32 && models[1].screen.palette[1] == 0xE06C60,
+          "one terminal's appearance does not suppress or alter another terminal's palette");
+
+    TerminalView *view = views[0]; model = models[0]; s = model.screen;
+    [host addSubview:view positioned:NSWindowAbove relativeTo:nil];
+    [s reset];
+    [model feed:@"\x1b[0m"];
+    for (NSUInteger i = 0; i < 50; i++) [model feed:[NSString stringWithFormat:@"line-%03lu\r\n", (unsigned long)i]];
+    CHECK(view.scrollY > 0 && fabs(view.scrollY - view.maxScrollY) < .5, "fresh terminal follows output past the viewport");
+    EditingWheelEvent *wheel = [EditingWheelEvent new]; wheel.precise = YES; wheel.dy = 4;
+    [view scrollWheel:wheel];
+    CGFloat scrolled = view.scrollY;
+    [model feed:@"more\r\n"];
+    CHECK(fabs(view.scrollY - scrolled) < .5 && view.scrollY < view.maxScrollY - 4,
+          "even a small wheel-up during output stops following without snapping");
+    CGFloat cellH = [[view valueForKey:@"_cellH"] doubleValue];
+    view.scrollY = 70 * cellH + 3;
+    for (NSUInteger i = 0; i < 160; i++) [model feed:[NSString stringWithFormat:@"cap-%03lu\r\n", (unsigned long)i]];
+    view.scrollY = 45 * cellH + 3;
+    NSString *anchor = historyText(s, (NSUInteger)floor(view.scrollY / cellH));
+    NSUInteger origin = s.historyStart;
+    CGFloat before = view.scrollY;
+    for (NSUInteger i = 0; i < 7; i++) [model feed:@"capped-output\r\n"];
+    CHECK(s.historyCount == 100 && s.historyStart == origin + 7 && fabs(view.scrollY - (before - 7 * cellH)) < .5 &&
+          [historyText(s, (NSUInteger)floor(view.scrollY / cellH)) isEqualToString:anchor],
+          "capped history preserves the exact retained top line and pixel offset");
+    before = view.scrollY;
+    view.frame = NSMakeRect(0, 0, 610, 270);
+    CHECK(fabs(view.scrollY - before) < .5, "a resize preserves a user's history anchor");
+    NSUInteger resizes = model.resizes, cols = s.cols, rows = s.rows;
+    [view removeFromSuperview];
+    view.frame = NSZeroRect;
+    [model feed:@"detached-output\r\n"];
+    CHECK(model.resizes == resizes && s.cols == cols && s.rows == rows, "detached zero geometry preserves the live grid during output");
+    view.frame = NSMakeRect(0, 0, 560, 230);
+    [host addSubview:view];
+    CHECK(s.scrollBottom == s.rows - 1 && model.resizes > resizes, "reattaching synchronizes geometry and full margins");
+    before = view.scrollY;
+    [model feed:@"\x1b[?1049hALT\r\nSCREEN"];
+    CHECK(view.contentHeight < (s.rows + 1) * cellH && view.scrollY < cellH,
+          "alternate-screen geometry excludes primary history");
+    NSUInteger history = s.historyCount;
+    for (NSUInteger i = 0; i < s.rows + 3; i++) [model feed:@"alternate\r\n"];
+    CHECK(s.historyCount == history, "alternate-screen output cannot append primary history");
+    [model feed:@"\x1b[?1049l"];
+    CHECK(fabs(view.scrollY - before) < .5, "leaving alternate screen restores the primary history anchor");
+    view.scrollY = view.maxScrollY;
+    [model feed:@"latest-output\r\n"];
+    CHECK(fabs(view.scrollY - view.maxScrollY) < .5, "scrolling back to the bottom resumes following");
+
+    NSMutableString *longText = [NSMutableString string];
+    for (NSUInteger i = 0; i < 100; i++) [longText appendString:@"a long editor line that can scroll horizontally\n"];
+    TextEditorView *ed = editor(longText, @"wheel.txt");
+    __block NSUInteger notifications = 0; ed.onScroll = ^{ notifications++; };
+    ed.scrollY = 80; notifications = 0;
+    wheel.precise = NO; wheel.dy = -2; wheel.dx = 0;
+    [ed scrollWheel:wheel];
+    CHECK(fabs(ed.scrollY - 112) < .5 && notifications == 1, "editor discrete wheel scaling and single scroll notification are preserved");
+    wheel.precise = YES; wheel.dy = 5;
+    [ed scrollWheel:wheel];
+    CHECK(fabs(ed.scrollY - 107) < .5 && notifications == 2, "editor precise wheel deltas are preserved");
+    ed.scrollY = 0; notifications = 0;
+    [ed scrollWheel:wheel];
+    CHECK(ed.scrollY == 0 && notifications == 0, "clamped editor wheel gestures do not emit false notifications");
+}
 
 static void drain(double seconds) {
     [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
@@ -679,7 +970,8 @@ static void terminals(void) {
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
 
     // the view renders output and follows the bottom
-    TSession *ts = [[TSession alloc] initWithDirectory:dir shell:@"/bin/sh" error:nil];
+    TSession *ts = trackShell([[TSession alloc] initWithDirectory:dir shell:@"/bin/sh" error:nil]);
+    if (!ts) return;
     TerminalView *tv = [[TerminalView alloc] initWithSession:ts];
     tv.frame = NSMakeRect(0, 0, 560, 300);
     win.contentView = tv;
@@ -742,6 +1034,29 @@ static void terminals(void) {
     [ts writeString:@"\x03"];               // ^C ends cat
     drain(0.2);
     CHECK(ts.screen.cols >= 40 && ts.screen.rows >= 10, "the view resized the PTY (%lux%lu)", (unsigned long)ts.screen.cols, (unsigned long)ts.screen.rows);
+    // Real ls colors must survive the PTY and parser as palette-indexed cells.
+    NSString *colorDir = [dir stringByAppendingPathComponent:@"ls-colors"];
+    NSString *directoryEntry = [colorDir stringByAppendingPathComponent:@"colored-directory"];
+    NSString *executable = [colorDir stringByAppendingPathComponent:@"colored-executable"];
+    [NSFileManager.defaultManager createDirectoryAtPath:directoryEntry withIntermediateDirectories:YES attributes:nil error:nil];
+    [@"#!/bin/sh\nexit 0\n" writeToFile:executable atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions:@0755} ofItemAtPath:executable error:nil];
+    [NSFileManager.defaultManager createSymbolicLinkAtPath:[colorDir stringByAppendingPathComponent:@"colored-symlink"] withDestinationPath:@"colored-directory" error:nil];
+    [tv clear:nil];
+    [ts writeString:[NSString stringWithFormat:@"/bin/ls -G -1 '%@'; printf '\\nls-colors-done\\n'\n", colorDir]];
+    t0 = CFAbsoluteTimeGetCurrent();
+    BOOL coloredLS = NO;
+    while (CFAbsoluteTimeGetCurrent() - t0 < 4) {
+        drain(.05);
+        NSUInteger colored = 0;
+        for (NSUInteger r = 0; r < ts.screen.rows; r++) for (NSUInteger c = 0; c < ts.screen.cols; c++) {
+            TCell cell = [ts.screen cellAtRow:r col:c];
+            if (cell.ch && cell.fg != TCDefault && (cell.fg & TCPal)) colored++;
+        }
+        if (colored >= 20) { coloredLS = YES; break; }
+    }
+    CHECK(coloredLS, "real ls -G directory, symlink and executable output carries ANSI colors through the PTY");
+    [tv displayIfNeeded];
     [tv copy:nil];                          // no selection: an interrupt
     [tv clear:nil];
     [tv paste:nil];
@@ -753,24 +1068,40 @@ static void terminals(void) {
     // placement: tab and panel keep the same session
     NSWindow *ccWin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 700, 480) styleMask:NSWindowStyleMaskTitled
                                                   backing:NSBackingStoreBuffered defer:YES];
-    ContentController *cc = [ContentController new];
-    cc.alertHandler = ^NSModalResponse(NSAlert *a) { return NSAlertThirdButtonReturn; };
+    ContentController *cc = testController();
     ccWin.contentView = cc.view;
     [ccWin makeKeyAndOrderFront:nil];
     drain(0.1);
-    [cc openTerminalAt:dir asTab:YES];
+    trackShell([cc openTerminalAt:dir asTab:YES]);
     CHECK(cc.tabCount == 1 && cc.activeTerminal != nil && [cc.activeTerminal.directory isEqualToString:dir], "a terminal tab");
     TSession *tabSession = cc.activeTerminal;
+    TerminalView *movingView = [[cc valueForKey:@"_terminalViews"] objectForKey:tabSession];
     CHECK([cc.currentTitle containsString:dir.lastPathComponent], "the tab is named after the directory: %s", cc.currentTitle.UTF8String);
+    [tabSession writeString:@"printf 'place-'; printf 'before\\n'\n"];
+    t0 = CFAbsoluteTimeGetCurrent();
+    while (CFAbsoluteTimeGetCurrent() - t0 < 4 && !screenContains(tabSession.screen, @"place-before")) drain(.05);
+    CHECK(screenContains(tabSession.screen, @"place-before"), "the terminal produces parsed output before a placement move");
     [cc moveActiveTerminalToPanel];
     CHECK(cc.tabCount == 0 && cc.terminalPanelVisible && cc.activeTerminal == tabSession, "moved to the panel, the session survived");
+    CHECK([[cc valueForKey:@"_terminalPanel"] currentView] == movingView, "panel placement reuses the terminal attachment");
+    [tabSession writeString:@"printf 'place-'; printf 'panel\\n'\n"];
+    t0 = CFAbsoluteTimeGetCurrent();
+    while (CFAbsoluteTimeGetCurrent() - t0 < 4 && !screenContains(tabSession.screen, @"place-panel")) drain(.05);
+    CHECK(screenContains(tabSession.screen, @"place-panel"), "the terminal keeps producing output after moving to the panel");
     [cc moveActivePanelTerminalToTab];
     CHECK(cc.tabCount == 1 && cc.activeTerminal == tabSession && !cc.terminalPanelVisible, "back to a tab");
-    [cc openTerminalAt:nil asTab:NO];
+    CHECK([[cc valueForKey:@"_terminalViews"] objectForKey:tabSession] == movingView && movingView.window == ccWin,
+          "tab placement preserves and mounts the original attachment");
+    [tabSession writeString:@"printf 'place-'; printf 'tab\\n'\n"];
+    t0 = CFAbsoluteTimeGetCurrent();
+    while (CFAbsoluteTimeGetCurrent() - t0 < 4 && !screenContains(tabSession.screen, @"place-tab")) drain(.05);
+    CHECK(screenContains(tabSession.screen, @"place-tab") && tabSession.screen.scrollBottom == tabSession.screen.rows - 1,
+          "output and full-screen scrolling continue after panel-to-tab resize");
+    trackShell([cc openTerminalAt:nil asTab:NO]);
     CHECK(cc.terminalCount == 2 && cc.terminalPanelVisible, "a second terminal in the panel");
     // the panel strip: a ✕ per terminal, closes without prompting
     NSView *panel = nil;
-    for (NSView *v in cc.view.subviews) if ([NSStringFromClass(v.class) containsString:@"TerminalPanel"]) panel = v;
+    for (NSView *v in cc.view.subviews) if ([v isKindOfClass:TerminalPanel.class]) panel = v;
     CHECK(panel != nil && [((TerminalPanel *)panel) tabCount] == 1, "the panel shows its terminal (%lu)", (unsigned long)[((TerminalPanel *)panel) tabCount]);
     [(TerminalPanel *)panel closeTabAtIndex:0];
     CHECK(cc.terminalCount == 1 && !cc.terminalPanelVisible, "the ✕ closed its terminal; an empty panel hides itself (t %lu, panel %d)",
@@ -784,7 +1115,7 @@ static void terminals(void) {
     CHECK(tbtn && tbtn.frame.size.width > 0, "the status bar has a terminal button");
     // a new terminal starts in the workspace (the provider), not in the home directory
     cc.terminalDirectoryProvider = ^NSString * { return @"/private/tmp"; };
-    TSession *prov = [cc openTerminalAt:nil asTab:NO];
+    TSession *prov = trackShell([cc openTerminalAt:nil asTab:NO]);
     CHECK([prov.directory isEqualToString:@"/private/tmp"], "new terminals follow the workspace provider: %s", prov.directory.UTF8String);
     cc.terminalDirectoryProvider = nil;
     cc.alertHandler = ^NSModalResponse(NSAlert *a) { return NSAlertFirstButtonReturn; };
@@ -797,5 +1128,586 @@ static void terminals(void) {
     CHECK(cc.tabCount == 1 && cc.activeTerminal == tabSession, "no crash from a pathless tab");
     [cc closeTerminal:tabSession];
     CHECK(cc.terminalCount == 0 && cc.tabCount == 0, "all gone (t %lu, tabs %lu, exited %d)", (unsigned long)cc.terminalCount, (unsigned long)cc.tabCount, (int)tabSession.exited);
+    [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
+}
+
+#pragma mark Split view
+
+static NSEvent *mouse(NSEventType type, NSWindow *w, NSPoint p, NSInteger clicks) {
+    return [NSEvent mouseEventWithType:type location:p modifierFlags:0 timestamp:0 windowNumber:w.windowNumber
+                               context:nil eventNumber:0 clickCount:clicks pressure:1];
+}
+
+static EditingDragInfo *dragInfo(NSString *token, NSString *type, TabBarView *source, NSView *target, NSPoint point) {
+    EditingDragInfo *info = [EditingDragInfo new];
+    info.draggingPasteboard = [NSPasteboard pasteboardWithUniqueName];
+    if (token.length) [info.draggingPasteboard setString:token forType:type];
+    info.draggingSource = source;
+    info.draggingDestinationWindow = target.window;
+    info.draggingLocation = [target convertPoint:point toView:nil];
+    info.draggingSourceOperationMask = NSDragOperationMove;
+    return info;
+}
+
+static NSString *dragToken(TabBarView *bar, NSInteger index, BOOL terminal) {
+    CHECK(bar.tabDragTokenForIndex != nil && bar.canDropTab != nil && bar.onDropTab != nil,
+          "the tab bar has generic drag/drop callbacks");
+    NSString *token = bar.tabDragTokenForIndex ? bar.tabDragTokenForIndex(index) : nil;
+    NSString *type = bar.tabDragTypeForIndex ? bar.tabDragTypeForIndex(index) : bar.tabDragType;
+    CHECK(token.length && [type isEqualToString:terminal ? FTTerminalDragType : FTTabDragType],
+          "the source callback supplies a token and the correct pasteboard type");
+    CHECK(terminal ? [TSession sessionForDragToken:token] != nil : [FTTabDrag objectForToken:token] != nil,
+          "the source token resolves in its registry");
+    return token;
+}
+
+static BOOL dropContent(TabBarView *source, NSInteger index, BOOL terminal, NSView *target, FTTabDropZone zone, BOOL accepted) {
+    CHECK([target isKindOfClass:FTTabDropView.class], "every column host inherits FTTabDropView");
+    if (![target isKindOfClass:FTTabDropView.class]) return NO;
+    FTTabDropView *host = (FTTabDropView *)target;
+    NSString *token = dragToken(source, index, terminal);
+    NSRect bounds = host.bounds;
+    NSPoint point = NSMakePoint(zone == FTTabDropBefore ? NSMinX(bounds) + 12 :
+                               zone == FTTabDropAfter ? NSMaxX(bounds) - 12 : NSMidX(bounds),
+                               NSMinY(bounds) + 30 + (bounds.size.height - 30) / 2);
+    CHECK([host dropZoneForPoint:point] == zone, "the content point selects drop zone %ld", (long)zone);
+    EditingDragInfo *info = dragInfo(token, terminal ? FTTerminalDragType : FTTabDragType, source, host, point);
+    NSDragOperation operation = accepted ? NSDragOperationMove : NSDragOperationNone;
+    CHECK([host draggingEntered:info] == operation, "content draggingEntered validates the drop");
+    CHECK([host draggingUpdated:info] == operation, "content draggingUpdated validates the drop");
+    CHECK([host prepareForDragOperation:info] == accepted, "content prepare validates the drop");
+    BOOL result = [host performDragOperation:info];
+    CHECK(result == accepted, "content performDragOperation expected %d, got %d", accepted, result);
+    [host concludeDragOperation:info];
+    [source draggingSession:testDragSession endedAtPoint:NSZeroPoint operation:result ? NSDragOperationMove : NSDragOperationNone];
+    if (!terminal) [FTTabDrag forgetToken:token];
+    return result;
+}
+
+static void dropInBar(TabBarView *source, NSInteger index, BOOL terminal, TabBarView *target, NSInteger insertion) {
+    NSString *token = dragToken(source, index, terminal);
+    CHECK(target.canDropTab && target.canDropTab(token, terminal), "the target tab bar accepts an existing tab");
+    // These tests insert before the first visible tab or append after the last tab.
+    if (target.onSelect && target.items.count) target.onSelect(insertion == 0 ? 0 : (NSInteger)target.items.count - 1);
+    NSRect tab = [target rectForTab:insertion == 0 ? 0 : (NSInteger)target.items.count - 1];
+    NSPoint point = NSMakePoint(insertion == 0 ? MAX(1, NSMinX(tab) + 1) : MIN(NSMaxX(target.bounds) - 1, NSMaxX(tab) - 1), NSMidY(target.bounds));
+    EditingDragInfo *info = dragInfo(token, terminal ? FTTerminalDragType : FTTabDragType, source, target, point);
+    CHECK([target draggingEntered:info] == NSDragOperationMove && [target prepareForDragOperation:info], "tab strip prepares an Into drop");
+    CHECK([target performDragOperation:info], "tab strip performs an Into drop at insertion %ld", (long)insertion);
+    [target concludeDragOperation:info];
+    [source draggingSession:testDragSession endedAtPoint:NSZeroPoint operation:NSDragOperationMove];
+    if (!terminal) [FTTabDrag forgetToken:token];
+}
+
+static void tabDragLifecycle(TabBarView *bar) {
+    CHECK([bar draggingSession:testDragSession sourceOperationMaskForDraggingContext:NSDraggingContextWithinApplication] == NSDragOperationMove,
+          "tab drags within the application are MOVE");
+    CHECK([bar draggingSession:testDragSession sourceOperationMaskForDraggingContext:NSDraggingContextOutsideApplication] == NSDragOperationNone,
+          "tab drags cannot detach outside the application");
+    CHECK([bar ignoreModifierKeysForDraggingSession:testDragSession], "modifier keys cannot turn a move into a copy");
+    if (!bar.items.count) return;
+    if (bar.onSelect) bar.onSelect(0);
+    NSRect tab = [bar rectForTab:0];
+    NSPoint point = [bar convertPoint:NSMakePoint(MAX(2, NSMinX(tab) + 12), NSMidY(tab)) toView:nil];
+    [bar mouseDown:mouse(NSEventTypeLeftMouseDown, bar.window, point, 1)];
+    CHECK([[bar valueForKey:@"_dragIndex"] integerValue] == 0 && [bar valueForKey:@"_downEvent"] != nil,
+          "mouse down arms the source tab");
+    // Seed an in-flight state without invoking beginDraggingSessionWithItems: offscreen.
+    [bar setValue:@YES forKey:@"_dragging"];
+    [bar setValue:@YES forKey:@"_nativeDrag"];
+    [bar setValue:@1 forKey:@"_dropIndex"];
+    [bar draggingSession:testDragSession endedAtPoint:point operation:NSDragOperationNone];
+    CHECK([[bar valueForKey:@"_dragIndex"] integerValue] == -1 && [[bar valueForKey:@"_pressClose"] integerValue] == -1 &&
+          ![[bar valueForKey:@"_dragging"] boolValue] && ![[bar valueForKey:@"_nativeDrag"] boolValue] &&
+          [bar valueForKey:@"_downEvent"] == nil && [[bar valueForKey:@"_dropIndex"] integerValue] == -1,
+          "drag ended resets press, native drag, event, and insertion highlight state");
+}
+
+
+static void invalidDropTokens(TabBarView *bar, FTTabDropView *host, BOOL terminal) {
+    NSObject *object = [NSObject new];
+    NSString *token = [FTTabDrag registerObject:object];
+    CHECK([FTTabDrag objectForToken:token] == object, "generic registry preserves identity");
+    [FTTabDrag forgetToken:token];
+    CHECK([FTTabDrag objectForToken:token] == nil && [FTTabDrag objectForToken:@""] == nil &&
+          [FTTabDrag objectForToken:@"invalid-token"] == nil, "forgotten, empty, and unknown tokens are rejected by the registry");
+    for (NSString *bad in @[token, @"invalid-token", @""]) {
+        CHECK(bar.canDropTab && !bar.canDropTab(bad, terminal), "tab callback rejects an invalid token");
+        CHECK(bar.onDropTab && !bar.onDropTab(bad, terminal, 0), "tab callback cannot perform an invalid token drop");
+        EditingDragInfo *info = dragInfo(bad, terminal ? FTTerminalDragType : FTTabDragType, bar, host,
+                                        NSMakePoint(NSMidX(host.bounds), NSMidY(host.bounds)));
+        CHECK([host draggingEntered:info] == NSDragOperationNone && ![host prepareForDragOperation:info] && ![host performDragOperation:info],
+              "content destination rejects invalid pasteboard tokens");
+        [host draggingEnded:info];
+    }
+    NSString *wrongClass = [FTTabDrag registerObject:object];
+    CHECK(!bar.canDropTab(wrongClass, NO) && ![host acceptToken:wrongClass terminal:NO zone:FTTabDropInto index:0],
+          "a registered object of the wrong class cannot be dropped as a tab");
+    [FTTabDrag forgetToken:wrongClass];
+}
+
+// Hit testing starts at the window root. NSView hitTest: takes its parent's coordinates.
+static NSView *rootHit(NSWindow *window, NSPoint windowPoint) {
+    NSView *root = window.contentView;
+    NSPoint point = [root convertPoint:windowPoint fromView:nil];
+    if (root.superview) point = [root convertPoint:point toView:root.superview];
+    return [root hitTest:point];
+}
+
+static void dividerDrag(NSWindow *window, FTSplitView *split, const char *name) {
+    if (split.items.count < 2) { CHECK(NO, "%s needs two columns", name); return; }
+    split.maximized = NO;
+    split.focused = 0;
+    NSRect original = split.frame;
+    split.frame = NSMakeRect(original.origin.x + 23, original.origin.y + 17,
+                            original.size.width - 46, original.size.height - 34);
+    // Start the first boundary with room to move left even if the application auto-focused a neighbour.
+    NSView *first = split.items[0];
+    CGFloat minimum = MIN(split.minimumItemWidth, split.bounds.size.width / split.items.count);
+    first.frame = NSMakeRect(0, 0, split.bounds.size.width - (split.items.count - 1) * minimum, split.bounds.size.height);
+    CGFloat startX = NSMaxX(first.frame);
+    for (NSUInteger i = 1; i < split.items.count; i++) {
+        split.items[i].frame = NSMakeRect(startX, 0, minimum, split.bounds.size.height);
+        startX += minimum;
+    }
+    NSPoint origin = [split convertPoint:NSZeroPoint toView:nil];
+    CHECK(split.frame.origin.x != 0 && split.frame.origin.y != 0 && origin.x != 0 && origin.y != 0,
+          "%s tests a split with nonzero local and window origins", name);
+    CGFloat boundary = NSMaxX(split.items[0].frame), y = MIN(70, NSMidY(split.bounds));
+    for (NSNumber *offset in @[@(-7), @0, @7]) {
+        NSPoint point = [split convertPoint:NSMakePoint(boundary + offset.doubleValue, y) toView:nil];
+        CHECK(rootHit(window, point) == split, "%s root hit test selects FTSplitView at divider offset %.0f", name, offset.doubleValue);
+    }
+    NSPoint away = [split convertPoint:NSMakePoint(boundary + 18, y) toView:nil];
+    CHECK(rootHit(window, away) != split, "%s gives content outside the divider band to child views", name);
+    NSPoint start = [split convertPoint:NSMakePoint(boundary + 6, y) toView:nil];
+    NSView *receiver = rootHit(window, start);
+    CHECK(receiver == split, "%s routes the divider gesture to FTSplitView", name);
+    if (receiver == split) {
+        CGFloat before = split.items[0].frame.size.width;
+        CGFloat desired = MAX(MIN(split.minimumItemWidth, split.bounds.size.width / split.items.count), before - 90);
+        NSPoint end = [split convertPoint:NSMakePoint(desired, y) toView:nil];
+        [receiver mouseDown:mouse(NSEventTypeLeftMouseDown, window, start, 1)];
+        [receiver mouseDragged:mouse(NSEventTypeLeftMouseDragged, window, end, 1)];
+        [receiver mouseUp:mouse(NSEventTypeLeftMouseUp, window, end, 1)];
+        CHECK(fabs(split.items[0].frame.size.width - desired) <= 2 && desired < before - 20,
+              "%s routed drag resizes the first column (%.0f -> %.0f, expected %.0f)", name, before, split.items[0].frame.size.width, desired);
+        CGFloat total = 0;
+        for (NSView *item in split.items) total += item.frame.size.width;
+        CHECK(fabs(total - split.bounds.size.width) <= 2, "%s routed drag preserves the total width", name);
+        [receiver mouseDragged:mouse(NSEventTypeLeftMouseDragged, window, start, 1)];
+        CHECK(fabs(split.items[0].frame.size.width - desired) <= 2, "%s mouse up ends the divider drag", name);
+    }
+    split.frame = original;
+    [split applyLayout];
+}
+
+static void doubleClickTab(NSWindow *window, TabBarView *bar, NSInteger index) {
+    NSRect tab = [bar rectForTab:index];
+    NSPoint point = [bar convertPoint:NSMakePoint(NSMinX(tab) + 14, NSMidY(tab)) toView:nil];
+    NSView *receiver = rootHit(window, point);
+    CHECK(receiver == bar, "the root routes a tab double-click to its tab bar");
+    if (receiver != bar) return;
+    [receiver mouseDown:mouse(NSEventTypeLeftMouseDown, window, point, 1)];
+    [receiver mouseUp:mouse(NSEventTypeLeftMouseUp, window, point, 1)];
+    [receiver mouseDown:mouse(NSEventTypeLeftMouseDown, window, point, 2)];
+    [receiver mouseUp:mouse(NSEventTypeLeftMouseUp, window, point, 2)];
+}
+
+static void focusedSplitGroups(NSWindow *window) {
+    FTSplitView *split = [[FTSplitView alloc] initWithFrame:NSMakeRect(20, 20, 900, 240)];
+    NSView *a = [NSView new], *b = [NSView new], *c = [NSView new];
+    [window.contentView addSubview:split];
+    split.items = @[a, b, c];
+    CHECK(!split.isMaximized && split.minimumItemWidth == 180,
+          "new split groups retain ordinary widths by default");
+    for (NSInteger focus = 0; focus < 3; focus++) {
+        split.focused = focus;
+        for (NSView *item in split.items)
+            CHECK(fabs(item.frame.size.width - 300) <= 1, "focus alone never enables group expansion");
+    }
+    split.maximized = YES;
+    for (NSInteger focus = 0; focus < 3; focus++) {
+        split.focused = focus;
+        CGFloat x = 0;
+        for (NSInteger i = 0; i < 3; i++) {
+            CHECK(fabs(split.items[i].frame.origin.x - x) <= 1 &&
+                  fabs(split.items[i].frame.size.width - (i == focus ? 540 : 180)) <= 1,
+                  "focus %ld expands the correct group without changing group order", (long)focus);
+            x = NSMaxX(split.items[i].frame);
+        }
+    }
+    split.frame = NSMakeRect(20, 20, 420, 240);
+    for (NSView *item in split.items) CHECK(fabs(item.frame.size.width - 140) <= 1, "narrow windows share all available group width");
+    split.frame = NSMakeRect(20, 20, 900, 240);
+    split.maximized = NO;
+    NSArray<NSNumber *> *weights = split.weights;
+    NSArray<NSValue *> *frames = @[[NSValue valueWithRect:a.frame], [NSValue valueWithRect:b.frame], [NSValue valueWithRect:c.frame]];
+    split.maximized = YES;
+    split.maximized = NO;
+    CHECK([split.weights isEqualToArray:weights] && NSEqualRects(a.frame, frames[0].rectValue) &&
+          NSEqualRects(b.frame, frames[1].rectValue) && NSEqualRects(c.frame, frames[2].rectValue),
+          "explicit maximize toggles restore manual proportions");
+    split.focused = 0;
+    split.maximized = YES;
+    NSPoint start = [split convertPoint:NSMakePoint(NSMaxX(a.frame), 80) toView:nil];
+    NSPoint end = [split convertPoint:NSMakePoint(440, 80) toView:nil];
+    [split mouseDown:mouse(NSEventTypeLeftMouseDown, window, start, 1)];
+    [split mouseDragged:mouse(NSEventTypeLeftMouseDragged, window, end, 1)];
+    [split mouseUp:mouse(NSEventTypeLeftMouseUp, window, end, 1)];
+    CHECK(!split.isMaximized && fabs(a.frame.size.width - 440) <= 1, "manual divider drag retains its chosen width");
+    split.focused = 0; [split applyLayout]; [split applyLayout];
+    CHECK(fabs(a.frame.size.width - 440) <= 1, "repeated layout and same-group focus preserve a manual drag");
+    split.focused = 2;
+    CHECK(!split.isMaximized && fabs(c.frame.size.width - 180) <= 1 && fabs(a.frame.size.width - 440) <= 1,
+          "focusing a minimum-width group after a manual drag preserves the chosen widths");
+    split.maximized = YES;
+    split.items = @[a];
+    split.items = @[a, b];
+    CHECK(!split.isMaximized, "single-to-multiple groups keep expansion disabled");
+    [split removeFromSuperview];
+}
+
+static NSArray<TabBarView *> *editorBars(ContentController *cc) { return [[cc valueForKey:@"_tabBars"] copy]; }
+
+static NSArray<NSString *> *pathsInPane(ContentController *cc, NSUInteger pane) {
+    NSMutableArray *paths = [NSMutableArray array];
+    for (id doc in [cc valueForKey:@"_docs"])
+        if ([[doc valueForKey:@"pane"] unsignedIntegerValue] == pane) [paths addObject:[doc valueForKey:@"path"] ?: @""];
+    return paths;
+}
+
+static void editorDrops(ContentController *cc, NSWindow *window, NSArray<NSString *> *paths) {
+    [cc closeAllWithoutAsking];
+    cc.autoSaveMode = AutoSaveOff;
+    for (NSString *path in paths) [cc openPath:path preview:NO focus:YES];
+    FTSplitView *split = [cc valueForKey:@"_split"];
+    NSArray *docs = [[cc valueForKey:@"_docs"] copy];
+    [cc openPath:paths[0] preview:NO focus:YES];
+    TextEditorView *original = cc.editor;
+    type(original, @"kept-");
+    NSString *edited = text(original);
+    tabDragLifecycle(editorBars(cc)[0]);
+    invalidDropTokens(editorBars(cc)[0], (FTTabDropView *)split.items[0], NO);
+
+    TabBarView *bar = editorBars(cc)[0];
+    NSString *token = dragToken(bar, 0, NO);
+    CHECK(bar.canDropTab(token, NO) && bar.onDropTab(token, NO, 4), "same-bar callback reorders a tab using a pre-removal insertion index");
+    [FTTabDrag forgetToken:token];
+    CHECK(([pathsInPane(cc, 0) isEqualToArray:@[paths[1], paths[2], paths[3], paths[0]]]), "same-bar reorder preserves all four editor tabs");
+    dropInBar(editorBars(cc)[0], 3, NO, editorBars(cc)[0], 0);
+    CHECK([pathsInPane(cc, 0) isEqualToArray:paths], "tab-strip destination reorders the last editor tab to the start");
+
+    if (!dropContent(editorBars(cc)[0], 1, NO, split.items[0], FTTabDropAfter, YES)) return;
+    CHECK(cc.paneCount == 2 && cc.tabCount == 4 && [pathsInPane(cc, 1) isEqualToArray:@[paths[1]]], "right body drop splits out the existing editor tab");
+    if (!dropContent(editorBars(cc)[0], 1, NO, split.items[0], FTTabDropBefore, YES)) return;
+    CHECK(cc.paneCount == 3 && cc.tabCount == 4 && [pathsInPane(cc, 0) isEqualToArray:@[paths[2]]], "left body drop creates the third editor column");
+    CHECK([[NSSet setWithArray:[cc valueForKey:@"_docs"]] isEqualToSet:[NSSet setWithArray:docs]], "editor moves preserve document identities without duplicates");
+
+    NSArray *hosts = split.items.copy, *beforeDocs = [[cc valueForKey:@"_docs"] copy];
+    [cc focusPane:1];
+    CHECK(cc.editor == original && [text(original) isEqualToString:edited], "splitting preserves the edited view and buffer");
+    NSView *attached = original.superview;
+    dropContent(editorBars(cc)[1], 0, NO, split.items[2], FTTabDropAfter, NO);
+    CHECK(cc.paneCount == 3 && cc.tabCount == 4 && [split.items isEqualToArray:hosts] &&
+          [[cc valueForKey:@"_docs"] isEqualToArray:beforeDocs] && original.superview == attached,
+          "the fourth editor split refuses before detaching a tab or view");
+    dividerDrag(window, split, "editor");
+
+    // A sole source column can relocate at the cap without consuming a fourth slot.
+    dropContent(editorBars(cc)[0], 0, NO, split.items[2], FTTabDropAfter, YES);
+    CHECK(cc.paneCount == 3 && [pathsInPane(cc, 2) isEqualToArray:@[paths[2]]], "sole editor column relocates at the cap");
+    dropContent(editorBars(cc)[2], 0, NO, split.items[0], FTTabDropBefore, YES);
+    dropContent(editorBars(cc)[1], 0, NO, split.items[0], FTTabDropInto, YES);
+    CHECK(cc.paneCount == 3 && [pathsInPane(cc, 1) isEqualToArray:@[paths[3]]], "central drop keeps the middle column's remaining tab");
+    dropContent(editorBars(cc)[1], 0, NO, split.items[0], FTTabDropInto, YES);
+    CHECK(cc.paneCount == 2 && cc.tabCount == 4 && [pathsInPane(cc, 1) isEqualToArray:@[paths[1]]], "empty middle editor column disappears without losing the right tab");
+    for (NSUInteger i = 0; i < 3 && cc.paneCount == 2; i++)
+        dropInBar(editorBars(cc)[0], 0, NO, editorBars(cc)[1], (NSInteger)editorBars(cc)[1].items.count);
+    CHECK(cc.paneCount == 1 && cc.tabCount == 4 && ([pathsInPane(cc, 0) isEqualToArray:@[paths[1], paths[2], paths[0], paths[3]]]),
+          "Into tab-strip merges delete the left column and preserve every tab in order");
+    [cc openPath:paths[0] preview:NO focus:YES];
+    CHECK(cc.editor == original && [text(original) isEqualToString:edited], "central merges preserve the original editor and unsaved contents");
+    [original undo:nil];
+    CHECK([text(original) isEqualToString:@"alpha\nbeta\n"], "the moved editor keeps its undo history");
+
+    // Closing the last tabs of middle and left columns also preserves neighbouring tabs.
+    dropContent(editorBars(cc)[0], 1, NO, split.items[0], FTTabDropBefore, YES);
+    dropContent(editorBars(cc)[1], 0, NO, split.items[1], FTTabDropAfter, YES);
+    [cc focusPane:1];
+    [cc closeActive];
+    CHECK(cc.paneCount == 3 && cc.tabCount == 3, "closing one middle editor tab retains its sibling");
+    [cc closeActive];
+    CHECK(cc.paneCount == 2 && cc.tabCount == 2 && [pathsInPane(cc, 0) isEqualToArray:@[paths[2]]] &&
+          [pathsInPane(cc, 1) isEqualToArray:@[paths[1]]], "deleting the middle editor column preserves left and right tabs");
+    [cc focusPane:0]; [cc closeActive];
+    CHECK(cc.paneCount == 1 && cc.tabCount == 1 && [cc.currentPath isEqualToString:paths[1]], "deleting the left editor column preserves the right tab");
+
+    [cc closeAllWithoutAsking];
+    [cc openPath:paths[0] preview:NO focus:YES];
+    TextEditorView *cleanTarget = cc.editor;
+    [cc splitEditor];
+    dropContent(editorBars(cc)[1], 0, NO, split.items[0], FTTabDropInto, YES);
+    CHECK(cc.paneCount == 1 && cc.tabCount == 1 && cc.editor == cleanTarget, "clean splitEditor duplicates merge into the existing target view");
+    [cc closeAllWithoutAsking];
+}
+
+static void checkPanelIdentities(TerminalPanel *panel, NSArray<TSession *> *sessions, NSArray<NSView *> *views,
+                                 NSArray *screens, NSArray<NSNumber *> *pids, NSArray<NSNumber *> *ptys) {
+    CHECK(panel.tabCount == sessions.count && panel.sessions.count == sessions.count &&
+          [[NSSet setWithArray:panel.sessions] isEqualToSet:[NSSet setWithArray:sessions]],
+          "panel keeps every session exactly once (%lu tabs, %lu expected)", (unsigned long)panel.tabCount, (unsigned long)sessions.count);
+    CHECK(panel.columnViews.count == panel.columnCount && panel.tabBars.count == panel.columnCount,
+          "panel exposes one host and tab bar per column");
+    NSUInteger tabs = 0;
+    for (NSUInteger col = 0; col < panel.columnCount; col++) {
+        CHECK([panel.columnViews[col] isKindOfClass:FTTabDropView.class], "terminal column %lu is a drop host", (unsigned long)col);
+        tabs += panel.tabBars[col].items.count;
+    }
+    CHECK(tabs == sessions.count, "column tab counts match the flattened sessions");
+    for (NSUInteger i = 0; i < sessions.count; i++) {
+        TSession *session = sessions[i];
+        [panel focusSession:session];
+        CHECK(panel.activeSession == session && panel.currentView == views[i] && [(TerminalView *)panel.currentView session] == session,
+              "terminal %lu keeps the same session and view", (unsigned long)i);
+        CHECK(session.screen == screens[i] && session.pid == pids[i].intValue && [[session valueForKey:@"_master"] isEqual:ptys[i]] && !session.exited,
+              "terminal %lu keeps its screen, process and PTY descriptor", (unsigned long)i);
+        CHECK([panel.currentView isDescendantOf:panel] && panel.window.firstResponder == panel.currentView,
+              "terminal %lu is attached and focusable after the move", (unsigned long)i);
+    }
+}
+
+static void terminalPanelDrops(ContentController *cc, NSWindow *window, NSString *directory) {
+    NSMutableArray<TSession *> *sessions = [NSMutableArray array];
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
+    NSMutableArray *screens = [NSMutableArray array], *pids = [NSMutableArray array], *ptys = [NSMutableArray array];
+    TerminalPanel *panel = [cc valueForKey:@"_terminalPanel"];
+    for (NSUInteger i = 0; i < 6; i++) {
+        TSession *session = trackShell([cc openTerminalAt:directory asTab:NO]);
+        if (!session) return;
+        [sessions addObject:session]; [views addObject:panel.currentView];
+        [screens addObject:session.screen]; [pids addObject:@(session.pid)]; [ptys addObject:[session valueForKey:@"_master"]];
+        CHECK(panel.columnCount == 1 && panel.tabBars[0].items.count == i + 1,
+              "new terminal %lu joins the focused column as a tab", (unsigned long)i + 1);
+    }
+    CHECK(cc.terminalCount == 6 && panel.tabCount == 6 && panel.columnCount == 1 && cc.terminalPanelVisible,
+          "terminal session count is independent of the three-column cap");
+    CHECK([panel.sessions isEqualToArray:sessions], "new terminal tabs preserve their creation order");
+    TSession *t0 = sessions[0], *t1 = sessions[1], *t2 = sessions[2];
+    tabDragLifecycle(panel.tabBars[0]);
+    invalidDropTokens(panel.tabBars[0], (FTTabDropView *)panel.columnViews[0], YES);
+    [panel refreshTitles];
+    CHECK(panel.tabBars[0].items.count == 6 && panel.tabBars[0].items[0].title.length, "refreshTitles covers all tabs");
+
+    TabBarView *bar = panel.tabBars[0];
+    NSString *token = dragToken(bar, 0, YES);
+    CHECK([TSession sessionForDragToken:token] == t0 && bar.canDropTab(token, YES) && bar.onDropTab(token, YES, 6),
+          "terminal source and same-bar drop callbacks reorder the original session");
+    CHECK(panel.sessions.lastObject == t0 && panel.sessions.count == 6, "forward terminal reorder uses a pre-removal insertion index");
+    dropInBar(panel.tabBars[0], 5, YES, panel.tabBars[0], 0);
+    CHECK([panel.sessions isEqualToArray:sessions], "tab strip moves the last terminal tab back to the start");
+
+    if (!dropContent(panel.tabBars[0], 1, YES, panel.columnViews[0], FTTabDropAfter, YES)) return;
+    CHECK(panel.columnCount == 2 && panel.tabBars[0].items.count == 5 && panel.tabBars[1].items.count == 1 && panel.activeSession == t1,
+          "right content drop creates a column from one terminal tab");
+    if (!dropContent(panel.tabBars[0], 1, YES, panel.columnViews[0], FTTabDropBefore, YES)) return;
+    CHECK(panel.columnCount == 3 && panel.tabBars[0].items.count == 1 && panel.tabBars[1].items.count == 4 && panel.activeSession == t2,
+          "left content drop creates the third terminal column");
+    checkPanelIdentities(panel, sessions, views, screens, pids, ptys);
+    FTSplitView *split = [panel valueForKey:@"_split"];
+    dividerDrag(window, split, "terminal");
+
+    [panel focusSession:t0];
+    NSArray *beforeSessions = panel.sessions, *beforeHosts = panel.columnViews, *beforeBars = panel.tabBars;
+    NSView *parent = views[0].superview;
+    dropContent(panel.tabBars[1], 0, YES, panel.columnViews[2], FTTabDropAfter, NO);
+    CHECK(panel.columnCount == 3 && cc.terminalCount == 6 && [panel.sessions isEqualToArray:beforeSessions] &&
+          [panel.columnViews isEqualToArray:beforeHosts] && [panel.tabBars isEqualToArray:beforeBars] && views[0].superview == parent,
+          "a fourth terminal split is refused without detaching sessions, tabs, hosts or views");
+
+    // A full split still accepts a new tab in the focused column.
+    TSession *extra = trackShell([cc openTerminalAt:directory asTab:NO]);
+    if (!extra) return;
+    [sessions addObject:extra]; [views addObject:panel.currentView]; [screens addObject:extra.screen];
+    [pids addObject:@(extra.pid)]; [ptys addObject:[extra valueForKey:@"_master"]];
+    CHECK(panel.columnCount == 3 && panel.tabCount == 7 && cc.terminalCount == 7 && panel.tabBars[1].items.count == 5,
+          "new terminal is an additional tab even with all three column slots occupied");
+    NSView *soleHost = panel.columnViews[0];
+    dropContent(panel.tabBars[0], 0, YES, panel.columnViews[2], FTTabDropAfter, YES);
+    CHECK(panel.columnCount == 3 && panel.columnViews[2] == soleHost && panel.sessions.lastObject == t2,
+          "sole terminal column relocates at the cap with its original host");
+    dropContent(panel.tabBars[2], 0, YES, panel.columnViews[0], FTTabDropBefore, YES);
+
+    dropContent(panel.tabBars[1], 0, YES, panel.columnViews[0], FTTabDropInto, YES);
+    CHECK(panel.columnCount == 3 && panel.tabBars[1].items.count == 4 && panel.activeSession == t0,
+          "central terminal body drop merges a tab while preserving source siblings");
+    for (NSUInteger i = 0; i < 4 && panel.columnCount == 3; i++)
+        dropContent(panel.tabBars[1], 0, YES, panel.columnViews[0], FTTabDropInto, YES);
+    CHECK(panel.columnCount == 2 && panel.tabCount == 7 && panel.tabBars[1].items.count == 1 && panel.sessions.lastObject == t1,
+          "merging the middle terminal column preserves the right column's tab");
+    for (NSUInteger i = 0; i < 6 && panel.columnCount == 2; i++)
+        dropInBar(panel.tabBars[0], 0, YES, panel.tabBars[1], (NSInteger)panel.tabBars[1].items.count);
+    CHECK(panel.columnCount == 1 && panel.tabCount == 7 &&
+          ([panel.sessions isEqualToArray:@[t1, t2, t0, sessions[3], sessions[4], sessions[5], extra]]),
+          "Into existing tabs removes the left terminal column without losing or duplicating sessions");
+    checkPanelIdentities(panel, sessions, views, screens, pids, ptys);
+
+    // Focus follows both explicit tab selection and a responder in another column.
+    dropContent(panel.tabBars[0], 1, YES, panel.columnViews[0], FTTabDropBefore, YES);
+    dropContent(panel.tabBars[1], 0, YES, panel.columnViews[1], FTTabDropAfter, YES);
+    CHECK(panel.columnCount == 3 && panel.tabBars[1].items.count == 5, "terminal close fixtures have tabs in the middle column");
+    [panel focusSession:t2];
+    [window makeFirstResponder:views[1]];
+    [panel syncFocus];
+    CHECK(panel.activeSession == t1 && panel.currentView == views[1], "syncFocus follows the existing terminal view into its column");
+    CHECK(!panel.isMaximized, "terminal splitting and focus keep expansion disabled by default");
+    NSArray<NSNumber *> *widths = split.weights;
+    FTSplitView *editorSplit = [cc valueForKey:@"_split"];
+    BOOL editorMaximized = editorSplit.isMaximized;
+    doubleClickTab(window, panel.tabBars[2], 0);
+    CHECK(panel.isMaximized && fabs(split.items[2].frame.size.width - (split.bounds.size.width - 360)) <= 1,
+          "a terminal tab double-click expands the responder's group and retains usable neighbours");
+    CHECK(editorSplit.isMaximized == editorMaximized, "terminal expansion leaves the editor area unchanged");
+    [panel focusSession:t2];
+    CHECK(fabs(split.items[0].frame.size.width - (split.bounds.size.width - 360)) <= 1, "terminal expansion follows focusSession while enabled");
+    doubleClickTab(window, panel.tabBars[0], 0);
+    CHECK(!panel.isMaximized && [split.weights isEqualToArray:widths], "another terminal tab double-click restores stored widths");
+    [panel focusSession:t1];
+    CHECK(!panel.isMaximized && [split.weights isEqualToArray:widths], "terminal focus never re-enables disabled expansion");
+
+    // Prove the preserved PTY still executes commands after all the moves.
+    NSString *marker = [directory stringByAppendingPathComponent:@"terminal-moved"];
+    [t0 writeString:[NSString stringWithFormat:@"printf '%%s' 'pty-' 'survived' > '%@'\n", marker]];
+    CFAbsoluteTime until = CFAbsoluteTimeGetCurrent() + 5;
+    NSString *movedOutput;
+    do {
+        movedOutput = [[NSString alloc] initWithContentsOfFile:marker encoding:NSUTF8StringEncoding error:nil];
+        if ([movedOutput isEqualToString:@"pty-survived"]) break;
+        drain(.05);
+    } while (CFAbsoluteTimeGetCurrent() < until);
+    CHECK([movedOutput isEqualToString:@"pty-survived"],
+          "the original terminal PTY executes a command after split, reorder and merge (result=%s, running=%d, screen=%s)",
+          movedOutput.UTF8String, t0.running, [t0.screen textOfRow:t0.screen.cursorRow].UTF8String);
+
+    // Flattened close indices remove only the selected tab, then empty columns.
+    [panel closeTabAtIndex:1];
+    CHECK(panel.columnCount == 3 && panel.tabCount == 6 && ![panel containsSession:t0] && panel.tabBars[1].items.count == 4,
+          "closing one middle terminal tab preserves the remaining tabs");
+    for (NSUInteger i = 0; i < 4 && panel.columnCount == 3; i++) [panel closeTabAtIndex:1];
+    CHECK(panel.columnCount == 2 && panel.tabCount == 2 && ([panel.sessions isEqualToArray:@[t2, t1]]),
+          "deleting the middle terminal column preserves both neighbours");
+    [panel closeTabAtIndex:0];
+    CHECK(panel.columnCount == 1 && panel.tabCount == 1 && panel.activeSession == t1 && panel.currentView == views[1],
+          "deleting the left terminal column preserves the right tab and view");
+    CHECK(![panel moveSession:t1 toColumn:9 zone:FTTabDropInto index:0] && panel.tabCount == 1,
+          "an invalid destination column leaves the remaining terminal intact");
+    [cc shutdownTerminals];
+    [panel closeTabAtIndex:0];
+    CHECK(panel.columnCount == 0 && panel.tabCount == 0 && cc.terminalCount == 0 && !cc.terminalPanelVisible,
+          "closing the final terminal hides the empty panel");
+}
+
+// Columns of editors and columns of terminals, free divider drags, and maximize that follows focus.
+static void splits(void) {
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *a = [dir stringByAppendingPathComponent:@"a.txt"], *b = [dir stringByAppendingPathComponent:@"b.txt"];
+    NSString *c = [dir stringByAppendingPathComponent:@"c.txt"], *d = [dir stringByAppendingPathComponent:@"d.txt"];
+    [@"alpha\nbeta\n" writeToFile:a atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [@"one\ntwo\nthree\n" writeToFile:b atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [@"third file\n" writeToFile:c atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [@"fourth file\n" writeToFile:d atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    NSWindow *sw = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 900, 480) styleMask:NSWindowStyleMaskTitled
+                                               backing:NSBackingStoreBuffered defer:YES];
+    ContentController *cc = testController();
+    sw.contentView = cc.view;
+    [sw makeKeyAndOrderFront:nil];
+    drain(0.2);
+    CHECK(cc.paneCount == 1, "starts with one column");
+    focusedSplitGroups(sw);
+
+    [cc openPath:a preview:YES focus:YES];
+    CHECK(cc.tabCount == 1 && cc.editor != nil, "a file in column 1");
+    doubleClickTab(sw, editorBars(cc)[0], 0);
+    CHECK(![[[[cc valueForKey:@"_docs"] firstObject] valueForKey:@"preview"] boolValue] && !cc.focusedAreaMaximized,
+          "double-click keeps a single-column preview open without enabling expansion");
+    [cc splitEditor];
+    CHECK(cc.paneCount == 2 && cc.tabCount == 2, "⌘\\ duplicates the active file into a second column (p %lu, t %lu)",
+          (unsigned long)cc.paneCount, (unsigned long)cc.tabCount);
+    FTSplitView *split = [cc valueForKey:@"_split"];
+    CHECK(split.items.count == 2, "the split container has both columns");
+    CGFloat total = split.items[0].frame.size.width + split.items[1].frame.size.width;
+    CHECK(fabs(total - sw.frame.size.width) < 4, "the columns fill the width (%.0f vs %.0f)", total, sw.frame.size.width);
+    CHECK(split.items[0].frame.size.width > 100, "both columns are usable: %.0f", split.items[0].frame.size.width);
+
+    // the new file opens in the focused (second) column; each column remembers its own tab
+    [cc openPath:b preview:NO focus:YES];
+    CHECK(cc.tabCount == 3 && [cc.currentPath isEqualToString:b], "b.txt joined column 2");
+    [cc focusPane:0];
+    CHECK([cc.currentPath isEqualToString:a], "⌘1 shows column 1's tab");
+    [cc focusPane:1];
+    CHECK([cc.currentPath isEqualToString:b], "⌘2 shows column 2's tab");
+    // the same file is already a tab of this column: opening it again just activates that tab
+    [cc openPath:a preview:NO focus:YES];
+    CHECK(cc.tabCount == 3 && [cc.currentPath isEqualToString:a], "a path stays unique within its column");
+
+    // closing tabs merges an emptied column away
+    [cc closeActive];                                      // the a-dup goes, b stays in column 2
+    CHECK(cc.paneCount == 2 && cc.tabCount == 2 && [cc.currentPath isEqualToString:b], "column 2 keeps its other tab (p %lu, t %lu)",
+          (unsigned long)cc.paneCount, (unsigned long)cc.tabCount);
+    [cc closeActive];                                      // b was column 2's last tab: the column goes
+    CHECK(cc.paneCount == 1 && cc.tabCount == 1 && [cc.currentPath isEqualToString:a], "back to one column on column 1's tab (p %lu, t %lu)",
+          (unsigned long)cc.paneCount, (unsigned long)cc.tabCount);
+
+    // three columns, not four
+    [cc splitEditor]; [cc splitEditor];
+    CHECK(cc.paneCount == 3 && cc.tabCount == 3, "three columns");
+    [cc splitEditor];
+    CHECK(cc.paneCount == 3, "the fourth split is refused");
+
+    // maximize: the focused column wide, the others as narrow strips at the edges — and it follows the focus
+    [cc focusPane:1];
+    [cc openPath:b preview:NO focus:YES];
+    CHECK(cc.tabCount == 4, "b.txt joined the middle column");
+    CHECK(!split.isMaximized, "editor splitting and focus keep expansion disabled by default");
+    NSArray<NSNumber *> *widths = split.weights;
+    doubleClickTab(sw, editorBars(cc)[1], 1);
+    CHECK(split.isMaximized && [cc.currentPath isEqualToString:b], "double-clicking an editor tab enables expansion in its group");
+    CHECK(fabs(split.items[0].frame.size.width - 180) <= 1 && fabs(split.items[2].frame.size.width - 180) <= 1,
+          "unfocused editor groups retain a usable minimum width");
+    CHECK(fabs(split.items[1].frame.size.width - (split.bounds.size.width - 360)) <= 1,
+          "the focused editor group receives the remaining width");
+    [cc focusPane:2];
+    CHECK(fabs(split.items[2].frame.size.width - (split.bounds.size.width - 360)) <= 1 && fabs(split.items[1].frame.size.width - 180) <= 1,
+          "automatic expansion follows editor focus");
+    doubleClickTab(sw, editorBars(cc)[2], 0);
+    CHECK(!split.isMaximized && [split.weights isEqualToArray:widths], "a second tab double-click restores stored editor widths");
+    [cc focusPane:0];
+    CHECK(!split.isMaximized && [split.weights isEqualToArray:widths], "focus after disabling expansion retains ordinary widths");
+    [cc toggleMaximize];
+    CHECK(split.isMaximized, "the explicit shortcut can still enable group expansion");
+    [cc toggleMaximize];
+    CHECK(!split.isMaximized, "the explicit shortcut can also disable group expansion");
+
+    // Dividers must be reached through the window root, even with translated split origins.
+    dividerDrag(sw, split, "editor baseline");
+    editorDrops(cc, sw, @[a, b, c, d]);
+    terminalPanelDrops(cc, sw, dir);
+
+    // the session remembers which column each tab lives in
+    [cc closeAllWithoutAsking];
+    [cc openPath:a preview:NO focus:YES];
+    [cc splitEditor];
+    [cc openPath:b preview:NO focus:YES];
+    NSDictionary *st = [cc sessionState];
+    CHECK([st[@"tabs"] count] == 3 && [st[@"tabs"][0][@"pane"] integerValue] == 0 && [st[@"tabs"][2][@"pane"] integerValue] == 1,
+          "the session stores the columns");
+    [cc restoreSession:st];
+    CHECK(cc.paneCount == 2 && cc.tabCount == 3, "restoring brings both columns back (p %lu, t %lu)",
+          (unsigned long)cc.paneCount, (unsigned long)cc.tabCount);
+    [cc closeAllWithoutAsking];
+    CHECK(cc.paneCount == 1 && cc.tabCount == 0, "closing everything collapses to one column");
+    drain(0.3);
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
 }

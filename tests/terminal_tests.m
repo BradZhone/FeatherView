@@ -4,6 +4,15 @@
 #import "TScreen.h"
 #import "VTEscape.h"
 #import "TSession.h"
+#include <libproc.h>
+#include <sys/proc.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#include <termios.h>
+#include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 static int failures = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
@@ -227,72 +236,321 @@ static void drainRunloop(double seconds) {
     [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
 }
 
-static void sessionBasics(void) {
-    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
-    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *err = nil;
-    TSession *ts = [[TSession alloc] initWithDirectory:dir shell:@"/bin/sh" error:&err];
-    CHECK(ts && !err, "session started (%s)", err.UTF8String);
-    CHECK([ts.directory isEqualToString:dir], "started in the given directory: %s", ts.directory.UTF8String);
-    [ts writeString:@"printf 'hello-from-test'\n"];
-    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-    while (CFAbsoluteTimeGetCurrent() - t0 < 5 && ![[ts.screen textOfRow:0] containsString:@"hello-from-test"]) drainRunloop(0.05);
-    CHECK([[ts.screen textOfRow:0] containsString:@"hello-from-test"], "echoed output: %s", [ts.screen textOfRow:0].UTF8String);
-    CHECK([ts.screen cols] == 80 && [ts.screen rows] == 24, "80x24 by default");
-    [ts writeString:@"exit 7\n"];
-    t0 = CFAbsoluteTimeGetCurrent();
-    while (!ts.exited && CFAbsoluteTimeGetCurrent() - t0 < 5) drainRunloop(0.05);
-    CHECK(ts.exited && ts.exitCode == 7, "exit code 7 (%d)", ts.exitCode);
+static BOOL waitUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
+    double deadline = CFAbsoluteTimeGetCurrent() + timeout;
+    do {
+        if (condition()) return YES;
+        drainRunloop(0.02);
+    } while (CFAbsoluteTimeGetCurrent() < deadline);
+    return condition();
+}
 
-    // a long dump arrives in bounded chunks and the screen ends up complete
-    ts = [[TSession alloc] initWithDirectory:dir shell:@"/bin/sh" error:nil];
-    [ts writeString:@"seq 1 20000\n"];
-    t0 = CFAbsoluteTimeGetCurrent();
-    while (CFAbsoluteTimeGetCurrent() - t0 < 10) {
-        drainRunloop(0.05);
-        NSString *bottom = [ts.screen textOfRow:[ts.screen rows] - 1];
-        if ([bottom containsString:@"20000"] && [ts.screen historyCount] == 5000) break;
+static NSString *screenText(TSession *session) {
+    NSMutableString *text = [NSMutableString string];
+    for (NSUInteger row = 0; row < session.screen.rows; row++) [text appendString:[session.screen textOfRow:row]];
+    return text;
+}
+
+static BOOL processGone(pid_t pid) {
+    struct proc_bsdinfo info = {0};
+    errno = 0;
+    if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof info) != sizeof info) return errno == ESRCH || errno == ENOENT;
+    return info.pbi_status == SZOMB;
+}
+
+static NSString *recordPath(pid_t pid) {
+    return [TSession.pidsDirectory stringByAppendingPathComponent:[NSString stringWithFormat:@"%d", pid]];
+}
+
+static NSMutableDictionary *recordFor(pid_t pid) {
+    return [[NSDictionary dictionaryWithContentsOfFile:recordPath(pid)] mutableCopy];
+}
+
+static void saveRecord(NSDictionary *record, pid_t pid) {
+    CHECK([record writeToFile:recordPath(pid) atomically:YES], "write isolated test record");
+}
+
+static void cleanupSessions(void) {
+    CHECK([TSession shutdownAllSessionsWithTimeout:4], "bounded session cleanup (%lu remain)", (unsigned long)TSession.liveSessions.count);
+}
+
+static void sessionBasics(void) {
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    @try {
+        NSString *error = nil;
+        TSession *session = [[TSession alloc] initWithDirectory:dir shell:@"/bin/sh" error:&error];
+        CHECK(session && !error, "session started (%s)", error.UTF8String);
+        CHECK([session.directory isEqualToString:dir], "started in the given directory");
+        [session writeString:@"printf '\\033[2J\\033[H%s' hello-$((370+41))\n"];
+        CHECK(waitUntil(4, ^BOOL{ return [screenText(session) containsString:@"hello-411"]; }), "parsed actual shell output: %s", screenText(session).UTF8String);
+        CHECK(session.screen.cols == 80 && session.screen.rows == 24, "80x24 by default");
+        __block int exits = 0;
+        session.onExit = ^{ exits++; };
+        [session writeString:@"exit 7\n"];
+        CHECK(waitUntil(4, ^BOOL{ return session.exited; }), "shell exits and drains");
+        CHECK(session.shellExited && session.outputDone && session.exitCode == 7, "exit status/output state (%d)", session.exitCode);
+        CHECK(exits == 1, "onExit exactly once");
+        CHECK(![NSFileManager.defaultManager fileExistsAtPath:recordPath(session.pid)], "completed shell drops its identity record");
+        [session terminate];
+        CHECK(exits == 1, "repeat terminate does not deliver another exit");
+    } @finally {
+        cleanupSessions();
+        [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     }
-    CHECK([ts.screen historyCount] == 5000, "the scrollback is capped at 5000 (%lu)", (unsigned long)[ts.screen historyCount]);
-    NSMutableString *all = [NSMutableString string];
-    for (NSUInteger r = 0; r < [ts.screen rows]; r++) [all appendString:[ts.screen textOfRow:r]];
-    CHECK([all containsString:@"20000"] || [all containsString:@"199"], "the tail is on screen: %s", [all stringByReplacingOccurrencesOfString:@"\n" withString:@"|"].UTF8String);
-    [ts terminate];
-    t0 = CFAbsoluteTimeGetCurrent();
-    while (!ts.exited && CFAbsoluteTimeGetCurrent() - t0 < 5) drainRunloop(0.05);
-    CHECK(ts.exited, "terminate ends the process");
-    [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
+}
+
+// This executable also supplies deterministic PTY children. They have no shell startup files,
+// perform no unrelated work, and can only be launched by this isolated test process.
+static int helperProcess(NSString *mode) {
+    struct termios settings;
+    if (tcgetattr(STDIN_FILENO, &settings) == 0) { cfmakeraw(&settings); tcsetattr(STDIN_FILENO, TCSANOW, &settings); }
+    if ([mode isEqualToString:@"tail"]) {
+        char bytes[8192]; memset(bytes, 'x', sizeof bytes);
+        for (int i = 0; i < 192; i++) {
+            size_t offset = 0;
+            while (offset < sizeof bytes) {
+                ssize_t n = write(STDOUT_FILENO, bytes + offset, sizeof bytes - offset);
+                if (n > 0) offset += (size_t)n; else if (errno != EINTR) return 91;
+            }
+        }
+        const char *tail = "\033[2J\033[HFINAL-TAIL-731\033]2;tail-title\007\033]7;file:///tmp/tail-dir\007";
+        write(STDOUT_FILENO, tail, strlen(tail));
+        return 23;
+    }
+    if ([mode isEqualToString:@"silent-input"]) {
+        usleep(250000); // deliberately fill the parent's nonblocking input queue, without any output
+        size_t total = 0;
+        unsigned char bytes[8192];
+        while (total < 524288) {
+            ssize_t n = read(STDIN_FILENO, bytes, MIN(sizeof bytes, 524288 - total));
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) return 92;
+            for (ssize_t i = 0; i < n; i++) if (bytes[i] != (unsigned char)((total + (size_t)i) % 251)) return 93;
+            total += (size_t)n;
+        }
+        const char *done = "\033[2J\033[HINPUT-ORDER-OK";
+        write(STDOUT_FILENO, done, strlen(done));
+        return 0;
+    }
+    if ([mode isEqualToString:@"closed-output"]) {
+        close(STDIN_FILENO); close(STDOUT_FILENO); close(STDERR_FILENO);
+        usleep(650000);
+        return 9;
+    }
+    if ([mode isEqualToString:@"resist"]) {
+        signal(SIGHUP, SIG_IGN);
+        for (;;) pause();
+    }
+    if ([mode isEqualToString:@"fd-check"]) {
+        int candidate = [NSProcessInfo.processInfo.environment[@"FV_TEST_INHERITED_FD"] intValue];
+        BOOL closed = fcntl(candidate, F_GETFD) == -1 && errno == EBADF;
+        write(STDOUT_FILENO, closed ? "FD-CLOSED" : "FD-LEAKED", 9);
+        return closed ? 0 : 94;
+    }
+    return 95;
+}
+
+static NSString *testExecutable;
+static NSString *helperShell(NSString *mode) {
+    NSString *path = [TSession.pidsDirectory stringByAppendingPathComponent:[@"helper-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    NSString *script = [NSString stringWithFormat:@"#!/bin/sh\nexec '%@' --pty-helper '%@'\n", [testExecutable stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"], mode];
+    CHECK([script writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil], "write deterministic helper");
+    CHECK(chmod(path.fileSystemRepresentation, 0700) == 0, "make deterministic helper executable");
+    return path;
+}
+
+static void outputAndInput(void) {
+    @try {
+        TSession *session = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:helperShell(@"tail") error:nil];
+        CHECK(session != nil, "tail helper starts");
+        __block int exits = 0;
+        __block BOOL tailAtExit = NO;
+        __weak TSession *weakSession = session;
+        session.onExit = ^{
+            exits++;
+            TSession *done = weakSession;
+            tailAtExit = [screenText(done) containsString:@"FINAL-TAIL-731"] && [done.screen.title isEqualToString:@"tail-title"] &&
+                [done.screen.cwd isEqualToString:@"/tmp/tail-dir"] && done.outputDone && done.shellExited;
+        };
+        // Stop main-queue parsing briefly so a fast child exercises the bounded output backlog.
+        usleep(200000);
+        CHECK(waitUntil(8, ^BOOL{ return session.exited; }), "large-output child finishes");
+        CHECK(tailAtExit && exits == 1 && session.exitCode == 23, "full final tail is parsed before onExit (%s)", screenText(session).UTF8String);
+
+        session = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:helperShell(@"silent-input") error:nil];
+        NSMutableData *data = [NSMutableData dataWithLength:524288];
+        for (NSUInteger i = 0; i < data.length; i++) ((uint8_t *)data.mutableBytes)[i] = i % 251;
+        // The helper enters raw mode before the first write. There is intentionally no output
+        // readiness event; waiting only gives its exec chain time to install raw mode.
+        drainRunloop(0.75);
+        [session writeData:[data subdataWithRange:NSMakeRange(0, 300000)]];
+        [session writeData:[data subdataWithRange:NSMakeRange(300000, data.length - 300000)]];
+        CHECK(waitUntil(5, ^BOOL{ return session.exited; }), "pending input progresses without output");
+        CHECK(session.exitCode == 0 && [screenText(session) containsString:@"INPUT-ORDER-OK"], "queued input preserves order (%d)", session.exitCode);
+
+        session = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:helperShell(@"closed-output") error:nil];
+        CHECK(waitUntil(2, ^BOOL{ return session.outputDone; }), "EOF cancels read source before shell exit");
+        CHECK(!session.shellExited && !session.exited, "EOF alone does not announce exit");
+        CHECK(waitUntil(3, ^BOOL{ return session.exited; }) && session.exitCode == 9, "quiet/closed-output child is polled/reaped");
+
+        int inherited = fcntl(STDERR_FILENO, F_DUPFD, 100);
+        CHECK(inherited >= 100, "allocate an explicitly non-CLOEXEC descriptor");
+        NSString *fd = [NSString stringWithFormat:@"%d", inherited];
+        setenv("FV_TEST_INHERITED_FD", fd.UTF8String, 1);
+        @try {
+            session = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:helperShell(@"fd-check") error:nil];
+            CHECK(waitUntil(3, ^BOOL{ return session.exited; }) && session.exitCode == 0, "spawn closes inherited descriptors: %s", screenText(session).UTF8String);
+        } @finally { close(inherited); unsetenv("FV_TEST_INHERITED_FD"); }
+    } @finally { cleanupSessions(); }
+}
+
+static void titleNotifications(void) {
+    @try {
+        TSession *session = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:@"/bin/sh" error:nil];
+        __block int titles = 0;
+        session.onTitleChange = ^{ titles++; };
+        [session writeString:@"printf '\\033]2;first-title\\007'\n"];
+        CHECK(waitUntil(3, ^BOOL{ return [session.screen.title isEqualToString:@"first-title"]; }), "first title parsed");
+        CHECK(titles == 1, "one title notification");
+        [session writeString:@"printf 'ordinary output\\n'; printf '\\033]2;first-title\\007'\n"];
+        drainRunloop(0.25);
+        CHECK(titles == 1, "ordinary output/repeated title does not notify");
+        [session writeString:@"printf '\\033]7;file:///tmp/test-cwd\\007'\n"];
+        CHECK(waitUntil(3, ^BOOL{ return titles == 2; }), "cwd change notifies");
+    } @finally { cleanupSessions(); }
+}
+
+static void retainedTerminationAndJobs(void) {
+    pid_t shellPid = 0, jobPid = 0;
+    NSString *jobFile = [TSession.pidsDirectory stringByAppendingPathComponent:@"job.pid"];
+    @try {
+        __weak TSession *weakSession;
+        @autoreleasepool {
+            TSession *session = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:@"/bin/sh" error:nil];
+            shellPid = session.pid;
+            [session writeString:[NSString stringWithFormat:@"set -m; trap '' HUP; /bin/sh -c 'trap \"\" HUP; while :; do sleep 1; done' & printf '%%s' $! > '%@'; sleep 0.2\n", jobFile]];
+            CHECK(waitUntil(3, ^BOOL{ return [NSFileManager.defaultManager fileExistsAtPath:jobFile]; }), "HUP-resistant background job starts");
+            drainRunloop(0.3);
+            jobPid = [[NSString stringWithContentsOfFile:jobFile encoding:NSUTF8StringEncoding error:nil] intValue];
+            CHECK(jobPid > 1 && getpgid(jobPid) != getpgid(shellPid) && getsid(jobPid) == shellPid, "background job has separate group in terminal session");
+            weakSession = session;
+            [session terminate]; [session terminate];
+            CHECK([TSession.liveSessions containsObject:session], "closing session remains registered");
+            CHECK([NSFileManager.defaultManager fileExistsAtPath:recordPath(shellPid)], "terminate preserves identity until cleanup");
+        }
+        CHECK(weakSession != nil, "registry retains session after UI owner releases it");
+        CHECK(waitUntil(5, ^BOOL{ @autoreleasepool { return TSession.liveSessions.count == 0; } }), "retained escalation cleans shell and jobs");
+        CHECK(processGone(shellPid) && processGone(jobPid), "shell and separate background process group are gone");
+        CHECK(![NSFileManager.defaultManager fileExistsAtPath:recordPath(shellPid)], "record removed only after cleanup");
+        CHECK(waitUntil(1, ^BOOL{ return weakSession == nil; }), "cleanup releases registry ownership");
+    } @finally { cleanupSessions(); [NSFileManager.defaultManager removeItemAtPath:jobFile error:nil]; }
+}
+
+static NSUInteger openFDCount(void) {
+    int bytes = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, NULL, 0);
+    return bytes > 0 ? (NSUInteger)bytes / sizeof(struct proc_fdinfo) : 0;
+}
+
+static void manySessions(void) {
+    @try {
+        // Warm up libdispatch's process-wide descriptors before the leak comparison.
+        TSession *warm = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:@"/bin/sh" error:nil];
+        [warm writeString:@"exit\n"]; cleanupSessions(); drainRunloop(0.1);
+        NSUInteger before = openFDCount();
+        NSMutableArray<NSNumber *> *pids = [NSMutableArray array];
+        for (int batch = 0; batch < 3; batch++) {
+            for (int i = 0; i < 8; i++) {
+                TSession *session = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:@"/bin/sh" error:nil];
+                CHECK(session != nil, "quick shell starts");
+                if (session) [pids addObject:@(session.pid)];
+                if (i % 2) [session writeString:@"exit 0\n"]; else [session terminate];
+            }
+            CHECK([TSession shutdownAllSessionsWithTimeout:4], "quick sessions finish within bounded shutdown");
+        }
+        drainRunloop(0.1);
+        for (NSNumber *pid in pids) {
+            CHECK(processGone(pid.intValue), "quick child %d is gone", pid.intValue);
+            int status;
+            CHECK(waitpid(pid.intValue, &status, WNOHANG) == -1 && errno == ECHILD, "tracked child %d was reaped", pid.intValue);
+        }
+        CHECK(TSession.liveSessions.count == 0, "live registry empty");
+        CHECK(openFDCount() <= before + 2, "no PTY descriptor leak (%lu -> %lu)", (unsigned long)before, (unsigned long)openFDCount());
+    } @finally { cleanupSessions(); }
 }
 
 static void orphanSweep(void) {
-    NSString *pidsDir = [TSession pidsDirectory];
-    // a spawned shell is recorded, and the record is dropped when it exits on its own
-    NSString *err = nil;
-    TSession *ts = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:@"/bin/sh" error:&err];
-    CHECK(ts && !err, "session for the sweep test");
-    NSString *file = [pidsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%d", (int)ts.pid]];
-    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
-    CHECK([NSFileManager.defaultManager fileExistsAtPath:file], "the spawned pid is recorded");
-    [ts writeString:@"exit 0\n"];
-    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-    while (!ts.exited && CFAbsoluteTimeGetCurrent() - t0 < 3) [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-    CHECK(![NSFileManager.defaultManager fileExistsAtPath:file], "a self-exited shell drops its record");
-    // a recorded pid that is still alive: the sweep ends it; a pid whose command doesn't match is skipped
-    TSession *ts2 = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:@"/bin/sh" error:nil];
-    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.3]];
-    NSTask *sleep = [NSTask new];
-    sleep.launchPath = @"/bin/sleep";
-    sleep.arguments = @[@"30"];
-    [sleep launch];
-    NSString *wrongShell = [pidsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%d", sleep.processIdentifier]];
-    [@"zsh" writeToFile:wrongShell atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    [TSession sweepOrphanedShells];
-    t0 = CFAbsoluteTimeGetCurrent();
-    while ((!ts2.exited || sleep.isRunning) && CFAbsoluteTimeGetCurrent() - t0 < 4) [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-    CHECK(ts2.exited, "the sweep ends a recorded, still-running shell");
-    CHECK(sleep.isRunning, "a pid whose command doesn't match is left alone");
-    [sleep terminate];
-    [NSFileManager.defaultManager removeItemAtPath:wrongShell error:nil];
+    @try {
+        TSession *session = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:@"/bin/sh" error:nil];
+        pid_t pid = session.pid;
+        NSMutableDictionary *original = recordFor(pid);
+        CHECK([original[@"version"] isEqual:@1] && [original[@"child"][@"executable"] isEqual:@"/bin/sh"], "structured kernel identity recorded");
+        [TSession sweepOrphanedShells]; drainRunloop(0.3);
+        CHECK(!session.shellExited && !processGone(pid), "live exact owner is never swept");
+        CHECK([NSFileManager.defaultManager fileExistsAtPath:recordPath(pid)], "live-owner record preserved");
+
+        NSMutableDictionary *recycled = [original mutableCopy];
+        NSMutableDictionary *child = [original[@"child"] mutableCopy];
+        child[@"birthSeconds"] = @([child[@"birthSeconds"] unsignedLongLongValue] - 1);
+        recycled[@"child"] = child;
+        NSMutableDictionary *deadOwner = [original[@"owner"] mutableCopy];
+        deadOwner[@"birthSeconds"] = @([deadOwner[@"birthSeconds"] unsignedLongLongValue] - 1);
+        recycled[@"owner"] = deadOwner;
+        saveRecord(recycled, pid);
+        [TSession sweepOrphanedShells]; drainRunloop(0.3);
+        CHECK(!session.shellExited && !processGone(pid), "recycled child identity is rejected without signaling");
+        saveRecord(original, pid);
+
+        [@"zsh" writeToFile:recordPath(pid) atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [TSession sweepOrphanedShells]; drainRunloop(0.2);
+        CHECK(!processGone(pid), "legacy shell-name record never authorizes signaling");
+        saveRecord(original, pid);
+        NSMutableDictionary *malformed = [original mutableCopy]; malformed[@"child"] = @{@"pid": @(pid)};
+        saveRecord(malformed, pid);
+        [TSession sweepOrphanedShells]; drainRunloop(0.2);
+        CHECK(!processGone(pid), "malformed identity never authorizes signaling");
+        saveRecord(original, pid);
+        // Exact live-owner and recycled-child safety is tested above. Real dead-owner recovery
+        // uses a separate process below, so the live registry cannot rewrite the fixture.
+    } @finally { cleanupSessions(); }
+}
+
+static void crashRecovery(void) {
+    NSString *ready = [TSession.pidsDirectory stringByAppendingPathComponent:@"crash-ready.plist"];
+    NSTask *harness = [NSTask new];
+    harness.executableURL = [NSURL fileURLWithPath:testExecutable];
+    harness.arguments = @[@"--crash-owner", ready];
+    harness.standardOutput = NSFileHandle.fileHandleWithNullDevice;
+    harness.standardError = NSFileHandle.fileHandleWithNullDevice;
+    @try {
+        NSError *error = nil;
+        CHECK([harness launchAndReturnError:&error], "launch crash owner (%s)", error.description.UTF8String);
+        CHECK(waitUntil(5, ^BOOL{ return [NSFileManager.defaultManager fileExistsAtPath:ready]; }), "crash harness publishes owned identities");
+        NSDictionary *identity = [NSDictionary dictionaryWithContentsOfFile:ready];
+        pid_t pid = [identity[@"shell"] intValue], job = [identity[@"job"] intValue];
+        CHECK(pid > 1 && job > 1 && pid != getpid() && job != getpid(), "crash harness owns its test targets");
+        if (harness.running) [harness terminate];
+        CHECK(waitUntil(3, ^BOOL{ return !harness.running; }), "owner is dead before orphan sweep");
+        [TSession sweepOrphanedShells];
+        CHECK(waitUntil(5, ^BOOL{ return processGone(pid) && processGone(job); }), "dead owner shell and separate-group job recovered");
+        CHECK(waitUntil(3, ^BOOL{ return ![NSFileManager.defaultManager fileExistsAtPath:recordPath(pid)]; }), "orphan identity retained until targets gone");
+    } @finally {
+        if (harness.running) { [harness terminate]; waitUntil(2, ^BOOL{ return !harness.running; }); }
+        [TSession sweepOrphanedShells]; drainRunloop(1.8);
+        [NSFileManager.defaultManager removeItemAtPath:ready error:nil];
+    }
+}
+
+static int crashOwner(NSString *ready) {
+    TSession *session = [[TSession alloc] initWithDirectory:NSTemporaryDirectory() shell:@"/bin/sh" error:nil];
+    if (!session) return 81;
+    NSString *jobFile = [ready stringByAppendingString:@".job"];
+    [session writeString:[NSString stringWithFormat:@"set -m; trap '' HUP; /bin/sh -c 'trap \"\" HUP; while :; do sleep 1; done' & printf '%%s' $! > '%@'\n", jobFile]];
+    if (!waitUntil(3, ^BOOL{ return [NSFileManager.defaultManager fileExistsAtPath:jobFile]; })) { cleanupSessions(); return 82; }
+    pid_t job = [[NSString stringWithContentsOfFile:jobFile encoding:NSUTF8StringEncoding error:nil] intValue];
+    drainRunloop(0.6); // persist job identities before simulating an abrupt owner death
+    [@{@"shell": @(session.pid), @"job": @(job)} writeToFile:ready atomically:YES];
+    for (;;) drainRunloop(0.25);
 }
 
 static void vimLikeSequence(void) {
@@ -308,19 +566,40 @@ static void vimLikeSequence(void) {
     CHECK(allok, "the alt screen is gone");
 }
 
-int main(void) {
+int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        plainText();
-        cursorMoves();
-        eraseAndScroll();
-        styles();
-        wideChars();
-        altScreenAndModes();
-        oscAndReset();
-        resizeAndFuzz();
-        orphanSweep();
-        vimLikeSequence();
-        sessionBasics();
+        testExecutable = NSProcessInfo.processInfo.arguments.firstObject.stringByStandardizingPath;
+        if (!testExecutable.isAbsolutePath) testExecutable = [NSFileManager.defaultManager.currentDirectoryPath stringByAppendingPathComponent:testExecutable];
+        if (argc >= 3 && strcmp(argv[1], "--pty-helper") == 0) return helperProcess(@(argv[2]));
+        if (argc >= 3 && strcmp(argv[1], "--crash-owner") == 0) return crashOwner(@(argv[2]));
+        // Install the override before ANY session or sweep. The test never opens the user's real
+        // Application Support registry. A crash harness inherits this exact isolated directory.
+        NSString *isolated = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"feather-terminal-tests-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        CHECK([NSFileManager.defaultManager createDirectoryAtPath:isolated withIntermediateDirectories:NO attributes:@{NSFilePosixPermissions: @0700} error:nil], "create isolated registry");
+        setenv("FEATHERVIEW_TERMINAL_PIDS_DIR", isolated.UTF8String, 1);
+        @try {
+            CHECK([TSession.pidsDirectory isEqualToString:isolated], "registry override active");
+            plainText();
+            cursorMoves();
+            eraseAndScroll();
+            styles();
+            wideChars();
+            altScreenAndModes();
+            oscAndReset();
+            resizeAndFuzz();
+            vimLikeSequence();
+            sessionBasics();
+            outputAndInput();
+            titleNotifications();
+            retainedTerminationAndJobs();
+            manySessions();
+            orphanSweep();
+            crashRecovery();
+        } @finally {
+            cleanupSessions();
+            [TSession sweepOrphanedShells]; drainRunloop(1.8);
+            [NSFileManager.defaultManager removeItemAtPath:isolated error:nil];
+        }
     }
     if (failures) { printf("%d terminal failure(s)\n", failures); return 1; }
     printf("all terminal tests passed\n");

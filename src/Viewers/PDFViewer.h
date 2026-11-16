@@ -10,6 +10,8 @@
 - (BOOL)unlock:(NSString *)password;
 @property (nonatomic, readonly) NSUInteger pageCount;
 @property (nonatomic, readonly) NSUInteger currentPage;              // 0-based
+// Consumes the fresh-open top after PDFKit has real page geometry; explicit navigation wins.
+- (void)applyInitialPositionIfNeeded;
 - (void)goToPage:(NSUInteger)index;
 - (void)nextPage;
 - (void)previousPage;

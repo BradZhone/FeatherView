@@ -20,6 +20,7 @@
 #import "SettingsWindow.h"
 #import "Localization.h"
 #import "OfficeViews.h"
+#import "FTTabDrag.h"
 #import "SheetGrid.h"
 #import "XLWorkbook.h"
 #include "xlsx_fixture.h"
@@ -934,6 +935,370 @@ static void pdfViewer(NSString *dir) {
     [t closeAllWithoutAsking];
 }
 
+// Drive the same zero-frame -> mounted -> drawn path as a newly opened document.
+static void settleDocumentWindow(NSWindow *w) {
+    [w.contentView layoutSubtreeIfNeeded];
+    NSBitmapImageRep *rep = [w.contentView bitmapImageRepForCachingDisplayInRect:w.contentView.bounds];
+    [w.contentView cacheDisplayInRect:w.contentView.bounds toBitmapImageRep:rep];
+    spinUntil(^BOOL { return NO; }, 0.25);
+    [w.contentView layoutSubtreeIfNeeded];
+}
+
+static NSRect markdownTextRect(MarkdownPreview *m, NSString *text) {
+    NSTextView *tv = m.textView;
+    NSRange chars = [tv.string rangeOfString:text];
+    if (chars.location == NSNotFound) return NSZeroRect;
+    NSLayoutManager *lm = tv.layoutManager;
+    [lm ensureLayoutForCharacterRange:chars];
+    NSRect rect = [lm boundingRectForGlyphRange:[lm glyphRangeForCharacterRange:chars actualCharacterRange:NULL]
+                              inTextContainer:tv.textContainer];
+    return NSOffsetRect(rect, tv.textContainerOrigin.x, tv.textContainerOrigin.y);
+}
+
+static BOOL pdfPageTopVisible(PDFPreview *p) {
+    PDFView *view = p.pdfView;
+    PDFPage *first = [view.document pageAtIndex:0];
+    NSRect page = [view convertRect:[first boundsForBox:view.displayBox] fromPage:first];
+    NSRect visible = view.documentView.enclosingScrollView.contentView.documentVisibleRect;
+    visible = [view convertRect:visible fromView:view.documentView];
+    CGFloat top = view.isFlipped ? NSMinY(page) : NSMaxY(page);
+    return page.size.width > 0 && page.size.height > visible.size.height &&
+        top >= NSMinY(visible) - 1 && top <= NSMaxY(visible) + 1 &&
+        [view.visiblePages containsObject:first];
+}
+
+static void documentInitialPositions(NSString *dir) {
+    NSMutableString *source = [NSMutableString stringWithString:@"# First heading\n\n"];
+    for (NSUInteger i = 0; i < 350; i++)
+        [source appendFormat:@"## Section %lu\n\nParagraph %lu with enough text to wrap in a narrow preview column.\n\n", (unsigned long)i, (unsigned long)i];
+    NSString *md = mkfile(dir, @"initial.md", source);
+    NSWindow *w; ContentController *t = offscreenController(&w);
+    [t openPath:md preview:NO focus:YES layout:MarkupPreview];
+    MarkdownPreview *m = findView(t.view, MarkdownPreview.class);
+    settleDocumentWindow(w);
+    NSRect heading = markdownTextRect(m, @"First heading");
+    printf("   initial Markdown: preview=%s text=%s visible=%s heading=%s flipped=%d/%d\n",
+           NSStringFromRect(m.frame).UTF8String, NSStringFromRect(m.textView.frame).UTF8String,
+           NSStringFromRect(m.textView.visibleRect).UTF8String, NSStringFromRect(heading).UTF8String, m.isFlipped, m.textView.isFlipped);
+    CHECK(m && NSContainsRect(m.textView.visibleRect, heading) && fabs(NSMinY(m.textView.visibleRect)) < 1,
+          "fresh long Markdown shows its first heading at the top (%s)", NSStringFromRect(m.textView.visibleRect).UTF8String);
+    CHECK(NSContainsRect(m.bounds, m.textView.enclosingScrollView.frame), "Markdown scroll view fills its wrapper after initial sizing");
+    MarkupContainer *container = findView(t.view, MarkupContainer.class);
+    CHECK(m.isFlipped && container.isFlipped && NSEqualRects(container.bounds, m.frame), "Markdown wrappers use the text view's top-left coordinates and fill the pane");
+    CHECK([m scrollToAnchor:@"section-180"], "long Markdown anchor exists");
+    CGFloat readingY = m.textView.visibleRect.origin.y;
+    CHECK(readingY > 3000, "anchor moves well below the first viewport (%.0f)", readingY);
+    [m setMarkdown:source baseDir:dir];
+    settleDocumentWindow(w);
+    CHECK(fabs(m.textView.visibleRect.origin.y - readingY) < 1, "rerender preserves Markdown reading offset");
+    if (m.renderer.onImageLoaded) m.renderer.onImageLoaded();
+    settleDocumentWindow(w);
+    CHECK(fabs(m.textView.visibleRect.origin.y - readingY) < 1, "image-completion rerender preserves Markdown reading offset");
+    m.scale += 0.2;
+    settleDocumentWindow(w);
+    CHECK(fabs(m.textView.visibleRect.origin.y - readingY) < 1, "Markdown zoom preserves reading offset");
+    [w setContentSize:NSMakeSize(760, 520)];
+    [w makeFirstResponder:nil];
+    [w makeFirstResponder:m.textView];
+    settleDocumentWindow(w);
+    CHECK(m.textView.visibleRect.origin.y > 3000 && !NSIntersectsRect(markdownTextRect(m, @"First heading"), m.textView.visibleRect),
+          "resize and focus do not reapply Markdown's initial top");
+    CHECK(NSEqualRects(m.bounds, m.textView.enclosingScrollView.frame) && NSEqualRects(container.bounds, m.frame), "resized Markdown fills both wrappers");
+    [t closeAllWithoutAsking];
+
+    // Anchor, source/session restore and NSTextFinder navigation before the first display all win.
+    for (NSUInteger navigation = 0; navigation < 3; navigation++) {
+        MarkdownPreview *early = [[MarkdownPreview alloc] initWithFrame:NSMakeRect(0, 0, 760, 520)];
+        [early setMarkdown:source baseDir:dir];
+        if (navigation == 0) CHECK([early scrollToAnchor:@"section-180"], "anchor works before mounting");
+        else if (navigation == 1) [early scrollToSourceLine:722];
+        else {
+            NSRange match = [early.textView.string rangeOfString:@"Section 180"];
+            [early.textView setSelectedRange:match];
+            [early.textView scrollRangeToVisible:match];
+        }
+        w.contentView = early;
+        settleDocumentWindow(w);
+        CHECK(early.textView.visibleRect.origin.y > 3000, "Markdown navigation %lu supersedes pending initial top", (unsigned long)navigation);
+        NSRect target = markdownTextRect(early, @"Section 180");
+        CHECK(NSIntersectsRect(target, early.textView.visibleRect), "Markdown navigation %lu keeps its target visible after layout (%s in %s)",
+              (unsigned long)navigation, NSStringFromRect(target).UTF8String, NSStringFromRect(early.textView.visibleRect).UTF8String);
+    }
+    w.contentView = t.view;
+    [w setContentSize:NSMakeSize(1000, 700)];
+
+    NSString *path = [dir stringByAppendingPathComponent:@"initial.pdf"];
+    writePDF(path, @[@"First page heading", @"Second page needle", @"Third page"], nil);
+    [t openPath:path preview:NO focus:YES];
+    PDFPreview *p = t.activePDF;
+    settleDocumentWindow(w);
+    NSRect firstPage = [p.pdfView convertRect:[[p.pdfView.document pageAtIndex:0] boundsForBox:p.pdfView.displayBox] fromPage:[p.pdfView.document pageAtIndex:0]];
+    printf("   initial PDF: frame=%s page=%lu scale=%.3f pageRect=%s visible=%s\n", NSStringFromRect(p.pdfView.frame).UTF8String,
+           (unsigned long)p.currentPage, p.pdfView.scaleFactor, NSStringFromRect(firstPage).UTF8String,
+           NSStringFromRect(p.pdfView.documentView.visibleRect).UTF8String);
+    CHECK(p && p.currentPage == 0 && pdfPageTopVisible(p), "fresh multipage PDF shows the actual top edge of page 1 (%s)", NSStringFromRect(firstPage).UTF8String);
+    [p goToPage:2];
+    [w setContentSize:NSMakeSize(760, 520)];
+    [w makeFirstResponder:nil];
+    [w makeFirstResponder:p.pdfView];
+    settleDocumentWindow(w);
+    CHECK(p.currentPage == 2 && !pdfPageTopVisible(p), "PDF resize and focus preserve an explicit page jump");
+    CHECK([p find:@"needle" backward:NO], "PDF find locates the second-page text");
+    settleDocumentWindow(w);
+    CHECK(p.currentPage == 1 && p.pdfView.currentSelection.pages.firstObject == [p.pdfView.document pageAtIndex:1], "PDF find selection survives layout");
+    [t closeAllWithoutAsking];
+
+    // Exercise the real PDFKit crop/rotation transforms at a viewport smaller than the first page.
+    for (NSNumber *rotation in @[@0, @90, @180, @270]) {
+        PDFDocument *doc = [[PDFDocument alloc] initWithURL:[NSURL fileURLWithPath:path]];
+        for (NSUInteger i = 0; i < doc.pageCount; i++) {
+            PDFPage *page = [doc pageAtIndex:i];
+            [page setBounds:NSMakeRect(36, 54, 540, 684) forBox:kPDFDisplayBoxCropBox];
+            page.rotation = rotation.intValue;
+        }
+        NSString *cropped = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"crop-%@.pdf", rotation]];
+        CHECK([doc writeToURL:[NSURL fileURLWithPath:cropped]], "write cropped/rotated PDF fixture");
+        PDFPreview *early = [[PDFPreview alloc] initWithFrame:NSZeroRect path:cropped];
+        [early applyInitialPositionIfNeeded];             // zero geometry must not consume the request
+        w.contentView = early;
+        [w setContentSize:NSMakeSize(760, 300)];
+        early.frame = w.contentView.bounds;
+        settleDocumentWindow(w);
+        CHECK(early.currentPage == 0 && pdfPageTopVisible(early), "cropped PDF at %d degrees shows page 1's actual displayed top", rotation.intValue);
+    }
+    for (NSUInteger navigation = 0; navigation < 2; navigation++) {
+        PDFPreview *early = [[PDFPreview alloc] initWithFrame:NSZeroRect path:path];
+        if (navigation == 0) [early goToPage:2];
+        else CHECK([early find:@"needle" backward:NO], "PDF find works before mounting");
+        w.contentView = early;
+        settleDocumentWindow(w);
+        CHECK(early.currentPage == (navigation == 0 ? 2 : 1), "PDF navigation %lu supersedes pending first-page destination", (unsigned long)navigation);
+    }
+    w.contentView = t.view;
+}
+
+static void splitViewerLifecycle(NSString *dir) {
+    NSString *root = [dir stringByAppendingPathComponent:@"split-viewer-life"];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *png = [root stringByAppendingPathComponent:@"visible.png"];
+    NSString *pdf = [root stringByAppendingPathComponent:@"visible.pdf"];
+    NSString *xlsx = [root stringByAppendingPathComponent:@"clean.xlsx"];
+    writeQuadrantImage(png, 96, 48, NSBitmapImageFileTypePNG);
+    writePDF(pdf, @[@"First page", @"Second page"], nil);
+    [XLFixture() writeToFile:xlsx atomically:YES];
+    NSString *csv = mkfile(root, @"visible.csv", @"name,count\nAda,1\nBea,2\n");
+    NSString *json = mkfile(root, @"visible.json", @"{\"name\":\"Ada\",\"count\":2}\n");
+    NSString *md = mkfile(root, @"visible.md", @"# Still visible\n\nAcross editor columns.\n");
+    NSString *txt = mkfile(root, @"focused.txt", @"Keep the editor focused.\n");
+
+    NSArray *(^docsInPane)(ContentController *, NSUInteger) = ^NSArray *(ContentController *t, NSUInteger p) {
+        return [[t valueForKey:@"_docs"] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"pane == %@", @(p)]];
+    };
+    void (^checkPane)(ContentController *, NSUInteger, NSArray *, NSInteger, NSView *) =
+    ^(ContentController *t, NSUInteger p, NSArray *paths, NSInteger selected, NSView *viewer) {
+        NSArray *panes = [t valueForKey:@"_panes"], *bars = [t valueForKey:@"_tabBars"];
+        CHECK(p < panes.count && p < bars.count, "split lifecycle: column %lu exists", (unsigned long)p);
+        if (p >= panes.count || p >= bars.count) return;
+        NSView *pane = panes[p];
+        TabBarView *bar = bars[p];
+        NSArray *docs = docsInPane(t, p);
+        CHECK([[docs valueForKey:@"path"] isEqualToArray:paths] && bar.items.count == paths.count &&
+              [[bar.items valueForKey:@"title"] isEqualToArray:[paths valueForKey:@"lastPathComponent"]],
+              "split lifecycle: column %lu keeps every tab in order (%s)", (unsigned long)p, [[docs valueForKey:@"path"] description].UTF8String);
+        CHECK(bar.selectedIndex == selected && selected >= 0 && selected < (NSInteger)docs.count,
+              "split lifecycle: column %lu selects tab %ld, got %ld", (unsigned long)p, (long)selected, (long)bar.selectedIndex);
+        if (selected < 0 || selected >= (NSInteger)docs.count) return;
+        CHECK(viewer && [docs[(NSUInteger)selected] valueForKey:@"viewer"] == viewer && [pane valueForKey:@"content"] == viewer &&
+              [viewer isDescendantOf:pane] && viewer.window == t.view.window && !viewer.isHiddenOrHasHiddenAncestor &&
+              viewer.bounds.size.width > 0 && viewer.bounds.size.height > 0,
+              "split lifecycle: column %lu's selected viewer stays mounted and visible", (unsigned long)p);
+    };
+
+    NSArray *paths = @[png, pdf, xlsx, csv, json, md];
+    NSArray *classes = @[ImagePreviewView.class, PDFPreview.class, SpreadsheetPreview.class,
+                         TablePreview.class, TreePreview.class, MarkdownPreview.class];
+    for (NSUInteger k = 0; k < paths.count; k++) {
+        NSWindow *w; ContentController *t = offscreenController(&w);
+        [t openPath:txt preview:NO focus:YES];
+        TextEditorView *editor = t.editor;
+        [t splitEditor];
+        [t openPath:paths[k] preview:NO focus:YES layout:MarkupPreview];
+        NSArray *rightDocs = docsInPane(t, 1);
+        id doc = rightDocs.lastObject;
+        NSView *viewer = [doc valueForKey:@"viewer"];
+        NSView *preview = findView(viewer, classes[k]);
+        CHECK(t.paneCount == 2 && preview && !t.activeIsDirty, "%s opens a clean preview in the second column", [paths[k] lastPathComponent].UTF8String);
+        if (k == 0) {
+            ImagePreviewView *image = (id)preview;
+            CHECK(spinUntil(^BOOL { return image.decodedSize.width > 0; }, 5), "split image decoded");
+        } else if (k == 1) {
+            PDFPreview *pages = (id)preview;
+            [pages nextPage];
+            CHECK(pages.pageCount == 2 && pages.currentPage == 1, "split PDF has its selected page");
+        } else if (k == 2) {
+            SpreadsheetPreview *sheet = (id)preview;
+            [sheet showSheet:1];
+            CHECK(sheet.workbook.sheets.count == 2 && sheet.sheetIndex == 1 && !sheet.isDirty,
+                  "split workbook is clean with its second sheet selected");
+        } else if (k == 3) {
+            CHECK(((TablePreview *)preview).model.rowCount == 2, "split CSV has both data rows");
+        } else if (k == 4) {
+            CHECK(((TreePreview *)preview).root.children.count == 2, "split JSON tree has both properties");
+        } else {
+            CHECK([((MarkdownPreview *)preview).textView.string containsString:@"Still visible"], "split Markdown is rendered");
+        }
+        NSUInteger loads = t.viewerLoads;
+        for (NSUInteger round = 0; round < 2; round++) {
+            [t focusPane:0];
+            CHECK(t.editor == editor && [t.currentPath isEqual:txt] && w.firstResponder == editor,
+                  "%s leaves focus in the other column's editor", [paths[k] lastPathComponent].UTF8String);
+            checkPane(t, 0, @[txt], 0, editor);
+            checkPane(t, 1, @[txt, paths[k]], 1, viewer);
+            CHECK(preview && findView(viewer, classes[k]) == preview && [preview isDescendantOf:t.view] && !preview.isHiddenOrHasHiddenAncestor,
+                  "%s keeps the same visible preview while the editor is focused", [paths[k] lastPathComponent].UTF8String);
+            [t focusPane:1];
+            checkPane(t, 0, @[txt], 0, editor);
+            checkPane(t, 1, @[txt, paths[k]], 1, viewer);
+            CHECK([t.currentPath isEqual:paths[k]] && findView(viewer, classes[k]) == preview && t.viewerLoads == loads,
+                  "%s focus round-trip does not rebuild its viewer", [paths[k] lastPathComponent].UTF8String);
+        }
+        if (k == 1) CHECK(((PDFPreview *)preview).currentPage == 1, "PDF page survives column focus changes");
+        if (k == 2) CHECK(((SpreadsheetPreview *)preview).sheetIndex == 1 && !t.activeIsDirty, "clean workbook sheet survives column focus changes");
+        [t closeAllWithoutAsking];
+    }
+
+    // Keep the real title/welcome/tree callbacks: these exposed the detached image and deleted-column bugs.
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    NSArray *keys = @[@"lastRoot", @"recentRoots", @"sessions", @"NSWindow Frame FeatherMain"];
+    NSMutableDictionary *saved = [NSMutableDictionary dictionary];
+    for (NSString *key in keys) {
+        id value = [ud objectForKey:key];
+        if (value) saved[key] = value;
+        [ud removeObjectForKey:key];
+    }
+    AppDelegate *d = [AppDelegate new];
+    [d applicationWillFinishLaunching:[NSNotification notificationWithName:NSApplicationWillFinishLaunchingNotification object:NSApp]];
+    [d->_win setFrameOrigin:NSMakePoint(-20000, -20000)];
+    d->_content.untitledDirectory = [root stringByAppendingPathComponent:@"untitled"];
+    d->_content.autoSaveMode = AutoSaveOff;
+    d->_content.alertHandler = ^NSModalResponse(NSAlert *alert) { return NSAlertThirdButtonReturn; };
+    [d openRoot:root];
+    [d->_watcher stop];
+    d->_watcher = nil;
+    ContentController *t = d->_content;
+    [d openFile:png];
+    ImagePreviewView *image = t.activeImage;
+    CHECK(image && spinUntil(^BOOL { return image.decodedSize.width > 0; }, 5), "real app mounts the image");
+    [t splitEditor];
+    [d openFile:txt];
+    TextEditorView *focused = t.editor;
+    checkPane(t, 0, @[png], 0, image);
+    CHECK(t.editor == focused && [t.currentPath isEqual:txt], "real app image remains visible beside the focused text tab");
+
+    writeQuadrantImage(png, 144, 80, NSBitmapImageFileTypePNG);
+    [d fileSystemChanged];
+    image = findView([[t valueForKey:@"_panes"] firstObject], ImagePreviewView.class);
+    ImagePreviewView *reloaded = image;
+    CHECK(image && spinUntil(^BOOL { return reloaded.decodedSize.width > 0 && [reloaded.info containsString:@"144 × 80"]; }, 5),
+          "non-active visible image reloads external changes");
+    checkPane(t, 0, @[png], 0, image);
+    CHECK(t.editor == focused && [t.currentPath isEqual:txt] && d->_win.firstResponder == focused,
+          "external image reload preserves the other column's focus");
+
+    NSString *moved = [root stringByAppendingPathComponent:@"renamed.png"];
+    CHECK([fm moveItemAtPath:png toPath:moved error:nil], "rename split image fixture");
+    [t pathMoved:png to:moved];
+    image = findView([[t valueForKey:@"_panes"] firstObject], ImagePreviewView.class);
+    ImagePreviewView *renamed = image;
+    CHECK(image && spinUntil(^BOOL { return renamed.decodedSize.width > 0; }, 5), "renamed non-active image remains decoded");
+    checkPane(t, 0, @[moved], 0, image);
+    CHECK(![t.openPaths containsObject:png] && t.editor == focused && [t.currentPath isEqual:txt] && d->_win.firstResponder == focused,
+          "pathMoved updates all image tabs without stealing text focus");
+    [t closeAllWithoutAsking];
+
+    NSMutableArray *trashed = [NSMutableArray array];
+    d->_trashHandler = ^NSString *(NSString *path) {
+        [trashed addObject:path];
+        return [fm removeItemAtPath:path error:nil] ? nil : @"test fixture deletion failed";
+    };
+    for (NSUInteger deletedPane = 0; deletedPane < 2; deletedPane++) {
+        NSString *left = mkfile(root, [NSString stringWithFormat:@"left-%lu.txt", (unsigned long)deletedPane], @"Left column\n");
+        NSString *middle = mkfile(root, [NSString stringWithFormat:@"middle-%lu.txt", (unsigned long)deletedPane], @"Middle column\n");
+        [d openFile:left];
+        NSView *leftViewer = t.editor;
+        [t splitEditor];
+        [d openFile:txt];
+        NSView *rightEditor = t.editor;
+        [d openFile:pdf];
+        PDFPreview *rightPDF = t.activePDF;
+        ((TabBarView *)[t valueForKey:@"_tabBars"][1]).onClose(0); // discard the split's duplicate left tab
+        NSArray *originalDocs = [[t valueForKey:@"_docs"] copy];
+        NSView *rightPane = [t valueForKey:@"_panes"][1];
+        [t focusPane:0];
+        [t splitEditor];                                         // insert between two occupied columns
+        CHECK(t.paneCount == 3 && t.tabCount == originalDocs.count + 1 && [t valueForKey:@"_panes"][2] == rightPane,
+              "inserting a middle column keeps the existing right column and every tab");
+        for (id doc in originalDocs) {
+            NSUInteger expectedPane = [[doc valueForKey:@"path"] isEqual:left] ? 0 : 2;
+            CHECK([[t valueForKey:@"_docs"] containsObject:doc] && [[doc valueForKey:@"pane"] unsignedIntegerValue] == expectedPane,
+                  "middle insertion preserves the original document in column %lu", (unsigned long)expectedPane);
+        }
+        NSView *middleViewer = [docsInPane(t, 1).firstObject valueForKey:@"viewer"];
+        checkPane(t, 0, @[left], 0, leftViewer);
+        checkPane(t, 1, @[left], 0, middleViewer);
+        checkPane(t, 2, @[txt, pdf], 1, rightPDF);
+        [d openFile:middle];
+        middleViewer = t.editor;
+        ((TabBarView *)[t valueForKey:@"_tabBars"][1]).onClose(0);
+        [t focusPane:2];
+        NSResponder *responder = d->_win.firstResponder;
+        NSArray *beforeDelete = [[t valueForKey:@"_docs"] copy];
+        NSString *target = deletedPane == 0 ? left : middle;
+        NSString *survivor = deletedPane == 0 ? middle : left;
+        NSView *survivorViewer = deletedPane == 0 ? middleViewer : leftViewer;
+        [d->_tree reloadAndReveal:target];
+        CHECK(d->_win.firstResponder == responder, "revealing the deletion target leaves the PDF's keyboard focus intact");
+        [trashed removeAllObjects];
+        [d trashItem:nil];
+        CHECK([trashed isEqualToArray:@[target]] && ![fm fileExistsAtPath:target] && t.paneCount == 2 && t.tabCount == beforeDelete.count - 1,
+              "deleting column %lu's last document removes only that column and file", (unsigned long)deletedPane);
+        for (id doc in beforeDelete) {
+            if ([[doc valueForKey:@"path"] isEqual:target]) continue;
+            NSUInteger expectedPane = [[doc valueForKey:@"path"] isEqual:survivor] ? 0 : 1;
+            CHECK([[t valueForKey:@"_docs"] containsObject:doc] && [[doc valueForKey:@"pane"] unsignedIntegerValue] == expectedPane,
+                  "column deletion preserves each surviving document and renumbers it correctly");
+        }
+        checkPane(t, 0, @[survivor], 0, survivorViewer);
+        checkPane(t, 1, @[txt, pdf], 1, rightPDF);
+        CHECK(t.activePDF == rightPDF && [t.currentPath isEqual:pdf],
+              "deleting column %lu keeps the selected PDF (expected %p, got %p; path %s)", (unsigned long)deletedPane,
+              rightPDF, t.activePDF, t.currentPath.UTF8String);
+        CHECK(d->_win.firstResponder == responder,
+              "deleting column %lu keeps PDF keyboard focus (expected %s %p, got %s %p)", (unsigned long)deletedPane,
+              NSStringFromClass(responder.class).UTF8String, responder,
+              NSStringFromClass(d->_win.firstResponder.class).UTF8String, d->_win.firstResponder);
+
+        [t focusPane:0];
+        responder = d->_win.firstResponder;
+        TabBarView *rightBar = [t valueForKey:@"_tabBars"][1];
+        rightBar.onClose(rightBar.selectedIndex);
+        CHECK(t.paneCount == 2 && t.tabCount == 2 && [t.currentPath isEqual:survivor] && d->_win.firstResponder == responder,
+              "closing the selected tab in the non-focused column preserves focus");
+        checkPane(t, 0, @[survivor], 0, survivorViewer);
+        checkPane(t, 1, @[txt], 0, rightEditor);
+        rightBar.onSelect(0);
+        CHECK(t.editor == rightEditor && [t.currentPath isEqual:txt], "renumbered tab bar selects its replacement without a blank pane");
+        [t closeAllWithoutAsking];
+    }
+    d->_win.frameAutosaveName = @"";
+    [d->_win orderOut:nil];
+    for (NSString *key in keys) {
+        if (saved[key]) [ud setObject:saved[key] forKey:key];
+        else [ud removeObjectForKey:key];
+    }
+}
+
 static void zoomOtherViews(NSString *dir) {
     NSWindow *w; ContentController *t = offscreenController(&w);
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
@@ -1114,6 +1479,54 @@ static void openFromFinder(NSString *dir) {
     for (NSString *k in @[@"lastRoot", @"sessions", @"recentRoots", @"NSWindow Frame FeatherMain"]) [ud removeObjectForKey:k];
 }
 
+static NSView *rootHitView(NSWindow *w, NSPoint windowPoint) {
+    NSView *root = w.contentView;
+    NSPoint p = [root convertPoint:windowPoint fromView:nil];
+    if (root.superview) p = [root convertPoint:p toView:root.superview];
+    return [root hitTest:p];
+}
+
+static void htmlEdgeDropRouting(NSString *dir) {
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:@"htmlLayout"];
+    NSWindow *w; ContentController *t = offscreenController(&w);
+    NSString *htmlPath = mkfile(dir, @"edge.html", @"<html><body><h1>Edge</h1></body></html>");
+    [t openPath:htmlPath preview:YES focus:YES];
+    [w makeKeyAndOrderFront:nil];
+    [t.view layoutSubtreeIfNeeded]; [w.contentView layoutSubtreeIfNeeded]; [w displayIfNeeded];
+    NSView *pane = [[t valueForKey:@"_panes"] firstObject];
+    TabBarView *bar = [[t valueForKey:@"_tabBars"] firstObject];
+    HTMLPreview *html = findView(t.view, HTMLPreview.class);
+    FTTabDropView *dropPane = [pane isKindOfClass:FTTabDropView.class] ? (FTTabDropView *)pane : nil;
+    CHECK(pane && bar && html && dropPane, "%s", @"HTML edge fixture mounted".UTF8String);
+    CHECK(t.activeMarkupLayout == MarkupPreview,
+          "%s", @"the edge fixture is in rendered HTML preview mode".UTF8String);
+    if (!pane || !bar || !html || !dropPane) return;
+    NSRect b = pane.bounds;
+    NSPoint left = [pane convertPoint:NSMakePoint(NSMinX(b) + 8, NSMinY(b) + 90) toView:nil];
+    NSPoint right = [pane convertPoint:NSMakePoint(NSMaxX(b) - 8, NSMinY(b) + 90) toView:nil];
+    NSPoint center = [pane convertPoint:NSMakePoint(NSMidX(b), NSMinY(b) + 90) toView:nil];
+    CHECK([rootHitView(w, left) isDescendantOf:html] && [rootHitView(w, right) isDescendantOf:html],
+          "%s", @"HTML edges remain interactive outside a tab drag".UTF8String);
+    CHECK([rootHitView(w, center) isDescendantOf:html],
+          "%s", @"HTML body center remains interactive".UTF8String);
+    NSString *token = [FTTabDrag registerObject:[t valueForKey:@"_active"]];
+    [FTTabDrag beginInteractiveDragWithToken:token terminal:NO source:bar event:nil];
+    NSEvent *drag = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDragged location:right
+        modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:w.windowNumber context:nil eventNumber:0 clickCount:1 pressure:1];
+    [FTTabDrag updateInteractiveDragWithEvent:drag];
+    CHECK([[dropPane valueForKey:@"_dropOverlay"] frame].size.width > 0,
+          "%s", @"HTML body drag shows a stable split preview".UTF8String);
+    NSEvent *up = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:right
+        modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime + .01 windowNumber:w.windowNumber context:nil eventNumber:0 clickCount:1 pressure:0];
+    [FTTabDrag finishInteractiveDragWithEvent:up];
+    CHECK(t.paneCount == 2 && t.tabCount == 1 && [t.currentPath isEqualToString:htmlPath],
+          "dragging the only HTML preview tab to its edge creates a second pane (panes=%ld)",
+          (long)t.paneCount);
+    [FTTabDrag forgetToken:token];
+    [w orderOut:nil];
+    [t closeAllWithoutAsking];
+}
+
 static void htmlPreviewAndAutosave(NSString *dir) {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:@"htmlLayout"];
     NSWindow *w; ContentController *t = offscreenController(&w);
@@ -1224,7 +1637,8 @@ static void layoutAndWorkspaces(NSString *dir) {
         NSView *pane = d->_content.view;
         CGFloat right = NSMaxX(pane.frame), w = d->_split.bounds.size.width;
         CHECK(fabs(right - w) < 1, "%s: right pane reaches the window edge (%.0f of %.0f)", when.UTF8String, right, w);
-        CHECK(!d->_welcome.hidden && NSEqualRects(d->_welcome.frame, pane.bounds), "%s: welcome page fills the pane", when.UTF8String);
+        NSRect wf = d->_welcome.frame, pb = pane.bounds;
+        CHECK(!d->_welcome.hidden && NSEqualRects(wf, pb), "%s: welcome page fills the pane", when.UTF8String);
     };
     checkFill(@"initial");
     [d->_win setFrame:NSMakeRect(0, 0, 1500, 900) display:NO];
@@ -2206,6 +2620,16 @@ static void syntaxColours(void) {
     }
 }
 
+// The active viewer lives inside the split columns, not directly under the root view.
+static ImagePreviewView *findImageView(NSView *root) {
+    for (NSView *v in root.subviews) {
+        if ([v isKindOfClass:ImagePreviewView.class]) return (ImagePreviewView *)v;
+        ImagePreviewView *deep = findImageView(v);
+        if (deep) return deep;
+    }
+    return nil;
+}
+
 static void viewers(NSString *dir) {
     NSString *bin = [dir stringByAppendingPathComponent:@"blob"];
     uint8_t bytes[64] = {0x7f, 'E', 'L', 'F', 0, 1, 2};
@@ -2221,8 +2645,7 @@ static void viewers(NSString *dir) {
     NSString *img = @"/System/Library/Desktop Pictures/iMac Blue.heic";
     if (![NSFileManager.defaultManager fileExistsAtPath:img]) return;
     [cc openPath:img preview:NO focus:NO];
-    ImagePreviewView *iv = nil;
-    for (NSView *v in cc.view.subviews) if ([v isKindOfClass:ImagePreviewView.class]) iv = (ImagePreviewView *)v;
+    ImagePreviewView *iv = findImageView(cc.view);
     CHECK(iv != nil, "image viewer chosen");
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10];
     while (iv && iv.decodedSize.width == 0 && deadline.timeIntervalSinceNow > 0)
@@ -2520,11 +2943,17 @@ static void localization(NSString *dir) {
     editingShortcuts(dir);
 }
 
-int main(void) {
+int main(int argc, const char *argv[]) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
         [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        if (argc == 2 && strcmp(argv[1], "--document-initial-positions") == 0) {
+            documentInitialPositions(dir);
+            [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
+            printf("document initial-position tests: %d failure(s)\n", failures);
+            return failures ? 1 : 0;
+        }
         win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 800, 600) styleMask:NSWindowStyleMaskTitled
                                             backing:NSBackingStoreBuffered defer:YES];
         cc = [ContentController new];
@@ -2544,10 +2973,13 @@ int main(void) {
         imageViewer(dir);
         svgAndTypeScript(dir);
         pdfViewer(dir);
+        documentInitialPositions(dir);
+        splitViewerLifecycle(dir);
         zoomOtherViews(dir);
         defaultApps(dir);
         openFromFinder(dir);
         multiSelectActions(dir);
+        htmlEdgeDropRouting(dir);
         htmlPreviewAndAutosave(dir);
         autosave(dir);
         layoutAndWorkspaces(dir);

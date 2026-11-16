@@ -14,6 +14,7 @@ static const CGFloat kThumbW = 132;
     NSStackView *_tools;
     NSTextField *_pageLabel, *_percent;
     NSString *_path;
+    BOOL _initialPositionPending, _applyingInitialPosition;
 }
 
 - (instancetype)initWithFrame:(NSRect)f path:(NSString *)path {
@@ -21,6 +22,7 @@ static const CGFloat kThumbW = 132;
     if (!doc) return nil;
     if (!(self = [super initWithFrame:f])) return nil;
     _path = [path copy];
+    _initialPositionPending = YES;
     FTClipToBounds(self);
     _pdf = [[PDFView alloc] initWithFrame:self.bounds];
     _pdf.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -43,6 +45,37 @@ static const CGFloat kThumbW = 132;
     _pdf.document = nil;                 // drops PDFKit's page caches
 }
 
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (_initialPositionPending) self.needsLayout = YES;
+}
+
+- (void)layout {
+    [super layout];
+    [self applyInitialPositionIfNeeded];
+}
+
+- (void)applyInitialPositionIfNeeded {
+    if (!_initialPositionPending || _applyingInitialPosition || !self.window || self.isLocked ||
+        _pdf.bounds.size.width <= 0 || _pdf.bounds.size.height <= 0) return;
+    _applyingInitialPosition = YES;
+    [_pdf layoutDocumentView];
+    [_pdf layoutSubtreeIfNeeded];
+    PDFPage *page = [_pdf.document pageAtIndex:0];
+    NSRect box = [page boundsForBox:_pdf.displayBox];
+    NSRect rect = page ? [_pdf convertRect:box fromPage:page] : NSZeroRect;
+    if (page && rect.size.width > 0 && rect.size.height > 0 && isfinite(rect.origin.x) && isfinite(rect.origin.y) &&
+        isfinite(_pdf.scaleFactor) && _pdf.scaleFactor > 0 && _pdf.documentView.bounds.size.height > 0) {
+        // Convert the displayed top-left back into page space. This accounts for crop origins and
+        // all four page rotations without assuming that page-space maxY is the displayed top.
+        NSPoint top = NSMakePoint(NSMinX(rect), _pdf.isFlipped ? NSMinY(rect) : NSMaxY(rect));
+        PDFDestination *destination = [[PDFDestination alloc] initWithPage:page atPoint:[_pdf convertPoint:top toPage:page]];
+        _initialPositionPending = NO;
+        [_pdf goToDestination:destination];
+    }
+    _applyingInitialPosition = NO;
+}
+
 // A link in a PDF may name any URL scheme (an app's custom one, a file): only web and mail links leave the app.
 + (BOOL)opensLink:(NSURL *)url {
     return [@[@"http", @"https", @"mailto"] containsObject:url.scheme.lowercaseString ?: @""];
@@ -59,7 +92,11 @@ static const CGFloat kThumbW = 132;
 
 - (BOOL)unlock:(NSString *)password {
     BOOL ok = [_pdf.document unlockWithPassword:password ?: @""];
-    if (ok) { PDFDocument *d = _pdf.document; _pdf.document = nil; _pdf.document = d; [self notify]; }   // re-layout pages
+    if (ok) {
+        PDFDocument *d = _pdf.document; _pdf.document = nil; _pdf.document = d;   // re-layout pages
+        if (_initialPositionPending) self.needsLayout = YES;
+        [self notify];
+    }
     return ok;
 }
 
@@ -71,12 +108,13 @@ static const CGFloat kThumbW = 132;
 
 - (void)goToPage:(NSUInteger)i {
     if (!self.pageCount) return;
+    _initialPositionPending = NO;
     PDFPage *p = [_pdf.document pageAtIndex:MIN(i, self.pageCount - 1)];
     if (p) [_pdf goToPage:p];
     [self notify];
 }
-- (void)nextPage { if (_pdf.canGoToNextPage) [_pdf goToNextPage:nil]; }
-- (void)previousPage { if (_pdf.canGoToPreviousPage) [_pdf goToPreviousPage:nil]; }
+- (void)nextPage { if (_pdf.canGoToNextPage) { _initialPositionPending = NO; [_pdf goToNextPage:nil]; } }
+- (void)previousPage { if (_pdf.canGoToPreviousPage) { _initialPositionPending = NO; [_pdf goToPreviousPage:nil]; } }
 
 #pragma mark Zoom
 
@@ -114,6 +152,7 @@ static const CGFloat kThumbW = 132;
     PDFSelection *s = [_pdf.document findString:text fromSelection:_pdf.currentSelection withOptions:o];
     if (!s) s = [_pdf.document findString:text fromSelection:nil withOptions:o];      // wrap around
     if (!s) { NSBeep(); return NO; }
+    _initialPositionPending = NO;
     [_pdf setCurrentSelection:s animate:NO];
     [_pdf scrollSelectionToVisible:nil];
     [self notify];
@@ -150,6 +189,7 @@ static const CGFloat kThumbW = 132;
     CGFloat tw = _thumbs ? kThumbW : 0;
     _thumbs.frame = NSMakeRect(0, 0, tw, b.size.height);
     _pdf.frame = NSMakeRect(tw, 0, b.size.width - tw, b.size.height);
+    if (_initialPositionPending) self.needsLayout = YES;
 }
 
 #pragma mark Status

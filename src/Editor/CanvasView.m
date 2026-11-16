@@ -49,13 +49,10 @@ void FTClipToBounds(NSView *v) {
 - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self clampScroll]; }
 
 - (void)scrollWheel:(NSEvent *)e {
-    CGFloat dx = e.scrollingDeltaX, dy = e.scrollingDeltaY, oldY = _scrollY;
+    CGFloat dx = e.scrollingDeltaX, dy = e.scrollingDeltaY;
     if (!e.hasPreciseScrollingDeltas) { dx *= 16; dy *= 16; }
-    if (fabs(dx) > fabs(dy) * 1.5) { _scrollX -= dx; }
-    else { _scrollY -= dy; }
-    [self clampScroll];
-    self.needsDisplay = YES;
-    if (_scrollY != oldY) [self scrolled];
+    if (fabs(dx) > fabs(dy) * 1.5) self.scrollX -= dx;
+    else self.scrollY -= dy;
 }
 
 - (NSRect)knobRect {

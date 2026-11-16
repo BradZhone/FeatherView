@@ -138,6 +138,8 @@ static NSString *absolute(NSString *p) {
     NSString *_imageDir;                 // notebook outputs
 }
 
+- (BOOL)isFlipped { return YES; }
+
 - (void)dealloc { if (_imageDir) [NSFileManager.defaultManager removeItemAtPath:_imageDir error:nil]; }
 
 - (id<FTDataPreview>)dataView { return [_preview conformsToProtocol:@protocol(FTDataPreview)] ? (id<FTDataPreview>)_preview : nil; }

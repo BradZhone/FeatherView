@@ -17,24 +17,26 @@
 }
 @end
 
-static NSString * const kTerminalDragType = @"local.feather.terminal.session";
-
 @implementation TabBarView {
     NSMutableArray<NSValue *> *_rects;      // strip coordinates (before scrolling)
     CGFloat _scroll, _totalW;
-    NSInteger _hover, _pressClose, _dragIndex;
-    BOOL _hoverClose, _dragging, _terminalDrag;
-    CGFloat _dragStartX;
+    NSInteger _hover, _pressClose, _dragIndex, _dropIndex;
+    BOOL _hoverClose, _dragging, _nativeDrag;
+    NSPoint _dragStart;
+    NSTimeInterval _lastClickTime;
+    NSPoint _lastClickPoint;
+    NSInteger _lastClickIndex;
     NSEvent *_downEvent;
     NSArray *_ax;
 }
 
 - (instancetype)initWithFrame:(NSRect)f {
     if (!(self = [super initWithFrame:f])) return nil;
-    _selectedIndex = _hover = _pressClose = _dragIndex = -1;
+    _selectedIndex = _hover = _pressClose = _dragIndex = _dropIndex = -1;
+    _tabDragType = FTTabDragType;
     _rects = [NSMutableArray array];
     FTClipToBounds(self);
-    [self registerForDraggedTypes:@[kTerminalDragType]];
+    [self registerForDraggedTypes:@[FTTabDragType, FTTerminalDragType]];
     [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect
         options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect
           owner:self userInfo:nil]];
@@ -156,6 +158,13 @@ static NSRect closeRect(NSRect tab) { return NSMakeRect(NSMaxX(tab) - 24, NSMidY
             [x stroke];
         }
     }
+    if (_dropIndex >= 0) {
+        NSInteger index = MIN(_dropIndex, (NSInteger)_rects.count);
+        CGFloat x = index < (NSInteger)_rects.count ? NSMinX([self rectForTab:index]) : _totalW - _scroll;
+        x = MIN(MAX(NSMinX(b) + 1, x), NSMaxX(b) - 1);
+        [NSColor.controlAccentColor setFill];
+        NSRectFill(NSMakeRect(x - 1, NSMinY(b) + 3, 2, MAX(0, b.size.height - 6)));
+    }
 }
 
 - (NSInteger)indexAt:(NSPoint)p {
@@ -173,39 +182,65 @@ static NSRect closeRect(NSRect tab) { return NSMakeRect(NSMaxX(tab) - 24, NSMidY
 }
 - (void)mouseExited:(NSEvent *)e { _hover = -1; _hoverClose = NO; self.needsDisplay = YES; }
 
+- (void)clearDropHighlight {
+    if (_dropIndex < 0) return;
+    _dropIndex = -1;
+    self.needsDisplay = YES;
+}
+
+- (void)clearDragState {
+    _dragIndex = _pressClose = -1;
+    _dragging = _nativeDrag = NO;
+    _downEvent = nil;
+}
+
+- (void)finishTabDrag {
+    [self clearDragState];
+    [self clearDropHighlight];
+    _lastClickTime = 0;
+    _lastClickIndex = -1;
+}
+
 - (void)mouseDown:(NSEvent *)e {
     NSPoint p = [self local:e];
     NSInteger i = [self indexAt:p];
-    _dragIndex = -1; _dragging = NO; _pressClose = -1;
+    [self clearDragState];
     if (i < 0) return;
     if (NSPointInRect(p, closeRect([self rectForTab:i]))) { _pressClose = i; return; }
-    if (e.clickCount == 2) { if (self.onPin) self.onPin(i); return; }
+    NSTimeInterval now = e.timestamp > 0 ? e.timestamp : NSProcessInfo.processInfo.systemUptime;
+    BOOL repeated = _lastClickIndex == i && now - _lastClickTime <= NSEvent.doubleClickInterval &&
+                    hypot(p.x - _lastClickPoint.x, p.y - _lastClickPoint.y) <= 4;
+    if ((e.clickCount >= 2 || repeated) && self.onDoubleClick) {
+        _lastClickTime = 0;
+        _lastClickIndex = -1;
+        self.onDoubleClick(i);
+        return;
+    }
+    _lastClickTime = now;
+    _lastClickPoint = p;
+    _lastClickIndex = i;
     if (self.onSelect) self.onSelect(i);
-    _dragIndex = i; _dragStartX = p.x; _downEvent = e;
+    _dragIndex = i; _dragStart = e.locationInWindow; _downEvent = e;
 }
 
 - (void)mouseDragged:(NSEvent *)e {
-    if (_dragIndex < 0) return;
+    if (_nativeDrag) { [FTTabDrag updateInteractiveDragWithEvent:e]; return; }
+    if (_dragIndex < 0 || _dragIndex >= (NSInteger)_items.count) return;
     NSPoint p = [self local:e];
-    if (!_dragging && fabs(p.x - _dragStartX) < 6) return;
-    if (!_terminalDrag && self.dragTokenForIndex && [self dragTokenForIndex](_dragIndex)) {
-        // a terminal tab: hand it to the drag & drop system (the panel or this bar takes it)
-        _terminalDrag = YES;
-        NSString *token = [self dragTokenForIndex](_dragIndex);
-        NSPasteboardItem *pb = [NSPasteboardItem new];
-        [pb setString:token forType:kTerminalDragType];
-        NSDraggingItem *item = [[NSDraggingItem alloc] initWithPasteboardWriter:pb];
-        NSRect r = [self rectForTab:_dragIndex];
-        NSImage *img = [[NSImage alloc] initWithSize:r.size];
-        [img lockFocus];
-        NSAttributedString *s = [self labelFor:_items[_dragIndex] selected:YES];
-        [s drawAtPoint:NSMakePoint(4, r.size.height / 2 - [s size].height / 2)];
-        [img unlockFocus];
-        [item setDraggingFrame:NSMakeRect(p.x - r.size.width / 2, p.y - r.size.height / 2, r.size.width, r.size.height) contents:img];
-        [self beginDraggingSessionWithItems:@[item] event:_downEvent ?: e source:self];
+    if (!_dragging && hypot(e.locationInWindow.x - _dragStart.x, e.locationInWindow.y - _dragStart.y) < 6) return;
+    BOOL configured = self.tabDragTokenForIndex != nil;
+    NSString *token = configured ? self.tabDragTokenForIndex(_dragIndex) : nil;
+    NSString *type = self.tabDragTypeForIndex ? self.tabDragTypeForIndex(_dragIndex) : nil;
+    if (!type.length) type = self.tabDragType.length ? self.tabDragType : FTTabDragType;
+    if (!configured && self.dragTokenForIndex) {
+        token = self.dragTokenForIndex(_dragIndex);
+        type = FTTerminalDragType;
+    }
+    if (token.length) {
+        _dragging = _nativeDrag = YES;
+        [FTTabDrag beginInteractiveDragWithToken:token terminal:[type isEqualToString:FTTerminalDragType] source:self event:e];
         return;
     }
-    if (_terminalDrag) return;
     _dragging = YES;
     NSInteger to = [self indexAt:NSMakePoint(p.x, NSMidY(self.bounds))];
     if (to < 0) to = p.x < 0 ? 0 : (NSInteger)_items.count - 1;
@@ -214,28 +249,99 @@ static NSRect closeRect(NSRect tab) { return NSMakeRect(NSMaxX(tab) - 24, NSMidY
 
 // NSDraggingSource
 - (NSDragOperation)draggingSession:(NSDraggingSession *)session sourceOperationMaskForDraggingContext:(NSDraggingContext)context {
-    return context == NSDraggingContextOutsideApplication ? NSDragOperationMove : NSDragOperationNone;
+    return context == NSDraggingContextWithinApplication ? NSDragOperationMove : NSDragOperationNone;
 }
 
-#pragma mark Dropping a terminal tab here
+- (BOOL)ignoreModifierKeysForDraggingSession:(NSDraggingSession *)session { return YES; }
 
-- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
-    return [[sender draggingPasteboard].types containsObject:kTerminalDragType] ? NSDragOperationMove : NSDragOperationNone;
+- (void)draggingSession:(NSDraggingSession *)session endedAtPoint:(NSPoint)point operation:(NSDragOperation)operation {
+    [FTTabDrag endDragging];
+    [self clearDragState];
+    [self clearDropHighlight];
 }
 
-- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
-    NSString *token = [[sender draggingPasteboard] stringForType:kTerminalDragType];
-    if (token && self.dropTerminal) self.dropTerminal(token);
+#pragma mark Dropping tabs
+
+- (NSInteger)insertionIndexAt:(NSPoint)point {
+    for (NSInteger i = 0; i < (NSInteger)_rects.count; i++)
+        if (point.x < NSMidX([self rectForTab:i])) return i;
+    return _rects.count;
+}
+
+- (NSString *)tokenFromDrag:(id<NSDraggingInfo>)sender terminal:(BOOL *)terminal {
+    NSPasteboard *pb = sender.draggingPasteboard;
+    NSString *token = [pb stringForType:FTTabDragType];
+    *terminal = NO;
+    if (!token.length) { token = [pb stringForType:FTTerminalDragType]; *terminal = YES; }
+    return token;
+}
+
+- (BOOL)canAcceptToken:(NSString *)token terminal:(BOOL)terminal {
+    return token.length && (self.onDropTab || (terminal && self.dropTerminal)) &&
+        (!self.canDropTab || self.canDropTab(token, terminal));
+}
+
+- (BOOL)updateToken:(NSString *)token terminal:(BOOL)terminal atPoint:(NSPoint)point {
+    if (!NSPointInRect(point, self.bounds) || ![self canAcceptToken:token terminal:terminal]) {
+        [self clearDropHighlight];
+        return NO;
+    }
+    NSInteger index = [self insertionIndexAt:point];
+    if (_dropIndex != index) { _dropIndex = index; self.needsDisplay = YES; }
     return YES;
 }
 
+- (BOOL)acceptToken:(NSString *)token terminal:(BOOL)terminal atPoint:(NSPoint)point {
+    if (![self updateToken:token terminal:terminal atPoint:point]) return NO;
+    NSInteger index = [self insertionIndexAt:point];
+    [self clearDropHighlight];
+    if (self.onDropTab) return self.onDropTab(token, terminal, index);
+    if (terminal && self.dropTerminal) { self.dropTerminal(token); return YES; }
+    return NO;
+}
+
+- (NSDragOperation)updateDrop:(id<NSDraggingInfo>)sender {
+    BOOL terminal;
+    NSString *token = [self tokenFromDrag:sender terminal:&terminal];
+    NSPoint point = [self convertPoint:sender.draggingLocation fromView:nil];
+    if (!NSPointInRect(point, self.bounds) || ![self canAcceptToken:token terminal:terminal]) {
+        [self clearDropHighlight];
+        return NSDragOperationNone;
+    }
+    NSInteger index = [self insertionIndexAt:point];
+    if (_dropIndex != index) { _dropIndex = index; self.needsDisplay = YES; }
+    return NSDragOperationMove;
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender { return [self updateDrop:sender]; }
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender { return [self updateDrop:sender]; }
+- (void)draggingExited:(id<NSDraggingInfo>)sender { [self clearDropHighlight]; }
+- (void)draggingEnded:(id<NSDraggingInfo>)sender { [self clearDropHighlight]; }
+- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender { return [self updateDrop:sender] != NSDragOperationNone; }
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    BOOL terminal;
+    NSString *token = [self tokenFromDrag:sender terminal:&terminal];
+    NSPoint point = [self convertPoint:sender.draggingLocation fromView:nil];
+    NSInteger index = [self insertionIndexAt:point];
+    [self clearDropHighlight];
+    if (!NSPointInRect(point, self.bounds) || ![self canAcceptToken:token terminal:terminal]) return NO;
+    if (self.onDropTab) return self.onDropTab(token, terminal, index);
+    self.dropTerminal(token);
+    return YES;
+}
+
+- (void)concludeDragOperation:(id<NSDraggingInfo>)sender { [self clearDropHighlight]; }
+
 - (void)mouseUp:(NSEvent *)e {
+    if (_nativeDrag) { [FTTabDrag finishInteractiveDragWithEvent:e]; return; }
     if (_pressClose >= 0) {
         NSInteger i = _pressClose;
         _pressClose = -1;
-        if (NSPointInRect([self local:e], closeRect([self rectForTab:i])) && self.onClose) self.onClose(i);
+        if (i < (NSInteger)_items.count && NSPointInRect([self local:e], closeRect([self rectForTab:i])) && self.onClose)
+            self.onClose(i);
     }
-    _dragIndex = -1; _dragging = NO; _terminalDrag = NO;
+    [self clearDragState];
 }
 
 - (void)otherMouseUp:(NSEvent *)e {

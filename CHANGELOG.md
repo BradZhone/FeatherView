@@ -4,6 +4,31 @@
 
 All notable changes to FeatherView are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may contain incompatible changes.
 
+## [Unreleased]
+
+### Added
+
+- Split view. Editor and terminal each support up to three columns independently, with an independent tab strip per column. ⌘\ splits the editor; ⌃1 / ⌃2 / ⌃3 focus editor columns. A regular new terminal adds a tab to the current terminal column. Drag tabs to a column body's left or right edge to create a column, or to the center or tab strip to move or reorder; empty source columns are removed. Unsaved text, undo history and terminal state are preserved; focus changes and column removal keep the remaining viewers and tabs intact. Editor column assignments are saved with the session.
+- Split expansion is off by default, independently in the editor and terminal areas. Double-click a tab or use ⌃⌘M to toggle it; double-clicking still pins an editor preview tab. While enabled, expansion follows focus without changing column order; other columns retain a 180 pt minimum, reduced only when space is insufficient. Toggling off restores saved manual widths. Dragging a divider disables expansion and retains the chosen proportions across resizes; focus never re-enables it. Reducing an area to one or zero columns resets expansion to off.
+- The title-bar sidebar button and ⌘B hide or show the entire Files/Search sidebar and restore its width. File Tree (⇧⌘E) and workspace search (⇧⌘F) reveal it. A native **Collapse All** text button above the file tree collapses expanded folders recursively without closing documents.
+- A terminal session has one canonical `TerminalView` reused between an editor tab and the terminal panel, so moving it preserves the viewport and selection. Each session supports the ANSI 16-color palette, xterm 256 colors and truecolor; explicit truecolor black remains black.
+
+### Fixed
+
+- Fixed HTML preview tabs being swallowed by the web view during an edge drag. The drag preview now covers only the body, uses a stable half-column width, and remains distinct from the tab-strip insertion line. Tab order can be changed by dragging within or between tab strips; terminal tabs use the same path and preserve their PTY and `TerminalView` identity. Escape, focus loss and window close cancel an in-flight drag safely.
+
+- Terminal control keys are handled before the input context: ⌃C sends an interrupt even with a selection, and standard control and navigation keys reach the shell. While the terminal has focus, ⌃R and ⌃G bypass the Switch Workspace and Go to Line menu shortcuts; ⌘ commands and IME text composition remain available.
+- Fresh Markdown and PDF views start at the document beginning or the displayed top of page 1 after the first valid layout. Explicit anchors and source, page or find navigation take precedence over this one-shot positioning; later resize or focus changes do not jump back to the beginning.
+- Terminal grid resizing preserves full-screen and scroll-region margins, moves rows into and out of history correctly, and does not resize a live PTY from unusable geometry. Scrolling upward pauses follow mode until the viewport returns to the bottom; output is drained through the final tail after the shell exits.
+
+### Security and reliability
+
+- `TSession` now has a global live-session registry independent of UI owners. Process records include the child and owner PID identities, kernel birth times and UIDs. Orphan sweeping signals processes only when the recorded owner is provably dead and the child/job identities still match; reused PIDs and unverifiable legacy records never authorize a signal. PTY descriptors use close-on-exec. Termination sends HUP to verified jobs, then KILL to verified survivors after a grace period, reaps the shell and drains output before completion. Asynchronous application quit waits for the registry to empty.
+
+### Tests
+
+- `make test` and `make sanitize` include nine executable suites: logic, Markdown, terminal core, editing, live views, application lifecycle, terminal input, file-tree/sidebar behavior and end-to-end tab dragging. The drag suite covers editor and terminal reorder/split/merge, HTML body routing, preview geometry, PTY/view identity, cancellation and window-layout stability.
+
 ## [0.21.0] — 2026-11-12
 
 ### Added

@@ -7,6 +7,8 @@
 #import <signal.h>
 #import "TerminalView.h"
 #import "TerminalPanel.h"
+#import "FTSplitView.h"
+#import "FTTabDrag.h"
 #import "FileOps.h"
 #import "TabBarView.h"
 #import "MarkupView.h"
@@ -21,11 +23,13 @@
 
 static const CGFloat kStatusH = 22, kFindH = 32, kTabH = 30;
 static const NSUInteger kAutoSaveMaxBytes = 32u << 20;     // bigger files only save on focus change
+static const NSUInteger kMaxPanes = 3;                     // editor columns and terminal columns alike
 
 @interface Doc : NSObject
 @property (nonatomic, copy) NSString *path;
 @property (nonatomic) ViewerKind mode;
 @property (nonatomic) BOOL preview, missing, changedOnDisk, wasDirty;
+@property (nonatomic) NSUInteger pane;              // which editor column (0..2) shows this tab
 @property (nonatomic, strong) NSView *viewer;       // nil until first activation
 @property (nonatomic, strong) TextEditorView *editor;   // text docs: kept while the tab is open
 @property (nonatomic, strong) MarkupContainer *markup;  // .md / .html: editor + preview
@@ -69,13 +73,19 @@ static NSString *sizeString(off_t n) {
     return [NSByteCountFormatter stringFromByteCount:n countStyle:NSByteCountFormatterCountStyleFile];
 }
 
-@interface PaneView : NSView
-@property (nonatomic) NSView *tabBar, *content, *findBar, *statusBar, *empty, *layoutSwitch, *terminalPanel;
+// One editor column: tab strip + active viewer + find/replace bar (+ the markdown layout switch).
+@interface PaneView : FTTabDropView
+@property (nonatomic) NSView *tabBar, *content, *findBar, *empty, *layoutSwitch;
 @property (nonatomic) BOOL hasTabs, showsLayoutSwitch;
 @end
 
 @implementation PaneView
 - (BOOL)isFlipped { return YES; }
+- (NSRect)dropContentRect {
+    CGFloat y = kTabH + (_findBar.hidden ? 0 : kFindH);
+    return NSMakeRect(NSMinX(self.bounds), NSMinY(self.bounds) + y,
+                      self.bounds.size.width, MAX(0, self.bounds.size.height - y));
+}
 - (void)resizeSubviewsWithOldSize:(NSSize)old { [self layoutPane]; }
 - (void)drawRect:(NSRect)r {
     if (!_showsLayoutSwitch || !_hasTabs) return;
@@ -86,25 +96,50 @@ static NSString *sizeString(off_t n) {
 }
 - (void)layoutPane {
     NSRect b = self.bounds;
-    BOOL panelVisible = !_terminalPanel.hidden;
     _tabBar.hidden = _content.hidden = !_hasTabs;
-    _statusBar.hidden = !_hasTabs && !panelVisible;    // the terminal button lives here
     _empty.hidden = _hasTabs;
     _layoutSwitch.hidden = !(_hasTabs && _showsLayoutSwitch);
-    CGFloat panelH = panelVisible ? MIN(_terminalPanel.frame.size.height, MAX(80, b.size.height - kTabH - kStatusH - 40)) : 0;
-    _terminalPanel.frame = NSMakeRect(0, b.size.height - kStatusH - panelH, b.size.width, panelH);
-    if (!_hasTabs) {                                   // no tabs: the welcome view, minus the terminal panel
+    if (!_hasTabs) {                                   // no tabs: the welcome view fills the column
         _findBar.hidden = YES;
-        _empty.frame = NSMakeRect(0, 0, b.size.width, MAX(0, b.size.height - panelH));
+        _empty.frame = b;
         return;
     }
     CGFloat y = kTabH, sw = _layoutSwitch.hidden ? 0 : _layoutSwitch.frame.size.width + 16;
-    _tabBar.frame = NSMakeRect(0, 0, b.size.width - sw, kTabH);
+    if (sw > b.size.width - 60) sw = 0;
+    _layoutSwitch.hidden = sw == 0;
+    _tabBar.frame = NSMakeRect(0, 0, MAX(0, b.size.width - sw), kTabH);
     if (sw) _layoutSwitch.frame = (NSRect){{b.size.width - sw + 8, floor((kTabH - _layoutSwitch.frame.size.height) / 2)}, _layoutSwitch.frame.size};
     self.needsDisplay = YES;
     if (!_findBar.hidden) { _findBar.frame = NSMakeRect(0, y, b.size.width, kFindH); y += kFindH; }
-    _statusBar.frame = NSMakeRect(0, b.size.height - kStatusH, b.size.width, kStatusH);
-    _content.frame = NSMakeRect(0, y, b.size.width, MAX(0, b.size.height - y - kStatusH - panelH));
+    _content.frame = NSMakeRect(0, y, b.size.width, MAX(0, b.size.height - y));
+}
+@end
+
+// The whole right side: editor columns over the terminal panel and the status bar.
+@interface CCRootView : NSView
+@property (nonatomic, copy) void (^onLayout)(void);
+@property (nonatomic, copy) void (^onDidUpdate)(void);
+@end
+
+@implementation CCRootView {
+    id _updateToken;
+}
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (void)dealloc { if (_updateToken) [NSNotificationCenter.defaultCenter removeObserver:_updateToken]; }
+- (BOOL)isFlipped { return YES; }
+- (void)resizeSubviewsWithOldSize:(NSSize)old { if (self.onLayout) self.onLayout(); }
+
+// Track which column keyboard focus lands in: a click into another pane's editor or a terminal
+// column must move the focus (and the maximize) there.
+- (void)viewDidMoveToWindow {
+    if (_updateToken) { [NSNotificationCenter.defaultCenter removeObserver:_updateToken]; _updateToken = nil; }
+    if (!self.window) return;
+    __weak CCRootView *weakSelf = self;
+    _updateToken = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidUpdateNotification object:self.window
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+            CCRootView *me = weakSelf;
+            if (me && me.onDidUpdate) me.onDidUpdate();
+        }];
 }
 @end
 
@@ -171,45 +206,37 @@ static NSString *sizeString(off_t n) {
 @end
 
 @implementation ContentController {
-    PaneView *_pane;
-    TabBarView *_tabBar;
-    FindBarView *_findBar;
-    NSSearchField *_search;
-    NSTextField *_replace;
+    CCRootView *_root;
+    FTSplitView *_split;                         // the editor columns
+    NSMutableArray<PaneView *> *_panes;
+    NSMutableArray<TabBarView *> *_tabBars;
+    NSMutableArray<FindBarView *> *_findBars;
+    NSMutableArray<NSSegmentedControl *> *_switches;
+    NSMutableArray *_paneActive;                 // each column's active tab (nil before its first tab)
+    NSInteger _focusedPane;
+    BOOL _syncingFocus;
     NSTextField *_status;
     StatusBarView *_statusBar;
     NSMutableArray<Doc *> *_docs;
     Doc *_active;
-    NSMutableArray<TSession *> *_panelTerminals;
-    NSInteger _activePanel;
     TerminalPanel *_terminalPanel;
+    NSMapTable<TSession *, TerminalView *> *_terminalViews;
     CGFloat _terminalPanelHeight;
-    BOOL _lastTerminalWasTab;
     NSMutableArray<NSString *> *_closed;
     BOOL _closingAll;
     NSUInteger _viewerLoads;                     // tests: how many viewers were built
 }
 
-- (instancetype)init {
-    if (!(self = [super init])) return nil;
-    _docs = [NSMutableArray array];
-    _closed = [NSMutableArray array];
-    _previewEnabled = YES;
-    _pane = [[PaneView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
-    _pane.autoresizesSubviews = YES;
-    FTClipToBounds(_pane);
-
-    _tabBar = [[TabBarView alloc] initWithFrame:NSMakeRect(0, 0, 800, kTabH)];
-    [self wireTabBar];
-
+// The find/replace bar is per column; its fields all feed the same actions here.
+- (FindBarView *)makeFindBar {
     FindBarView *find = [[FindBarView alloc] initWithFrame:NSMakeRect(0, 0, 800, kFindH)];
-    _search = [[NSSearchField alloc] initWithFrame:NSZeroRect];
-    _search.placeholderString = FTL(@"Find");
-    _search.delegate = self;
-    _search.sendsWholeSearchString = YES;
-    _replace = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    _replace.placeholderString = FTL(@"Replace with");
-    _replace.delegate = self;
+    NSSearchField *search = [[NSSearchField alloc] initWithFrame:NSZeroRect];
+    search.placeholderString = FTL(@"Find");
+    search.delegate = self;
+    search.sendsWholeSearchString = YES;
+    NSTextField *replace = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    replace.placeholderString = FTL(@"Replace with");
+    replace.delegate = self;
     NSButton *one = [NSButton buttonWithTitle:FTL(@"Replace") target:self action:@selector(replaceOne:)];
     NSButton *all = [NSButton buttonWithTitle:FTL(@"Replace All") target:self action:@selector(replaceAllAction:)];
     one.controlSize = all.controlSize = NSControlSizeSmall;
@@ -218,11 +245,59 @@ static NSString *sizeString(off_t n) {
     NSTextField *info = [NSTextField labelWithString:@""];
     info.font = [NSFont systemFontOfSize:11];
     info.textColor = NSColor.secondaryLabelColor;
-    find.find = _search; find.replace = _replace; find.one = one; find.all = all; find.info = info;
-    for (NSView *v in @[_search, _replace, one, all, info]) [find addSubview:v];
+    find.find = search; find.replace = replace; find.one = one; find.all = all; find.info = info;
+    for (NSView *v in @[search, replace, one, all, info]) [find addSubview:v];
     [find resizeSubviewsWithOldSize:find.bounds.size];
     find.hidden = YES;
-    _findBar = find;
+    return find;
+}
+
+- (NSSegmentedControl *)makeLayoutSwitch {
+    NSArray *icons = @[@"doc.plaintext", @"rectangle.split.2x1", @"eye"];
+    NSArray *tips = @[FTL(@"Source"), FTL(@"Side by Side (⌥⌘V)"), FTL(@"Preview (⇧⌘V)")];
+    NSSegmentedControl *sw = [NSSegmentedControl segmentedControlWithImages:@[
+        [NSImage imageWithSystemSymbolName:icons[0] accessibilityDescription:tips[0]],
+        [NSImage imageWithSystemSymbolName:icons[1] accessibilityDescription:tips[1]],
+        [NSImage imageWithSystemSymbolName:icons[2] accessibilityDescription:tips[2]]]
+        trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(layoutSwitchChanged:)];
+    sw.controlSize = NSControlSizeSmall;
+    sw.segmentStyle = NSSegmentStyleTexturedRounded;
+    for (NSInteger i = 0; i < 3; i++) [sw setToolTip:tips[i] forSegment:i];
+    [sw sizeToFit];
+    sw.hidden = YES;
+    return sw;
+}
+
+- (instancetype)init {
+    if (!(self = [super init])) return nil;
+    _docs = [NSMutableArray array];
+    _closed = [NSMutableArray array];
+    _panes = [NSMutableArray array]; _tabBars = [NSMutableArray array];
+    _findBars = [NSMutableArray array]; _switches = [NSMutableArray array];
+    _paneActive = [NSMutableArray array];
+    _previewEnabled = YES;
+    _autoSaveDelay = 1.0;
+    _showsMinimap = YES;
+
+    _root = [[CCRootView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
+    if (@available(macOS 14.0, *)) _root.clipsToBounds = YES;
+    __weak typeof(self) weakSelf = self;
+    _root.onLayout = ^{ [weakSelf layoutRoot]; };
+    _root.onDidUpdate = ^{ [weakSelf syncFocus]; };
+
+    _split = [[FTSplitView alloc] initWithFrame:_root.bounds];
+    _split.onFocusItem = ^(NSInteger index) {
+        ContentController *me = weakSelf;
+        if (!me || index < 0 || index >= (NSInteger)me->_panes.count) return;
+        NSResponder *responder = me->_root.window.firstResponder;
+        BOOL alreadyFocused = [responder isKindOfClass:NSView.class] && [(NSView *)responder isDescendantOf:me->_panes[index]];
+        [me activatePane:index focus:!alreadyFocused];
+    };
+    _split.onMaximizeChange = ^(BOOL maximized) {
+        ContentController *me = weakSelf;
+        if (me) [me activatePane:me->_split.focused focus:YES];
+    };
+    [_root addSubview:_split];
 
     StatusBarView *bar = [[StatusBarView alloc] initWithFrame:NSMakeRect(0, 0, 800, kStatusH)];
     _status = [NSTextField labelWithString:@""];
@@ -241,54 +316,222 @@ static NSString *sizeString(off_t n) {
     [bar addSubview:tbtn];
     [bar resizeSubviewsWithOldSize:bar.bounds.size];
     _statusBar = bar;
+    [_root addSubview:bar];
 
-    NSArray *icons = @[@"doc.plaintext", @"rectangle.split.2x1", @"eye"];
-    NSArray *tips = @[FTL(@"Source"), FTL(@"Side by Side (⌥⌘V)"), FTL(@"Preview (⇧⌘V)")];
-    NSSegmentedControl *sw = [NSSegmentedControl segmentedControlWithImages:@[
-        [NSImage imageWithSystemSymbolName:icons[0] accessibilityDescription:tips[0]],
-        [NSImage imageWithSystemSymbolName:icons[1] accessibilityDescription:tips[1]],
-        [NSImage imageWithSystemSymbolName:icons[2] accessibilityDescription:tips[2]]]
-        trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(layoutSwitchChanged:)];
-    sw.controlSize = NSControlSizeSmall;
-    sw.segmentStyle = NSSegmentStyleTexturedRounded;
-    for (NSInteger i = 0; i < 3; i++) [sw setToolTip:tips[i] forSegment:i];
-    [sw sizeToFit];
-    sw.hidden = YES;
-
-    _panelTerminals = [NSMutableArray array];
-    _activePanel = -1;
+    _terminalViews = [NSMapTable strongToStrongObjectsMapTable];
     _terminalPanelHeight = 260;
-    _autoSaveDelay = 1.0;
-    _showsMinimap = YES;
     _terminalPanel = [[TerminalPanel alloc] initWithFrame:NSMakeRect(0, 0, 800, _terminalPanelHeight)];
     _terminalPanel.hidden = YES;
-    __weak typeof(self) weakSelf = self;
-    _terminalPanel.onSelect = ^(TSession *t) { ContentController *me = weakSelf; if (!me) return; me->_activePanel = (NSInteger)[me->_panelTerminals indexOfObject:t]; [me attachPanelTerminal]; };
+    _terminalPanel.viewProvider = ^TerminalView *(TSession *session) { return [weakSelf viewForTerminal:session]; };
     _terminalPanel.onClose = ^(TSession *t) { [weakSelf closeTerminal:t]; };
     _terminalPanel.onNew = ^{ [weakSelf openTerminalAt:nil asTab:NO]; };
     _terminalPanel.onHide = ^{ [weakSelf setTerminalPanelVisible:NO focus:NO]; };
-    _terminalPanel.onDropTerminal = ^(NSString *token) { [weakSelf moveTerminalToPanel:[TSession sessionForDragToken:token]]; };
+    _terminalPanel.onDropTerminal = ^BOOL(NSString *token, NSUInteger column, FTTabDropZone zone, NSInteger index) {
+        ContentController *me = weakSelf;
+        TSession *t = [TSession sessionForDragToken:token];
+        if (!me || !t) return NO;
+        [me detachTerminalDoc:t];
+        if (![me->_terminalPanel moveSession:t toColumn:column zone:zone index:index]) {
+            [me moveTerminalToTab:t];
+            return NO;
+        }
+        [me wireTerminal:t];
+        [me setTerminalPanelVisible:YES focus:YES];
+        return YES;
+    };
+    _terminalPanel.onStateChange = ^{ [weakSelf stateChanged]; };
     _terminalPanel.onHeightChange = ^(CGFloat h) {
         ContentController *me = weakSelf;
         if (!me) return;
         me->_terminalPanelHeight = h;
-        [me->_pane layoutPane];
+        [me layoutRoot];
     };
-    _pane.tabBar = _tabBar; _pane.findBar = find; _pane.statusBar = bar; _pane.layoutSwitch = sw; _pane.terminalPanel = _terminalPanel;
-    for (NSView *v in @[_tabBar, find, bar, sw, _terminalPanel]) [_pane addSubview:v];
+    [_root addSubview:_terminalPanel];
+
+    [self makePaneAtIndex:0];
     self.emptyView = [[NSView alloc] initWithFrame:NSZeroRect];
     return self;
 }
 
+#pragma mark Panes (split view)
+
+- (NSArray<Doc *> *)docsInPane:(NSInteger)p {
+    if (p < 0) return @[];
+    NSMutableArray *a = [NSMutableArray array];
+    for (Doc *d in _docs) if ((NSInteger)d.pane == p) [a addObject:d];
+    return a;
+}
+
+- (Doc *)paneActive:(NSInteger)p {
+    if (p < 0 || p >= (NSInteger)_paneActive.count) return nil;
+    id v = _paneActive[p];
+    return [v isKindOfClass:Doc.class] ? v : nil;
+}
+
+- (NSInteger)focusedIndex { return MIN(MAX(_focusedPane, 0), (NSInteger)_panes.count - 1); }
+- (PaneView *)focusedPaneView { return _panes[self.focusedIndex]; }
+- (PaneView *)paneOfDoc:(Doc *)d { return d ? _panes[MIN((NSInteger)d.pane, (NSInteger)_panes.count - 1)] : self.focusedPaneView; }
+- (NSInteger)paneCount { return (NSInteger)_panes.count; }
+- (FindBarView *)focusedFindBar { return _findBars[self.focusedIndex]; }
+- (NSSearchField *)findField { return self.focusedFindBar.find; }
+- (NSTextField *)replaceField { return self.focusedFindBar.replace; }
+
+- (void)rewireAllTabBars {
+    __weak ContentController *weakSelf = self;
+    for (NSUInteger p = 0; p < _panes.count; p++) {
+        [self wireTabBar:_tabBars[p] pane:(NSInteger)p];
+        __weak PaneView *weakPane = _panes[p];
+        _panes[p].canDropTab = ^BOOL(NSString *token, BOOL terminal, FTTabDropZone zone) {
+            return [weakSelf canDropToken:token terminal:terminal inPane:weakPane zone:zone];
+        };
+        _panes[p].onDropTab = ^BOOL(NSString *token, BOOL terminal, FTTabDropZone zone, NSInteger index) {
+            return [weakSelf dropToken:token terminal:terminal inPane:weakPane zone:zone index:index];
+        };
+    }
+}
+
+- (void)makePaneAtIndex:(NSInteger)at {
+    if (_panes.count >= kMaxPanes) return;
+    at = MIN(MAX(at, 0), (NSInteger)_panes.count);
+    for (Doc *d in _docs) if ((NSInteger)d.pane >= at) d.pane++;
+    PaneView *pv = [[PaneView alloc] initWithFrame:NSMakeRect(0, 0, 400, 600)];
+    if (@available(macOS 14.0, *)) pv.clipsToBounds = YES;
+    TabBarView *tb = [[TabBarView alloc] initWithFrame:NSMakeRect(0, 0, 400, kTabH)];
+    FindBarView *fb = [self makeFindBar];
+    NSSegmentedControl *sw = [self makeLayoutSwitch];
+    pv.tabBar = tb; pv.findBar = fb; pv.layoutSwitch = sw;
+    for (NSView *v in @[tb, fb, sw]) [pv addSubview:v];
+    [_panes insertObject:pv atIndex:(NSUInteger)at];
+    [_tabBars insertObject:tb atIndex:(NSUInteger)at];
+    [_findBars insertObject:fb atIndex:(NSUInteger)at];
+    [_switches insertObject:sw atIndex:(NSUInteger)at];
+    [_paneActive insertObject:NSNull.null atIndex:(NSUInteger)at];
+    [self rewireAllTabBars];
+    _split.items = _panes;
+    [pv layoutPane];
+    [self relayout];
+}
+
+- (void)removePaneAtIndex:(NSInteger)p {
+    if (p < 0 || p >= (NSInteger)_panes.count || _panes.count <= 1) return;
+    [_panes[p] removeFromSuperview];
+    [_panes removeObjectAtIndex:(NSUInteger)p];
+    [_tabBars removeObjectAtIndex:(NSUInteger)p];
+    [_findBars removeObjectAtIndex:(NSUInteger)p];
+    [_switches removeObjectAtIndex:(NSUInteger)p];
+    [_paneActive removeObjectAtIndex:(NSUInteger)p];
+    if (_emptyView && ![_panes containsObject:(id)_emptyView.superview]) {
+        _panes[0].empty = _emptyView;
+        [_panes[0] addSubview:_emptyView];
+    }
+    for (Doc *d in _docs) if ((NSInteger)d.pane > p) d.pane--;
+    if (_focusedPane > p) _focusedPane--;
+    if (_focusedPane >= (NSInteger)_panes.count) _focusedPane = (NSInteger)_panes.count - 1;
+    [self rewireAllTabBars];
+    _split.focused = _focusedPane;
+    _split.items = _panes;
+    [self relayout];
+}
+
+- (void)removePaneIfEmpty:(NSInteger)p {
+    if (p >= 0 && p < (NSInteger)_panes.count && _panes.count > 1 && ![self docsInPane:p].count) [self removePaneAtIndex:p];
+}
+
+- (void)collapseToOnePane {
+    while (_panes.count > 1) [self removePaneAtIndex:(NSInteger)_panes.count - 1];
+    _focusedPane = 0;
+    _split.focused = 0;
+}
+
+// The active file opens again in a new column (terminals and untitled documents stay in theirs).
+- (void)splitEditor {
+    if (_panes.count >= kMaxPanes || !_active || _active.terminal || _active.untitled) { NSBeep(); return; }
+    [self makePaneAtIndex:_focusedPane + 1];
+    NSInteger pane = _focusedPane + 1;
+    Doc *d = [Doc new];
+    d.path = _active.path; d.mode = _active.mode; d.pane = (NSUInteger)pane;
+    NSUInteger at = MIN([_docs indexOfObject:_active] + 1, _docs.count);
+    [_docs insertObject:d atIndex:at];
+    [self activate:d focus:YES];
+}
+
+- (void)activatePane:(NSInteger)p focus:(BOOL)focus {
+    if (p < 0 || p >= (NSInteger)_panes.count) return;
+    Doc *d = [self paneActive:p] ?: [self docsInPane:p].firstObject;
+    if (d) { [self activate:d focus:focus]; return; }
+    _focusedPane = p;
+    _split.focused = p;
+}
+
+- (void)focusPane:(NSInteger)i { [self activatePane:i focus:YES]; }
+
+// Clicking into another column's editor (or a terminal column) moves the focus there.
+- (void)syncFocus {
+    if (_syncingFocus) return;
+    NSResponder *r = _root.window.firstResponder;
+    if (!r || r == _root.window || ![r isKindOfClass:NSView.class]) return;
+    NSView *fr = (NSView *)r;
+    if (_terminalPanel && !_terminalPanel.isHidden && [fr isDescendantOf:_terminalPanel]) {
+        [_terminalPanel syncFocus];
+        return;
+    }
+    for (NSUInteger p = 0; p < _panes.count; p++) {
+        if ((NSInteger)p != _focusedPane && [fr isDescendantOf:_panes[p]]) {
+            _syncingFocus = YES;
+            [self activatePane:(NSInteger)p focus:NO];
+            _syncingFocus = NO;
+            return;
+        }
+    }
+}
+
+- (BOOL)terminalAreaFocused {
+    NSResponder *r = _root.window.firstResponder;
+    return ![r isKindOfClass:NSView.class] ? NO : [(NSView *)r isDescendantOf:_terminalPanel];
+}
+
+- (BOOL)canToggleMaximize {
+    return [self terminalAreaFocused] ? _terminalPanel.columnCount > 1 : _panes.count > 1;
+}
+
+- (BOOL)focusedAreaMaximized {
+    return [self terminalAreaFocused] ? _terminalPanel.isMaximized : _split.isMaximized;
+}
+
+- (void)toggleMaximize {
+    if ([self terminalAreaFocused]) {
+        if (_terminalPanel.columnCount < 2) { NSBeep(); return; }
+        _terminalPanel.maximized = !_terminalPanel.maximized;
+    } else {
+        if (_panes.count < 2) { NSBeep(); return; }
+        _split.maximized = !_split.maximized;
+    }
+}
+
+// The root: editor columns over the terminal panel over the status bar.
+- (void)layoutRoot {
+    if (!_root) return;
+    NSRect b = _root.bounds;
+    BOOL panelVisible = !_terminalPanel.hidden;
+    _statusBar.hidden = !_docs.count && !panelVisible;
+    CGFloat panelH = panelVisible ? MIN(_terminalPanelHeight, MAX(80, b.size.height - kStatusH - 40)) : 0;
+    _terminalPanel.frame = NSMakeRect(0, b.size.height - kStatusH - panelH, b.size.width, panelH);
+    _statusBar.frame = NSMakeRect(0, b.size.height - kStatusH, b.size.width, kStatusH);
+    _split.frame = NSMakeRect(0, 0, b.size.width, MAX(0, b.size.height - (_statusBar.hidden ? 0 : kStatusH) - panelH));
+    for (PaneView *pv in _panes) [pv layoutPane];
+}
+
+- (void)relayout { [self layoutRoot]; }
+
 - (void)setEmptyView:(NSView *)v {
     [_emptyView removeFromSuperview];
     _emptyView = v;
-    _pane.empty = v;
-    [_pane addSubview:v positioned:NSWindowBelow relativeTo:_pane.terminalPanel ?: nil];   // never over the terminal panel
-    [_pane layoutPane];
+    _panes[0].empty = v;
+    [_panes[0] addSubview:v];
+    [_panes[0] layoutPane];
 }
 
-- (NSView *)view { return _pane; }
+- (NSView *)view { return _root; }
 - (NSString *)currentPath { return _active.untitled ? nil : _active.path; }
 - (NSString *)currentTitle { return _active ? docName(_active) : nil; }
 - (BOOL)activeIsUntitled { return _active.untitled; }
@@ -336,16 +579,19 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
     d.layout = l; d.hasLayout = YES;
     [NSUserDefaults.standardUserDefaults setInteger:l forKey:[ContentController layoutKey:d.markup.kind]];
     [self syncLayoutSwitch];
-    [_pane.window makeFirstResponder:d.markup.focusView];
+    [_root.window makeFirstResponder:d.markup.focusView];
 }
 
 - (void)layoutSwitchChanged:(NSSegmentedControl *)s { [self setActiveMarkupLayout:(MarkupLayout)s.selectedSegment]; }
 
 - (void)syncLayoutSwitch {
-    NSSegmentedControl *sw = (NSSegmentedControl *)_pane.layoutSwitch;
-    _pane.showsLayoutSwitch = _active.markup != nil;
-    if (_active.markup) sw.selectedSegment = _active.markup.markupLayout;
-    [_pane layoutPane];
+    for (NSUInteger p = 0; p < _panes.count; p++) {
+        Doc *pa = [self paneActive:(NSInteger)p];
+        BOOL show = pa.markup != nil && (NSInteger)p == _focusedPane;
+        _panes[p].showsLayoutSwitch = show;
+        if (show) ((NSSegmentedControl *)_switches[p]).selectedSegment = pa.markup.markupLayout;
+        [_panes[p] layoutPane];
+    }
 }
 
 - (void)setShowsMinimap:(BOOL)s {
@@ -378,6 +624,13 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
     return nil;
 }
 
+// A file may be open in several columns at once (⌘\ duplicates it); within one column a path is unique.
+- (Doc *)docForPath:(NSString *)p inPane:(NSInteger)pane {
+    if (!p) return nil;
+    for (Doc *d in _docs) if ((NSInteger)d.pane == pane && [d.path isEqualToString:p]) return d;
+    return nil;
+}
+
 #pragma mark Viewers
 
 - (NSView *)placeholder:(NSString *)msg {
@@ -395,7 +648,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 
 - (void)loadViewer:(Doc *)d {
     _viewerLoads++;
-    if (d.mode == ViewerTerminal) { d.viewer = [[TerminalView alloc] initWithSession:d.terminal]; d.status = @""; return; }
+    if (d.mode == ViewerTerminal) { d.viewer = [self viewForTerminal:d.terminal]; d.status = @""; return; }
     struct timespec mt = {0}; off_t sz = 0;
     d.missing = !statPath(d.path, &mt, &sz);
     if (d.missing) { d.viewer = [self placeholder:FTL(@"The file no longer exists")]; d.status = FTL(@"Deleted"); return; }
@@ -635,6 +888,14 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 }
 
 - (void)releaseViewer:(Doc *)d {
+    NSView *oldViewer = d.viewer;
+    if (oldViewer) {
+        for (PaneView *pane in _panes) if (pane.content == oldViewer) {
+            pane.content = nil;
+            pane.hasTabs = [self paneActive:(NSInteger)[_panes indexOfObject:pane]] != nil;
+            [pane layoutPane];
+        }
+    }
     if (d.viewerIsQL) FKCloseQuickLookView(d.viewer);
     if (d.markup) { d.layout = d.markup.markupLayout; d.hasLayout = YES; [d.markup releasePreview]; }
     [d.saveTimer invalidate];
@@ -647,35 +908,56 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
     d.viewerIsQL = NO;
 }
 
+- (void)installDoc:(Doc *)d focus:(BOOL)focus {
+    if (!d) return;
+    NSInteger p = (NSInteger)d.pane;
+    if (p < 0 || p >= (NSInteger)_panes.count) return;
+    PaneView *pane = _panes[p];
+    if (!d.viewer) [self loadViewer:d];
+    NSView *v = d.viewer;
+    if (pane.content != v) {
+        if (pane.content && pane.content != v) [pane.content removeFromSuperview];
+        pane.content = v;
+        if (v) [pane addSubview:v positioned:NSWindowBelow relativeTo:pane.findBar];
+    }
+    pane.hasTabs = YES;
+    [self syncLayoutSwitch];
+    [d.markup ensurePreview];
+    if (d == _active) {
+        _status.stringValue = d.status ?: @"";
+        _statusBar.tools = [v conformsToProtocol:@protocol(FTZoomable)] ? [(id<FTZoomable>)v toolsView] : nil;
+        _findBars[p].findOnly = !d.editor;
+    }
+    [pane layoutPane];
+    [d.viewer layoutSubtreeIfNeeded];
+    TextEditorView *ed = d.editor;
+    if (ed && d.restoreLine) { [ed gotoLine:d.restoreLine]; d.restoreLine = 0; [d.markup editorScrolled]; }
+    NSView *fv = d.markup ? d.markup.focusView : [v conformsToProtocol:@protocol(FTZoomable)] ? [(id<FTZoomable>)v focusView] : v;
+    if (focus && fv) [_root.window makeFirstResponder:fv];
+    [pane layoutPane];
+}
+
 - (void)reloadViewerOf:(Doc *)d {
     TextEditorView *old = d.editor;
     NSUInteger line = old ? old.caretLine : 0;
     [self releaseViewer:d];
     d.restoreLine = line;
-    if (d == _active) [self installActive:NO];
+    if ([self paneActive:(NSInteger)d.pane] == d) [self installDoc:d focus:d == _active];
     [self reloadTabs];
 }
 
-// Puts the active doc's viewer into the pane, creating it if needed.
+// Puts the active doc's viewer into its column, creating it if needed.
 - (void)installActive:(BOOL)focus {
     Doc *d = _active;
-    if (d && !d.viewer) [self loadViewer:d];
-    NSView *v = d.viewer;
-    if (_pane.content != v) {
-        if (_pane.content && _pane.content != v) [_pane.content removeFromSuperview];
-        _pane.content = v;
-        if (v) [_pane addSubview:v positioned:NSWindowBelow relativeTo:_findBar];
+    if (!d) {
+        PaneView *pane = self.focusedPaneView;
+        pane.content = nil; pane.hasTabs = NO; [pane layoutPane];
+        [self relayout];
+        return;
     }
-    _pane.hasTabs = _docs.count > 0;
+    [self installDoc:d focus:focus];
     [self syncLayoutSwitch];
-    [d.markup ensurePreview];
-    _status.stringValue = d.status ?: @"";
-    _statusBar.tools = [v conformsToProtocol:@protocol(FTZoomable)] ? [(id<FTZoomable>)v toolsView] : nil;
-    _findBar.findOnly = !d.editor;                         // PDF, workbook, document: find without replace
-    TextEditorView *ed = self.editor;
-    if (ed && d.restoreLine) { [ed gotoLine:d.restoreLine]; d.restoreLine = 0; [d.markup editorScrolled]; }
-    NSView *fv = d.markup ? d.markup.focusView : [v conformsToProtocol:@protocol(FTZoomable)] ? [(id<FTZoomable>)v focusView] : v;
-    if (focus && fv) [_pane.window makeFirstResponder:fv];
+    [self relayout];
 }
 
 #pragma mark Zoom / pages
@@ -687,6 +969,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 
 // Which kind of zoom applies right now: the image / PDF itself, the rendered preview, or the editor font.
 - (NSInteger)zoomTarget {
+    if ([self terminalAreaFocused]) return 6;
     if (_active.terminal) return 6;
     if (!_active && [self terminalPanelVisible]) return 6;
     if ([_active.viewer conformsToProtocol:@protocol(FTZoomable)]) return 1;
@@ -694,7 +977,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
         [_active.viewer isKindOfClass:ArchivePreview.class]) return 5;
     MarkupContainer *m = _active.markup;
     if (m && m.markupLayout != MarkupSource) {
-        NSResponder *fr = _pane.window.firstResponder;
+        NSResponder *fr = _root.window.firstResponder;
         BOOL inEditor = m.markupLayout == MarkupSplit && [fr isKindOfClass:NSView.class] && [(NSView *)fr isDescendantOf:m.editor];
         if (!inEditor) {
             if (m.kind == MarkupHTML) return 3;
@@ -734,7 +1017,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
             break;
         }
         case 6: {
-            TerminalView *tv = [_active.viewer isKindOfClass:TerminalView.class] ? (TerminalView *)_active.viewer : (TerminalView *)[self panelTerminalView];
+            TerminalView *tv = [self terminalAreaFocused] ? (TerminalView *)[self panelTerminalView] : [_active.viewer isKindOfClass:TerminalView.class] ? (TerminalView *)_active.viewer : (TerminalView *)[self panelTerminalView];
             CGFloat s = dir ? tv.fontSize + dir : 13;
             tv.fontSize = s;
             [self flashStatus:[NSString stringWithFormat:FTL(@"Terminal font size %.0f"), s]];
@@ -772,30 +1055,43 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 - (void)reloadTabs {
     NSCountedSet *names = [NSCountedSet set];
     for (Doc *d in _docs) [names addObject:docName(d)];
-    NSMutableArray *items = [NSMutableArray arrayWithCapacity:_docs.count];
-    for (Doc *d in _docs) {
-        TabItem *t = [TabItem new];
-        t.title = docName(d);
-        if (!d.untitled && [names countForObject:t.title] > 1) t.subtitle = d.path.stringByDeletingLastPathComponent.lastPathComponent;
-        t.dirty = docDirty(d);
-        t.preview = d.preview;
-        t.missing = d.missing;
-        t.toolTip = d.untitled ? FTL(@"New document (⌘S to choose where to save)") : [d.path stringByAbbreviatingWithTildeInPath];
-        [items addObject:t];
+    for (NSUInteger p = 0; p < _panes.count; p++) {
+        NSArray<Doc *> *docs = [self docsInPane:(NSInteger)p];
+        NSMutableArray *items = [NSMutableArray arrayWithCapacity:docs.count];
+        for (Doc *d in docs) {
+            TabItem *t = [TabItem new];
+            t.title = docName(d);
+            if (!d.untitled && [names countForObject:t.title] > 1) t.subtitle = d.path.stringByDeletingLastPathComponent.lastPathComponent;
+            t.dirty = docDirty(d);
+            t.preview = d.preview;
+            t.missing = d.missing;
+            t.toolTip = d.untitled ? FTL(@"New document (⌘S to choose where to save)") : [d.path stringByAbbreviatingWithTildeInPath];
+            [items addObject:t];
+        }
+        TabBarView *tb = _tabBars[p];
+        Doc *pa = [self paneActive:(NSInteger)p];
+        tb.items = items;
+        tb.selectedIndex = pa ? (NSInteger)[docs indexOfObject:pa] : -1;
+        [tb reload];
     }
-    _tabBar.items = items;
-    _tabBar.selectedIndex = _active ? (NSInteger)[_docs indexOfObject:_active] : -1;
-    [_tabBar reload];
 }
 
 - (void)activate:(Doc *)d focus:(BOOL)focus {
     Doc *prev = _active;
-    if (prev != d && prev && [_docs containsObject:prev]) {
-        if (_autoSaveMode != AutoSaveOff || prev.untitled) [self autoSave:prev];   // leaving a file saves it
-        if (prev.markup) [prev.markup releasePreview];                 // keep the editor, drop the preview
-        else if (!prev.editor && !(prev.savable && prev.savable.isDirty)) [self releaseViewer:prev];   // keep unsaved cells
-    }
+    if (prev != d && prev && [_docs containsObject:prev] && (_autoSaveMode != AutoSaveOff || prev.untitled))
+        [self autoSave:prev];
+    Doc *replaced = d ? [self paneActive:(NSInteger)d.pane] : nil;
     _active = d;
+    if (d) {
+        _focusedPane = (NSInteger)d.pane;
+        _split.focused = _focusedPane;
+        if (d.pane < _paneActive.count) _paneActive[d.pane] = d;
+    }
+    if (replaced && replaced != d) {
+        if (replaced != prev && (_autoSaveMode != AutoSaveOff || replaced.untitled)) [self autoSave:replaced];
+        if (replaced.markup) [replaced.markup releasePreview];
+        else if (!replaced.editor && !(replaced.savable && replaced.savable.isDirty)) [self releaseViewer:replaced];
+    }
     [self installActive:focus];
     [self reloadTabs];
     [self stateChanged];
@@ -803,14 +1099,14 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 }
 
 - (void)openPath:(NSString *)path preview:(BOOL)preview focus:(BOOL)focus {
-    [self openPath:path mode:ViewerAuto preview:preview focus:focus];
+    [self openPath:path mode:ViewerAuto preview:preview focus:focus pane:_focusedPane];
 }
 
 // Opens with an explicit layout for this tab only (e.g. a new .md file starts in the editor).
 - (void)openPath:(NSString *)path preview:(BOOL)preview focus:(BOOL)focus layout:(MarkupLayout)layout {
-    Doc *d = [self openPath:path mode:ViewerAuto preview:preview focus:NO];
+    Doc *d = [self openPath:path mode:ViewerAuto preview:preview focus:NO pane:_focusedPane];
     if (d.markup) { d.markup.markupLayout = layout; d.layout = layout; d.hasLayout = YES; [self syncLayoutSwitch]; }
-    if (focus) [_pane.window makeFirstResponder:d.markup ? d.markup.focusView : d.viewer];
+    if (focus) [_root.window makeFirstResponder:d.markup ? d.markup.focusView : d.viewer];
 }
 
 - (void)findInPreview {
@@ -822,19 +1118,24 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
     if (!m) { NSBeep(); return; }
     NSMenuItem *it = [NSMenuItem new];
     it.tag = NSTextFinderActionShowFindInterface;
-    [_pane.window makeFirstResponder:m.textView];
+    [_root.window makeFirstResponder:m.textView];
     [m.textView performTextFinderAction:it];
 }
 
 - (Doc *)openPath:(NSString *)path mode:(ViewerKind)mode preview:(BOOL)preview focus:(BOOL)focus {
-    if (!path.length) return nil;
+    return [self openPath:path mode:mode preview:preview focus:focus pane:_focusedPane];
+}
+
+// Opens into a specific column; the same file may already be open in another column.
+- (Doc *)openPath:(NSString *)path mode:(ViewerKind)mode preview:(BOOL)preview focus:(BOOL)focus pane:(NSInteger)pane {
+    if (!path.length || pane < 0 || pane >= (NSInteger)_panes.count) return nil;
     if (!path.isAbsolutePath)
         path = [NSFileManager.defaultManager.currentDirectoryPath stringByAppendingPathComponent:path];
     path = path.stringByStandardizingPath;
     BOOL isDir = NO;
     if (!path || ([NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDir] && isDir)) return nil;
     if (!_previewEnabled) preview = NO;
-    Doc *d = [self docForPath:path];
+    Doc *d = [self docForPath:path inPane:pane];
     if (d) {
         if (!preview) d.preview = NO;
         if (mode != ViewerAuto && mode != d.mode && !docDirty(d)) { d.mode = mode; [self releaseViewer:d]; }
@@ -842,7 +1143,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
         return d;
     }
     Doc *reuse = nil;
-    if (preview) for (Doc *x in _docs) if (x.preview && !x.untitled && !docDirty(x)) { reuse = x; break; }
+    if (preview) for (Doc *x in [self docsInPane:pane]) if (x.preview && !x.untitled && !docDirty(x)) { reuse = x; break; }
     if (reuse) {
         [self releaseViewer:reuse];
         reuse.path = path; reuse.mode = mode; reuse.missing = NO; reuse.status = nil;
@@ -850,8 +1151,9 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
         d = reuse;
     } else {
         d = [Doc new];
-        d.path = path; d.mode = mode; d.preview = preview;
-        NSUInteger at = _active ? [_docs indexOfObject:_active] + 1 : _docs.count;
+        d.path = path; d.mode = mode; d.preview = preview; d.pane = (NSUInteger)MAX(0, pane);
+        NSUInteger at = _docs.count;
+        for (NSUInteger i = 0; i < _docs.count; i++) if ((NSInteger)_docs[i].pane == pane) at = i + 1;
         [_docs insertObject:d atIndex:MIN(at, _docs.count)];
     }
     [self activate:d focus:focus];
@@ -895,26 +1197,43 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
     if (ask && ![self askSave:d]) return NO;
     NSUInteger i = [_docs indexOfObject:d];
     if (i == NSNotFound) return YES;
-    BOOL hadFocus = [_pane.window.firstResponder isKindOfClass:NSView.class] &&
-                    [(NSView *)_pane.window.firstResponder isDescendantOf:_pane];
-    if (d.untitled && !ask && !d.discarded) [self autoSave:d];          // keep the latest text
+    NSInteger p = (NSInteger)d.pane;
+    BOOL wasActive = d == _active, wasPaneActive = [self paneActive:p] == d;
+    NSResponder *fr = _root.window.firstResponder;
+    BOOL hadFocus = [fr isKindOfClass:NSView.class] && [(NSView *)fr isDescendantOf:_panes[p]];
+    NSUInteger inPane = [[self docsInPane:p] indexOfObject:d];
+    if (d.untitled && !ask && !d.discarded) [self autoSave:d];
     if (!d.untitled && d.path) {
         [_closed addObject:d.path];
         if (_closed.count > 30) [_closed removeObjectAtIndex:0];
     }
     [_docs removeObjectAtIndex:i];
-    if (d.terminal) { [d.terminal terminate]; d.terminal.onTitleChange = nil; }
-    if (_pane.content && _pane.content == d.viewer) _pane.content = nil;
-    [self releaseViewer:d];
-    if (d.untitled && (ask || d.discarded)) [NSFileManager.defaultManager removeItemAtPath:d.path error:nil];
-    if (d == _active) {
-        _active = nil;
-        if (_closingAll) return YES;                   // the next tab isn't loaded just to be closed too
-        if (_docs.count) { [self activate:_docs[MIN(i, _docs.count - 1)] focus:hadFocus]; return YES; }
-        [self installActive:NO];
-        if (self.onActivate) self.onActivate(nil);
+    if (d.terminal) {
+        [d.terminal terminate]; d.terminal.onTitleChange = nil;
+        [_terminalViews removeObjectForKey:d.terminal];
     }
+    [self releaseViewer:d];
+    if (wasPaneActive) _paneActive[p] = NSNull.null;
+    if (d.untitled && (ask || d.discarded)) [NSFileManager.defaultManager removeItemAtPath:d.path error:nil];
+    if (wasActive) _active = nil;
+    if (_closingAll) return YES;
+    NSArray<Doc *> *same = [self docsInPane:p];
+    if (wasPaneActive && same.count) {
+        Doc *replacement = same[MIN(inPane, same.count - 1)];
+        _paneActive[p] = replacement;
+        if (wasActive) [self activate:replacement focus:hadFocus];
+        else [self installDoc:replacement focus:NO];
+    } else if (!same.count) {
+        [self removePaneIfEmpty:p];
+    }
+    if (wasActive && !_active) {
+        Doc *next = [self paneActive:self.focusedIndex];
+        if (next) [self activate:next focus:hadFocus];
+        else { [self installActive:NO]; if (self.onActivate) self.onActivate(nil); }
+    }
+    if (_active) { _focusedPane = (NSInteger)_active.pane; _split.focused = _focusedPane; }
     [self reloadTabs];
+    [self relayout];
     [self stateChanged];
     return YES;
 }
@@ -923,39 +1242,43 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 
 #pragma mark Terminals
 
+- (TerminalView *)viewForTerminal:(TSession *)t {
+    TerminalView *view = [_terminalViews objectForKey:t];
+    if (!view) {
+        view = [[TerminalView alloc] initWithSession:t];
+        [_terminalViews setObject:view forKey:t];
+    }
+    return view;
+}
+
+- (void)wireTerminal:(TSession *)t {
+    __weak ContentController *weakSelf = self;
+    t.onTitleChange = ^{ [weakSelf terminalTitlesChanged]; };
+}
+
 - (nullable TSession *)openTerminalAt:(NSString *)directory asTab:(BOOL)asTab {
     directory = directory ?: (self.terminalDirectoryProvider ? self.terminalDirectoryProvider() : nil);
     NSString *err = nil;
     TSession *t = [[TSession alloc] initWithDirectory:directory shell:nil error:&err];
     if (!t) { _status.stringValue = err ?: FTL(@"The terminal could not be started"); return nil; }
-    __weak typeof(self) weakSelf = self;
-    t.onTitleChange = ^{ [weakSelf terminalTitlesChanged]; };
-    _lastTerminalWasTab = asTab;
+    [self wireTerminal:t];
     if (asTab) {
         Doc *d = [Doc new];
-        d.mode = ViewerTerminal;
-        d.terminal = t;
-        d.title = terminalTitle(t);
+        d.mode = ViewerTerminal; d.terminal = t; d.title = terminalTitle(t);
+        d.pane = (NSUInteger)self.focusedIndex;
         [_docs addObject:d];
-        [self reloadTabs];
         [self activate:d focus:YES];
-        [self stateChanged];
     } else {
-        [_panelTerminals addObject:t];
-        _activePanel = (NSInteger)_panelTerminals.count - 1;
+        [_terminalPanel addSession:t];
         [self setTerminalPanelVisible:YES focus:YES];
     }
     return t;
 }
 
-- (NSUInteger)terminalCount {
-    NSUInteger n = _panelTerminals.count;
-    for (Doc *d in _docs) if (d.terminal) n++;
-    return n;
-}
+- (NSUInteger)terminalCount { return self.terminals.count; }
 
 - (NSArray<TSession *> *)terminals {
-    NSMutableArray *out = _panelTerminals.mutableCopy;
+    NSMutableArray *out = [_terminalPanel.sessions mutableCopy] ?: [NSMutableArray array];
     for (Doc *d in _docs) if (d.terminal) [out addObject:d.terminal];
     return out;
 }
@@ -963,133 +1286,98 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 - (BOOL)terminalPanelVisible { return !_terminalPanel.hidden; }
 
 - (void)setTerminalPanelVisible:(BOOL)visible focus:(BOOL)focus {
-    if (visible == !_terminalPanel.hidden) { if (visible && focus) [self attachPanelTerminal]; return; }
+    BOOL wasFocused = [self terminalAreaFocused];
     _terminalPanel.hidden = !visible;
     _statusBar.terminalButton.contentTintColor = visible ? NSColor.controlAccentColor : NSColor.secondaryLabelColor;
-    if (visible) {
-        if (_activePanel >= (NSInteger)_panelTerminals.count || _activePanel < 0) _activePanel = _panelTerminals.count ? (NSInteger)_panelTerminals.count - 1 : -1;
-        NSRect f = _terminalPanel.frame;
-        f.size.height = _terminalPanelHeight;
-        _terminalPanel.frame = f;
-        [self attachPanelTerminal];
-        NSView *v = [self panelTerminalView];
-        if (focus && v) [_pane.window makeFirstResponder:v];
-    }
-    [_pane layoutPane];
+    [self relayout];
+    if (visible && focus && _terminalPanel.currentView) [_root.window makeFirstResponder:_terminalPanel.currentView];
+    else if (!visible && wasFocused && _active) [self installActive:YES];
     [self stateChanged];
 }
 
-// The active panel session's terminal view.
 - (NSView *)panelTerminalView { return _terminalPanel.currentView; }
-
-// Puts the active panel session's view into the panel and refreshes the strip.
-- (void)attachPanelTerminal {
-    [_terminalPanel refresh:_panelTerminals active:_activePanel >= 0 && _activePanel < (NSInteger)_panelTerminals.count ? _panelTerminals[_activePanel] : nil];
-    TSession *t = _activePanel >= 0 && _activePanel < (NSInteger)_panelTerminals.count ? _panelTerminals[_activePanel] : nil;
-    [_terminalPanel setContentView:t ? [[TerminalView alloc] initWithSession:t] : nil];
-    [_pane layoutPane];
-}
 
 - (void)terminalTitlesChanged {
     for (Doc *d in _docs) if (d.terminal) d.title = terminalTitle(d.terminal);
+    [_terminalPanel refreshTitles];
     [self reloadTabs];
-    if ([_active.terminal isEqual:nil]) { }
     [self stateChanged];
 }
 
-// Moving a session between the tab bar and the panel never touches the process; drag & drop uses these.
+// Detach an editor terminal tab without touching its PTY.
+- (void)detachTerminalDoc:(TSession *)t {
+    Doc *doc = nil;
+    for (Doc *d in _docs) if (d.terminal == t) { doc = d; break; }
+    if (!doc) return;
+    NSInteger p = (NSInteger)doc.pane;
+    BOOL selected = [self paneActive:p] == doc, active = doc == _active;
+    [_docs removeObject:doc];
+    [self releaseViewer:doc];
+    if (selected) {
+        Doc *replacement = [self docsInPane:p].firstObject;
+        _paneActive[p] = replacement ?: (id)NSNull.null;
+        if (replacement) [self installDoc:replacement focus:NO];
+    }
+    if (active) _active = nil;
+    [self removePaneIfEmpty:p];
+    if (active) {
+        Doc *replacement = [self paneActive:self.focusedIndex];
+        if (replacement) [self activate:replacement focus:NO];
+        else { [self installActive:NO]; if (self.onActivate) self.onActivate(nil); }
+    }
+    [self reloadTabs];
+}
+
 - (void)moveTerminalToPanel:(TSession *)t {
     if (!t) return;
-    Doc *d = nil;
-    for (Doc *x in _docs) if (x.terminal == t) d = x;
-    if (d) {
-        t.onTitleChange = nil;
-        NSUInteger i = [_docs indexOfObject:d];
-        [_docs removeObjectAtIndex:i];
-        if (_pane.content == d.viewer) _pane.content = nil;
-        [d.viewer removeFromSuperview];
-        d.viewer = nil;
-        if (d == _active) {
-            _active = nil;
-            if (_docs.count) [self activate:_docs[MIN(i, _docs.count - 1)] focus:NO];
-            else { [self installActive:NO]; if (self.onActivate) self.onActivate(nil); }
-        }
-    } else if ([_panelTerminals containsObject:t]) {
-        return;                                            // already in the panel
-    }
-    [_panelTerminals addObject:t];
-    _activePanel = (NSInteger)_panelTerminals.count - 1;
-    [self setTerminalPanelVisible:YES focus:NO];
-    [self reloadTabs];
-    [self stateChanged];
+    [self detachTerminalDoc:t];
+    [self wireTerminal:t];
+    [_terminalPanel addSession:t];
+    [self setTerminalPanelVisible:YES focus:YES];
 }
 
-- (void)moveTerminalToTab:(TSession *)t {
-    if (!t) return;
-    for (Doc *x in _docs) if (x.terminal == t) { [self activate:x focus:YES]; return; }   // already a tab
-    [_panelTerminals removeObject:t];
-    _activePanel = MIN(_activePanel, (NSInteger)_panelTerminals.count - 1);
-    t.onTitleChange = ^{ [self terminalTitlesChanged]; };
+- (void)moveTerminalToTab:(TSession *)t { [self moveTerminalToTab:t pane:self.focusedIndex]; }
+
+- (void)moveTerminalToTab:(TSession *)t pane:(NSInteger)pane {
+    if (!t || pane < 0 || pane >= (NSInteger)_panes.count) return;
+    for (Doc *x in _docs) if (x.terminal == t) { [self activate:x focus:YES]; return; }
+    [_terminalPanel removeSession:t];
+    [self wireTerminal:t];
     Doc *d = [Doc new];
-    d.mode = ViewerTerminal;
-    d.terminal = t;
-    d.title = terminalTitle(t);
+    d.mode = ViewerTerminal; d.terminal = t; d.title = terminalTitle(t); d.pane = (NSUInteger)pane;
     [_docs addObject:d];
-    if (!_panelTerminals.count) [self setTerminalPanelVisible:NO focus:NO];
-    else [self attachPanelTerminal];
-    [self reloadTabs];
+    if (!_terminalPanel.sessions.count) [self setTerminalPanelVisible:NO focus:NO];
     [self activate:d focus:YES];
-    [self stateChanged];
 }
 
 - (void)moveActiveTerminalToPanel { [self moveTerminalToPanel:_active.terminal]; }
-
-- (void)moveActivePanelTerminalToTab {
-    if (_activePanel < 0 || _activePanel >= (NSInteger)_panelTerminals.count) return;
-    [self moveTerminalToTab:_panelTerminals[_activePanel]];
-}
+- (void)moveActivePanelTerminalToTab { [self moveTerminalToTab:_terminalPanel.activeSession]; }
 
 - (nullable TSession *)activeTerminal {
-    if (_active.terminal) return _active.terminal;
-    return _activePanel >= 0 && _activePanel < (NSInteger)_panelTerminals.count ? _panelTerminals[_activePanel] : nil;
+    if ([self terminalAreaFocused] || !_active.terminal) return _terminalPanel.activeSession ?: _active.terminal;
+    return _active.terminal;
 }
 
 - (void)closeTerminal:(TSession *)t {
     if (!t) return;
     [t terminate];
-    [_panelTerminals removeObject:t];
-    if (_activePanel >= (NSInteger)_panelTerminals.count) _activePanel = (NSInteger)_panelTerminals.count - 1;
-    Doc *d = nil;
-    for (Doc *x in _docs) if (x.terminal == t) d = x;
-    if (d) [self closeDoc:d ask:NO];
-    if (_panelTerminals.count) [self attachPanelTerminal];
-    else [self setTerminalPanelVisible:NO focus:NO];
+    t.onTitleChange = nil;
+    [_terminalViews removeObjectForKey:t];
+    [_terminalPanel removeSession:t];
+    Doc *doc = nil;
+    for (Doc *d in _docs) if (d.terminal == t) { doc = d; break; }
+    if (doc) [self closeDoc:doc ask:NO];
+    if (!_terminalPanel.sessions.count) [self setTerminalPanelVisible:NO focus:NO];
     [self stateChanged];
 }
 
-// Quit path: end every live session and give them a moment to exit, so nothing outlives the app.
-// The last resort is SIGKILL right here: shells with background jobs (gitstatusd …) ignore SIGHUP,
-// and the SIGKILL timer inside terminate would die with the app.
+// The live-session registry includes terminals already removed from a tab or panel.
 - (void)shutdownTerminals {
-    NSMutableArray *live = [NSMutableArray array];
-    for (TSession *t in [self terminals]) {
-        if (t.exited) continue;
-        [t terminate];
-        [live addObject:t];
-    }
-    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-    while (CFAbsoluteTimeGetCurrent() - t0 < 1.5) {
-        NSMutableArray *still = [NSMutableArray array];
-        for (TSession *t in live) if (!t.exited) [still addObject:t];
-        if (!still.count) return;
-        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-        if (CFAbsoluteTimeGetCurrent() - t0 >= 1.5)
-            for (TSession *t in still) kill(t.pid, SIGKILL);
-    }
+    [TSession shutdownAllSessionsWithTimeout:3.0];
 }
 
 - (CGFloat)terminalPanelHeight { return _terminalPanelHeight; }
-- (void)setTerminalPanelHeight:(CGFloat)h { _terminalPanelHeight = MIN(MAX(h, 120), 800); [self->_pane layoutPane]; }
+- (void)setTerminalPanelHeight:(CGFloat)h { _terminalPanelHeight = MIN(MAX(h, 120), 800); [self relayout]; }
 
 - (BOOL)closeOthers {
     Doc *keep = _active;
@@ -1107,6 +1395,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 
 - (void)finishClosingAll {
     _closingAll = NO;
+    [self collapseToOnePane];
     if (_docs.count) { [self activate:_docs.firstObject focus:NO]; return; }
     [self installActive:NO];
     if (self.onActivate) self.onActivate(nil);
@@ -1190,39 +1479,56 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 
 - (NSDictionary *)sessionState {
     NSMutableArray *tabs = [NSMutableArray array];
+    NSUInteger activeIndex = 0;
     for (Doc *d in _docs) {
-        if (d.terminal) continue;                          // shells don't survive a relaunch
+        if (d.terminal) continue;
+        if (d == _active) activeIndex = tabs.count;
         NSUInteger line = d.editor ? d.editor.caretLine : d.restoreLine;
-        if (d.untitled) [tabs addObject:@{@"path": d.path, @"untitled": d.title, @"line": @(line)}];
-        else [tabs addObject:@{@"path": d.path, @"preview": @(d.preview), @"line": @(line)}];
+        NSMutableDictionary *tab = [@{@"path": d.path, @"line": @(line), @"pane": @(d.pane),
+                                      @"selected": @([self paneActive:(NSInteger)d.pane] == d)} mutableCopy];
+        if (d.untitled) tab[@"untitled"] = d.title;
+        else tab[@"preview"] = @(d.preview);
+        [tabs addObject:tab];
     }
-    NSUInteger ai = _active ? [_docs indexOfObject:_active] : 0;
-    return @{@"tabs": tabs, @"active": @(ai)};
+    return @{@"tabs": tabs, @"active": @(activeIndex)};
 }
 
 - (void)restoreSession:(NSDictionary *)state {
     [self closeAllWithoutAsking];
     [_closed removeAllObjects];
     NSArray *tabs = [state[@"tabs"] isKindOfClass:NSArray.class] ? state[@"tabs"] : @[];
+    NSInteger maxPane = 0;
+    for (NSDictionary *t in tabs)
+        if ([t isKindOfClass:NSDictionary.class])
+            maxPane = MAX(maxPane, MIN(MAX([t[@"pane"] integerValue], 0), (NSInteger)kMaxPanes - 1));
+    while ((NSInteger)_panes.count < maxPane + 1) [self makePaneAtIndex:(NSInteger)_panes.count];
     NSUInteger want = [state[@"active"] unsignedIntegerValue], idx = 0;
     Doc *activeDoc = nil;
     for (NSDictionary *t in tabs) {
         NSString *p = [t isKindOfClass:NSDictionary.class] ? t[@"path"] : nil;
+        NSInteger pane = [t isKindOfClass:NSDictionary.class] ? MIN(MAX([t[@"pane"] integerValue], 0), (NSInteger)_panes.count - 1) : 0;
         BOOL isDir = NO;
         BOOL exists = [p isKindOfClass:NSString.class] && [NSFileManager.defaultManager fileExistsAtPath:p isDirectory:&isDir];
-        if (exists && !isDir && ![self docForPath:p]) {
+        if (exists && !isDir && ![self docForPath:p inPane:pane]) {   // the same file may fill two columns
             Doc *d = [Doc new];
             d.path = p;
             NSString *title = [t[@"untitled"] isKindOfClass:NSString.class] ? t[@"untitled"] : nil;
             if (title) { d.untitled = YES; d.title = title; d.mode = ViewerText; }
             d.preview = !title && [t[@"preview"] boolValue] && _previewEnabled;
             d.restoreLine = [t[@"line"] unsignedIntegerValue];
+            d.pane = (NSUInteger)pane;
             [_docs addObject:d];
+            if (![self paneActive:pane] || [t[@"selected"] boolValue]) _paneActive[pane] = d;
             if (idx == want || !activeDoc) activeDoc = d;
         }
         idx++;
     }
-    if (activeDoc) [self activate:activeDoc focus:NO];        // only the active tab is loaded
+    for (NSInteger p = (NSInteger)_panes.count - 1; p >= 0; p--) [self removePaneIfEmpty:p];
+    for (NSUInteger p = 0; p < _panes.count; p++) {
+        Doc *d = [self paneActive:(NSInteger)p];
+        if (d) [self installDoc:d focus:NO];
+    }
+    if (activeDoc) [self activate:activeDoc focus:NO];
     else { [self installActive:NO]; [self reloadTabs]; }
 }
 
@@ -1399,7 +1705,9 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
     Doc *d = [Doc new];
     d.path = path; d.mode = ViewerText; d.untitled = YES;
     d.title = self.nextUntitledTitle;
-    NSUInteger at = _active ? [_docs indexOfObject:_active] + 1 : _docs.count;
+    d.pane = (NSUInteger)MAX(0, _focusedPane);
+    NSUInteger at = _docs.count;
+    for (NSUInteger i = 0; i < _docs.count; i++) if ((NSInteger)_docs[i].pane == (NSInteger)d.pane) at = i + 1;
     [_docs insertObject:d atIndex:MIN(at, _docs.count)];
     [self activate:d focus:YES];
 }
@@ -1510,26 +1818,28 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
 
 - (void)showFindBar {
     if (!_docs.count) return;
-    _findBar.hidden = NO;
-    [_pane layoutPane];
-    [_findBar resizeSubviewsWithOldSize:_findBar.bounds.size];
+    PaneView *pane = self.focusedPaneView;
+    FindBarView *fb = self.focusedFindBar;
+    fb.hidden = NO;
+    [pane layoutPane];
+    [fb resizeSubviewsWithOldSize:fb.bounds.size];
     NSString *sel = self.editor.selectedText;
-    if (sel.length) _search.stringValue = sel;
-    [_pane.window makeFirstResponder:_search];
-    [_search selectText:nil];
+    if (sel.length) self.findField.stringValue = sel;
+    [_root.window makeFirstResponder:self.findField];
+    [self.findField selectText:nil];
 }
 
 - (void)showReplaceBar {
     [self showFindBar];
-    if (_search.stringValue.length) [_pane.window makeFirstResponder:_replace];
+    if (self.findField.stringValue.length) [_root.window makeFirstResponder:self.replaceField];
 }
 
 - (void)hideFindBar {
-    _findBar.hidden = YES;
-    [_pane layoutPane];
+    self.focusedFindBar.hidden = YES;
+    [self.focusedPaneView layoutPane];
     NSView *fv = _active.markup ? _active.markup.focusView
                : [_active.viewer conformsToProtocol:@protocol(FTZoomable)] ? [(id<FTZoomable>)_active.viewer focusView] : _active.viewer;
-    if (fv) [_pane.window makeFirstResponder:fv];
+    if (fv) [_root.window makeFirstResponder:fv];
 }
 
 // Find in whatever is shown: the PDF text, or the editor buffer.
@@ -1541,15 +1851,15 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
 }
 
 - (void)findNext:(BOOL)backward {
-    if (!_search.stringValue.length) { [self showFindBar]; return; }
-    _findBar.info.stringValue = [self findInActive:_search.stringValue backward:backward] ? @"" : FTL(@"No results");
+    if (!self.findField.stringValue.length) { [self showFindBar]; return; }
+    self.focusedFindBar.info.stringValue = [self findInActive:self.findField.stringValue backward:backward] ? @"" : FTL(@"No results");
 }
 
 - (BOOL)control:(NSControl *)c textView:(NSTextView *)tv doCommandBySelector:(SEL)sel {
     if (sel == @selector(insertNewline:)) {
-        if (c == _replace) { [self replaceOne:nil]; return YES; }
+        if (c == self.replaceField) { [self replaceOne:nil]; return YES; }
         BOOL back = (NSApp.currentEvent.modifierFlags & NSEventModifierFlagShift) != 0;
-        _findBar.info.stringValue = [self findInActive:_search.stringValue backward:back] ? @"" : FTL(@"No results");
+        self.focusedFindBar.info.stringValue = [self findInActive:self.findField.stringValue backward:back] ? @"" : FTL(@"No results");
         return YES;
     }
     if (sel == @selector(cancelOperation:)) { [self hideFindBar]; return YES; }
@@ -1557,15 +1867,15 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
 }
 
 - (void)replaceOne:(id)sender {
-    if (!_search.stringValue.length) return;
-    [self.editor replaceSelectionIfMatches:_search.stringValue with:_replace.stringValue];
-    _findBar.info.stringValue = @"";
+    if (!self.findField.stringValue.length) return;
+    [self.editor replaceSelectionIfMatches:self.findField.stringValue with:self.replaceField.stringValue];
+    self.focusedFindBar.info.stringValue = @"";
 }
 
 - (void)replaceAllAction:(id)sender {
-    if (!_search.stringValue.length) return;
-    NSUInteger n = [self.editor replaceAll:_search.stringValue with:_replace.stringValue];
-    _findBar.info.stringValue = n ? [NSString stringWithFormat:FTLP(n, @"Replaced %lu occurrence", @"Replaced %lu occurrences"), (unsigned long)n] : FTL(@"No results");
+    if (!self.findField.stringValue.length) return;
+    NSUInteger n = [self.editor replaceAll:self.findField.stringValue with:self.replaceField.stringValue];
+    self.focusedFindBar.info.stringValue = n ? [NSString stringWithFormat:FTLP(n, @"Replaced %lu occurrence", @"Replaced %lu occurrences"), (unsigned long)n] : FTL(@"No results");
 }
 
 - (void)openHit:(NSString *)path line:(NSUInteger)line column:(NSUInteger)col length:(NSUInteger)len {
@@ -1594,36 +1904,134 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
 
 #pragma mark Tab bar wiring
 
-- (void)wireTabBar {
-    __weak ContentController *weakSelf = self;
-    _tabBar.onSelect = ^(NSInteger i) { ContentController *me = weakSelf; if (me && i < (NSInteger)me->_docs.count) [me activate:me->_docs[i] focus:YES]; };
-    _tabBar.onClose = ^(NSInteger i) { ContentController *me = weakSelf; if (me && i < (NSInteger)me->_docs.count) [me closeDoc:me->_docs[i] ask:YES]; };
-    _tabBar.dragTokenForIndex = ^NSString *(NSInteger i) {
-        ContentController *me = weakSelf;
-        if (!me || i < 0 || i >= (NSInteger)me->_docs.count) return nil;
-        return me->_docs[i].terminal ? [TSession registerDragSession:me->_docs[i].terminal] : nil;
-    };
-    _tabBar.dropTerminal = ^(NSString *token) { [weakSelf moveTerminalToTab:[TSession sessionForDragToken:token]]; };
-    _tabBar.onPin = ^(NSInteger i) {
-        ContentController *me = weakSelf;
-        if (!me || i >= (NSInteger)me->_docs.count) return;
-        me->_docs[i].preview = NO;
-        [me activate:me->_docs[i] focus:YES];
-    };
-    _tabBar.onMove = ^(NSInteger from, NSInteger to) {
-        ContentController *me = weakSelf;
-        if (!me || from == to || from >= (NSInteger)me->_docs.count || to >= (NSInteger)me->_docs.count) return;
-        Doc *d = me->_docs[from];
-        [me->_docs removeObjectAtIndex:from];
-        [me->_docs insertObject:d atIndex:to];
-        [me reloadTabs];
-    };
-    _tabBar.menuForIndex = ^NSMenu *(NSInteger i) { return [weakSelf menuForTab:i]; };
+- (Doc *)docForDropToken:(NSString *)token terminal:(BOOL)terminal {
+    if (!terminal) {
+        id object = [FTTabDrag objectForToken:token];
+        return [object isKindOfClass:Doc.class] && [_docs containsObject:object] ? object : nil;
+    }
+    TSession *t = [TSession sessionForDragToken:token];
+    if (!t) return nil;
+    for (Doc *d in _docs) if (d.terminal == t) return d;
+    return nil;
 }
 
-- (NSMenu *)menuForTab:(NSInteger)i {
-    if (i >= (NSInteger)_docs.count) return nil;
-    Doc *d = _docs[i];
+- (BOOL)canDropToken:(NSString *)token terminal:(BOOL)terminal inPane:(PaneView *)pane zone:(FTTabDropZone)zone {
+    if (!pane || ![_panes containsObject:pane]) return NO;
+    Doc *d = [self docForDropToken:token terminal:terminal];
+    if (!d && !(terminal && [_terminalPanel containsSession:[TSession sessionForDragToken:token]])) return NO;
+    if (zone == FTTabDropInto) {
+        NSInteger p = (NSInteger)[_panes indexOfObject:pane];
+        Doc *other = d.path ? [self docForPath:d.path inPane:p] : nil;
+        return !other || other == d || (!docDirty(other) && !docDirty(d));
+    }
+    // A sole tab can be pulled to either edge of its own column to create a
+    // new column. At the cap, that self-edge move cannot be satisfied.
+    if (d && [self paneOfDoc:d] == pane) return _panes.count < kMaxPanes;
+    return _panes.count < kMaxPanes || (d && [self docsInPane:(NSInteger)d.pane].count == 1);
+}
+
+- (BOOL)dropToken:(NSString *)token terminal:(BOOL)terminal inPane:(PaneView *)pane zone:(FTTabDropZone)zone index:(NSInteger)index {
+    if (!pane || ![self canDropToken:token terminal:terminal inPane:pane zone:zone]) return NO;
+    Doc *d = [self docForDropToken:token terminal:terminal];
+    PaneView *source = d ? [self paneOfDoc:d] : nil;
+    NSInteger sourceIndex = source ? (NSInteger)[_panes indexOfObject:source] : -1;
+    BOOL sourceSelected = d && [self paneActive:sourceIndex] == d;
+    NSInteger oldTabIndex = d ? (NSInteger)[[self docsInPane:sourceIndex] indexOfObject:d] : -1;
+    if (!d) {
+        TSession *t = [TSession sessionForDragToken:token];
+        [_terminalPanel removeSession:t];
+        d = [Doc new]; d.mode = ViewerTerminal; d.terminal = t; d.title = terminalTitle(t);
+        [self wireTerminal:t];
+    } else {
+        [_docs removeObject:d];
+        if (sourceSelected) {
+            Doc *replacement = [self docsInPane:sourceIndex].firstObject;
+            _paneActive[sourceIndex] = replacement ?: (id)NSNull.null;
+            if (replacement) [self installDoc:replacement focus:NO];
+            else { source.content = nil; source.hasTabs = NO; [d.viewer removeFromSuperview]; }
+        }
+    }
+    if (source && source != pane && ![self docsInPane:sourceIndex].count) [self removePaneAtIndex:sourceIndex];
+    NSInteger target = (NSInteger)[_panes indexOfObject:pane];
+    if (zone != FTTabDropInto) {
+        NSInteger at = target + (zone == FTTabDropAfter);
+        [self makePaneAtIndex:at];
+        target = at;
+        index = -1;
+    }
+    d.pane = (NSUInteger)target; d.preview = NO;
+    Doc *duplicate = d.path ? [self docForPath:d.path inPane:target] : nil;
+    if (duplicate && duplicate != d) {
+        // Both copies are clean (validated above). Retain the target's existing view and undo history.
+        [self releaseViewer:d];
+        [self activate:duplicate focus:YES];
+    } else {
+        NSArray<Doc *> *targetDocs = [self docsInPane:target];
+        NSInteger slot = index < 0 ? (NSInteger)targetDocs.count : index;
+        if (source == pane && zone == FTTabDropInto && oldTabIndex >= 0 && oldTabIndex < index) slot--;
+        slot = MIN((NSInteger)targetDocs.count, MAX(0, slot));
+        NSUInteger at = slot < (NSInteger)targetDocs.count ? [_docs indexOfObject:targetDocs[slot]] : _docs.count;
+        [_docs insertObject:d atIndex:at];
+        [self activate:d focus:YES];
+    }
+    if (source && source == pane && zone == FTTabDropInto) {
+        NSInteger p = (NSInteger)[_panes indexOfObject:source];
+        if (p != NSNotFound) [self removePaneIfEmpty:p];
+    }
+    if (!_terminalPanel.sessions.count) [self setTerminalPanelVisible:NO focus:NO];
+    if (_active) { _focusedPane = (NSInteger)_active.pane; _split.focused = _focusedPane; }
+    [self reloadTabs]; [self relayout]; [self stateChanged];
+    return YES;
+}
+
+// A bar's callbacks resolve its stable view identity after column insertion or removal.
+- (void)wireTabBar:(TabBarView *)tabBar pane:(NSInteger)p {
+    __weak ContentController *weakSelf = self;
+    __weak PaneView *weakPane = _panes[p];
+    tabBar.onSelect = ^(NSInteger i) {
+        ContentController *me = weakSelf; if (!me) return;
+        NSInteger target = (NSInteger)[me->_panes indexOfObject:weakPane];
+        NSArray<Doc *> *docs = [me docsInPane:target];
+        if (i >= 0 && i < (NSInteger)docs.count) [me activate:docs[i] focus:YES];
+    };
+    tabBar.onClose = ^(NSInteger i) {
+        ContentController *me = weakSelf; if (!me) return;
+        NSArray<Doc *> *docs = [me docsInPane:(NSInteger)[me->_panes indexOfObject:weakPane]];
+        if (i >= 0 && i < (NSInteger)docs.count) [me closeDoc:docs[i] ask:YES];
+    };
+    tabBar.tabDragTokenForIndex = ^NSString *(NSInteger i) {
+        ContentController *me = weakSelf; if (!me) return nil;
+        NSArray<Doc *> *docs = [me docsInPane:(NSInteger)[me->_panes indexOfObject:weakPane]];
+        if (i < 0 || i >= (NSInteger)docs.count) return nil;
+        return docs[i].terminal ? [TSession registerDragSession:docs[i].terminal] : [FTTabDrag registerObject:docs[i]];
+    };
+    tabBar.tabDragTypeForIndex = ^NSString *(NSInteger i) {
+        ContentController *me = weakSelf; if (!me) return FTTabDragType;
+        NSArray<Doc *> *docs = [me docsInPane:(NSInteger)[me->_panes indexOfObject:weakPane]];
+        return i >= 0 && i < (NSInteger)docs.count && docs[i].terminal ? FTTerminalDragType : FTTabDragType;
+    };
+    tabBar.canDropTab = ^BOOL(NSString *token, BOOL terminal) {
+        return [weakSelf canDropToken:token terminal:terminal inPane:weakPane zone:FTTabDropInto];
+    };
+    tabBar.onDropTab = ^BOOL(NSString *token, BOOL terminal, NSInteger index) {
+        return [weakSelf dropToken:token terminal:terminal inPane:weakPane zone:FTTabDropInto index:index];
+    };
+    tabBar.onDoubleClick = ^(NSInteger i) {
+        ContentController *me = weakSelf; if (!me) return;
+        NSArray<Doc *> *docs = [me docsInPane:(NSInteger)[me->_panes indexOfObject:weakPane]];
+        if (i < 0 || i >= (NSInteger)docs.count) return;
+        docs[i].preview = NO;
+        [me activate:docs[i] focus:YES];
+        if (me->_panes.count > 1) me->_split.maximized = !me->_split.maximized;
+    };
+    tabBar.menuForIndex = ^NSMenu *(NSInteger i) {
+        ContentController *me = weakSelf; if (!me) return nil;
+        NSArray<Doc *> *docs = [me docsInPane:(NSInteger)[me->_panes indexOfObject:weakPane]];
+        return i >= 0 && i < (NSInteger)docs.count ? [me menuForTab:docs[i]] : nil;
+    };
+}
+
+- (NSMenu *)menuForTab:(Doc *)d {
     NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
     void (^add)(NSString *, SEL) = ^(NSString *t, SEL s) {
         NSMenuItem *it = [m addItemWithTitle:t action:s keyEquivalent:@""];

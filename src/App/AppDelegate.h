@@ -10,7 +10,9 @@
 @public
     NSWindow *_win;
     NSSplitView *_split;
-    NSView *_sidebar;
+    NSView *_sidebar, *_treeHeader;
+    NSButton *_sidebarButton;
+    CGFloat _sidebarWidth;
     NSPopUpButton *_rootPopup;          // sidebar header: current workspace, click to switch
     NSSegmentedControl *_tabs;
     NSScrollView *_treeScroll;
@@ -38,7 +40,9 @@
 - (void)mainWindowWillReappear;
 - (BOOL)openDroppedURLs:(NSArray<NSURL *> *)urls;       // files and folders dragged onto the window
 - (void)fileSystemChanged;                 // the workspace watcher fired           // after the window was closed: its session comes back, ⌘Q asks again
-- (void)showSidebarTab:(NSInteger)tab;     // 0 files, 1 search
+- (void)showSidebarTab:(NSInteger)tab;     // 0 files, 1 search; also reveals a hidden sidebar
+- (void)setSidebarVisible:(BOOL)visible;
+- (void)toggleSidebar:(id)sender;
 @end
 
 // The Selection menu: its shortcuts (⌥↑, ⌘D, ⌘[ …) only apply while a text editor has the focus, so a

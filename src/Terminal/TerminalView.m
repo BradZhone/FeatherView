@@ -22,20 +22,23 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
     }
 }
 
-// A terminal view: draws its session's screen, sends keys and mouse events to the PTY. The session
-// owns all state (screen, scrollback, process), so placement switches just build a new view.
+// Screen/process state belongs to the session; viewport and selection follow this attachment.
 @interface TerminalView () <NSTextInputClient> {
     TSession *_session;
     CGFloat _size;
     CTFontRef _font, _italicFont;
     CGFloat _ascent, _cellH, _cellW;
-    BOOL _followBottom;
+    BOOL _followBottom, _wasAlt, _primaryFollowBottom;
+    CGFloat _anchorLine, _primaryAnchorLine;
+    NSInteger _lastDark;
+    NSUInteger _historyStart;
     NSUInteger _lastBell;
     CFTimeInterval _flashUntil;
     // selection: two cells of the scrollable text (history lines first, then screen rows)
     NSInteger _aLine, _aCol, _bLine, _bCol;
     NSString *_marked;                     // IME composition
     NSRange _markedSel;
+    NSEventModifierFlags _keyModifiers;    // scoped to input-context command callbacks
     NSRange _hoverLink;                    // UTF-16 range in the hovered row's text
     NSUInteger _hoverRow;
     NSString *_hoverText;
@@ -46,7 +49,9 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
     NSDataDetector *_linkDetector;
 }
 - (void)applyFont;
+- (void)applyTheme;
 - (void)syncSize;
+- (void)terminalChanged;
 - (void)write:(NSString *)s;
 - (void)selectionRange:(NSInteger *)aLine col:(NSInteger *)aCol endLine:(NSInteger *)bLine col2:(NSInteger *)bCol;
 @end
@@ -59,7 +64,10 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
     if (!(self = [super initWithFrame:NSZeroRect])) return nil;
     _session = session;
     _size = gFontSize;
-    _followBottom = NO;                     // pinned only once the user (or output) reaches the bottom
+    _followBottom = YES;
+    _lastDark = -1;
+    _wasAlt = session.screen.altScreen;
+    _historyStart = session.screen.historyStart;
     _aLine = _aCol = _bLine = _bCol = -1;
     _hoverLink = NSMakeRange(NSNotFound, 0);
     _linkDetector = [[NSDataDetector alloc] initWithTypes:NSTextCheckingTypeLink error:nil];
@@ -67,6 +75,8 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
     session.onChange = ^{ [weakSelf terminalChanged]; };
     session.onExit = ^{ weakSelf.needsDisplay = YES; };
     [self applyFont];
+    [self applyTheme];
+    _anchorLine = _cellH ? self.scrollY / _cellH : 0;
     return self;
 }
 
@@ -112,16 +122,23 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
 
 #pragma mark Geometry
 
-- (NSUInteger)columns { return MAX((NSUInteger)4, (NSUInteger)floor((self.bounds.size.width - 6 - [CanvasView indicatorWidth]) / _cellW)); }
-- (NSUInteger)rows { return MAX((NSUInteger)2, (NSUInteger)floor((self.bounds.size.height - 6) / _cellH)); }
+// Temporary zero frames and detached/hidden tabs must not resize a live PTY to a tiny grid.
+- (BOOL)hasUsableGeometry {
+    return self.window && self.superview && !self.isHiddenOrHasHiddenAncestor && _cellW > 0 && _cellH > 0 &&
+           isfinite(self.bounds.size.width) && isfinite(self.bounds.size.height) &&
+           self.bounds.size.width >= 16 + 4 * _cellW && self.bounds.size.height >= 6 + 2 * _cellH;
+}
 
-- (CGFloat)contentHeight { return ([_session.screen historyCount] + [_session.screen rows]) * _cellH + 8; }
+- (NSUInteger)visibleHistoryCount { return _session.screen.altScreen ? 0 : _session.screen.historyCount; }
+- (CGFloat)contentHeight { return (self.visibleHistoryCount + _session.screen.rows) * _cellH + 8; }
 
 - (void)syncSize {
+    if (![self hasUsableGeometry]) return;
     TScreen *s = _session.screen;
-    NSUInteger c = self.columns, r = self.rows;
+    NSUInteger c = (NSUInteger)floor((self.bounds.size.width - 6 - [CanvasView indicatorWidth]) / _cellW);
+    NSUInteger r = (NSUInteger)floor((self.bounds.size.height - 6) / _cellH);
     if (c != s.cols || r != s.rows) [_session resizeCols:c rows:r];
-    if (_followBottom) self.scrollY = self.maxScrollY;
+    [self terminalChanged];
 }
 
 - (void)setFrameSize:(NSSize)size {
@@ -129,22 +146,47 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
     if (_session) [self syncSize];
 }
 
+- (void)viewDidMoveToSuperview { [super viewDidMoveToSuperview]; if (_session) [self syncSize]; }
+- (void)viewDidMoveToWindow { [super viewDidMoveToWindow]; if (_session) { [self applyTheme]; [self syncSize]; } }
+- (void)layout { [super layout]; if (_session) [self syncSize]; }
+
 - (void)setScrollY:(CGFloat)y {
     [super setScrollY:y];
     _followBottom = self.scrollY >= self.maxScrollY - 0.5;
+    _anchorLine = (_session.screen.altScreen ? 0 : _session.screen.historyStart) + self.scrollY / MAX(_cellH, 1);
 }
 
 - (void)terminalChanged {
-    // stay pinned to the bottom while output flows (within one line of it before the change)
-    CGFloat max = self.maxScrollY;
-    if (_followBottom || self.scrollY >= max - _cellH - 0.5) self.scrollY = max;
+    TScreen *s = _session.screen;
+    if (s.altScreen != _wasAlt) {
+        if (s.altScreen) {
+            _primaryFollowBottom = _followBottom;
+            _primaryAnchorLine = _anchorLine;
+            _followBottom = YES;
+        } else {
+            _followBottom = _primaryFollowBottom;
+            _anchorLine = _primaryAnchorLine;
+        }
+        _aLine = _bLine = -1;
+        _wasAlt = s.altScreen;
+    }
+    if (!s.altScreen && s.historyStart != _historyStart && _aLine >= 0) {
+        NSInteger lost = (NSInteger)(s.historyStart - _historyStart);
+        if (_aLine < lost || _bLine < lost) _aLine = _bLine = -1;
+        else { _aLine -= lost; _bLine -= lost; }
+    }
+    _historyStart = s.historyStart;
+    // Internal clamps preserve the user's intent even when a growing viewport temporarily fits it all.
+    CGFloat target = _followBottom ? self.maxScrollY : (_anchorLine - (s.altScreen ? 0 : s.historyStart)) * _cellH;
+    [super setScrollY:target];
+    if (!_followBottom && !s.altScreen && _anchorLine < s.historyStart) _anchorLine = s.historyStart;
     self.needsDisplay = YES;
 }
 
 #pragma mark Colors
 
 - (NSColor *)colorOf:(uint32_t)rgb defaultColor:(NSColor *)def {
-    if (!rgb) return def;
+    if (rgb == TCDefault) return def;
     return [NSColor colorWithSRGBRed:((rgb >> 16) & 0xFF) / 255.0 green:((rgb >> 8) & 0xFF) / 255.0 blue:(rgb & 0xFF) / 255.0 alpha:1];
 }
 
@@ -152,7 +194,7 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
 - (NSColor *)fgOf:(TCell)c {
     TScreen *s = _session.screen;
     uint32_t v = c.fg;
-    if (v == TCDefault) return [self colorOf:s.defaultFg == TCDefault ? 0 : s.defaultFg defaultColor:NSColor.labelColor];
+    if (v == TCDefault) return [self colorOf:s.defaultFg defaultColor:NSColor.labelColor];
     if (v & TCPal) {
         NSUInteger i = v & 0xFF;
         if ((c.attrs & TFBold) && i < 8) i += 8;
@@ -164,26 +206,36 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
 - (NSColor *)bgOf:(TCell)c {
     TScreen *s = _session.screen;
     uint32_t v = c.bg;
-    if (v == TCDefault) return [self colorOf:s.defaultBg == TCDefault ? 0 : s.defaultBg defaultColor:NSColor.textBackgroundColor];
+    if (v == TCDefault) return [self colorOf:s.defaultBg defaultColor:NSColor.textBackgroundColor];
     if (v & TCPal) return [self colorOf:_session.screen.palette[v & 0xFF] defaultColor:NSColor.textBackgroundColor];
     return [self colorOf:v defaultColor:NSColor.textBackgroundColor];
 }
 
 #pragma mark Drawing
 
-- (void)drawRect:(NSRect)dirty {
-    TScreen *s = _session.screen;
+- (void)applyTheme {
+    if (!_session) return;
     BOOL dark = [[self.effectiveAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]]
                  isEqualToString:NSAppearanceNameDarkAqua];
-    static NSInteger lastDark = -1;
-    if (dark != lastDark) {                    // apply the theme palette once; SGR resolves against it
-        lastDark = dark;
-        uint32_t c[16], bg, fg;
-        themeColors(dark, c, &bg, &fg);
-        [s setPalette16:c];
-        s.defaultBg = bg;
-        s.defaultFg = fg;
-    }
+    if (dark == _lastDark) return;
+    _lastDark = dark;
+    uint32_t c[16], bg, fg;
+    themeColors(dark, c, &bg, &fg);
+    [_session.screen setPalette16:c];
+    _session.screen.defaultBg = bg;
+    _session.screen.defaultFg = fg;
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self applyTheme];
+    self.needsDisplay = YES;
+}
+
+- (void)drawRect:(NSRect)dirty {
+    TScreen *s = _session.screen;
+    [self applyTheme];
+    if (s.altScreen != _wasAlt || s.historyStart != _historyStart) [self terminalChanged];
     CGContextRef cg = NSGraphicsContext.currentContext.CGContext;
     if (s.inverse) {
         [NSColor.labelColor setFill];
@@ -193,7 +245,7 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
         NSRectFill(dirty);
     }
 
-    NSUInteger history = [s historyCount];
+    NSUInteger history = self.visibleHistoryCount;
     NSUInteger first = (NSUInteger)MAX(0, floor(self.scrollY / _cellH));
     NSUInteger last = MIN(history + s.rows, (NSUInteger)ceil((self.scrollY + NSMaxY(dirty)) / _cellH) + 1);
     BOOL focused = self.window.firstResponder == self && self.window.isKeyWindow;
@@ -270,14 +322,14 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
 // Runs of same-styled cells, backgrounds first, then text, then underlines; the cursor over its cell.
 - (void)drawCells:(const TCell *)cells count:(NSUInteger)n top:(CGFloat)top cg:(CGContextRef)cg absolute:(NSUInteger)absolute focused:(BOOL)focused {
     TScreen *s = _session.screen;
-    NSUInteger history = [s historyCount];
+    NSUInteger history = self.visibleHistoryCount;
     NSUInteger curR = s.cursorRow, curC = s.cursorCol;
     BOOL cursorRow = s.cursorVisible && absolute == history + curR;
     for (NSUInteger i = 0; i < n;) {
         TCell c = cells[i];
-        if (!c.ch || (c.attrs & TFCont)) { i++; continue; }
+        if (c.attrs & TFCont) { i++; continue; }
         NSUInteger j = i + 1;
-        while (j < n && cells[j].ch && !(cells[j].attrs & TFCont) && cells[j].fg == c.fg && cells[j].bg == c.bg && cells[j].attrs == c.attrs) j++;
+        while (j < n && !(cells[j].attrs & TFCont) && cells[j].fg == c.fg && cells[j].bg == c.bg && cells[j].attrs == c.attrs) j++;
         CGFloat x = 8 + i * _cellW, w = (j - i) * _cellW;
         NSColor *bg = [self bgOf:c];
         if (![bg isEqual:[self bgOf:(TCell){0, TCDefault, TCDefault, 0}]]) {
@@ -300,7 +352,7 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
         i = j;
     }
     // the cursor over what it covers (block when focused, a thin outline otherwise)
-    if (cursorRow && curC < s.cols) {
+    if (cursorRow && curC < MIN(s.cols, n)) {
         CGFloat x = 8 + curC * _cellW;
         TCell under = cells[curC];
         if (focused) {
@@ -329,7 +381,7 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
     char buf[4];
     for (NSUInteger k = i; k < j; k++) {
         if (cells[k].attrs & TFCont) continue;
-        uint32_t ch = cells[k].ch;
+        uint32_t ch = cells[k].ch ?: ' ';
         NSInteger m = ch < 0x80 ? 1 : ch < 0x800 ? 2 : ch < 0x10000 ? 3 : 4;
         if (ch < 0x80) buf[0] = (char)ch;
         else if (ch < 0x800) { buf[0] = 0xC0 | (ch >> 6); buf[1] = 0x80 | (ch & 0x3F); }
@@ -356,7 +408,7 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
     [self selectionRange:&aL col:&aC endLine:&bL col2:&bC];
     if (aL < 0) return @"";
     TScreen *s = _session.screen;
-    NSUInteger history = [s historyCount];
+    NSUInteger history = self.visibleHistoryCount;
     NSMutableString *out = [NSMutableString string];
     for (NSInteger line = aL; line <= bL && out.length < (NSUInteger)1 << 20; line++) {
         NSInteger c0 = line == aL ? MAX(aC, 0) : 0;
@@ -399,104 +451,183 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
 - (BOOL)becomeFirstResponder { self.needsDisplay = YES; return YES; }
 - (BOOL)resignFirstResponder { self.needsDisplay = YES; return YES; }
 
-- (void)keyDown:(NSEvent *)e {
-    if ([self.inputContext handleEvent:e]) return;
+// AppKit tries menu equivalents before keyDown:. Claim only terminal control/function keys while
+// focused; printable text remains with NSTextInputContext and Command shortcuts remain menus.
+- (unichar)keyCharacter:(NSEvent *)e {
+    NSString *ign = e.charactersIgnoringModifiers;
+    if (ign.length) return [ign characterAtIndex:0];
+    switch (e.keyCode) {
+        case 36: case 76: return '\r';
+        case 48: return '\t';
+        case 51: return 0x7f;
+        case 53: return 27;
+        case 115: return NSHomeFunctionKey;
+        case 119: return NSEndFunctionKey;
+        case 116: return NSPageUpFunctionKey;
+        case 121: return NSPageDownFunctionKey;
+        case 117: return NSDeleteFunctionKey;
+        case 122: return NSF1FunctionKey; case 120: return NSF2FunctionKey;
+        case 99: return NSF3FunctionKey; case 118: return NSF4FunctionKey;
+        case 96: return NSF5FunctionKey; case 97: return NSF6FunctionKey;
+        case 98: return NSF7FunctionKey; case 100: return NSF8FunctionKey;
+        case 101: return NSF9FunctionKey; case 109: return NSF10FunctionKey;
+        case 103: return NSF11FunctionKey; case 111: return NSF12FunctionKey;
+        case 114: return NSInsertFunctionKey;
+        case 123: return NSLeftArrowFunctionKey; case 124: return NSRightArrowFunctionKey;
+        case 125: return NSDownArrowFunctionKey; case 126: return NSUpArrowFunctionKey;
+        default: return 0;
+    }
+}
+
+- (BOOL)isTerminalKeyEvent:(NSEvent *)e {
+    NSEventModifierFlags m = e.modifierFlags;
+    if (m & NSEventModifierFlagCommand) return NO;
+    NSString *characters = e.characters;
+    NSString *ignoring = e.charactersIgnoringModifiers;
+    if (e.keyCode == 8 && ([characters rangeOfString:@"\x03"].location != NSNotFound ||
+                            [ignoring rangeOfString:@"\x03"].location != NSNotFound)) return YES;
+    unichar k = [self keyCharacter:e];
+    if (m & NSEventModifierFlagControl) return YES;
+    if (k >= NSUpArrowFunctionKey && k <= NSF24FunctionKey) return YES;
+    return k == '\r' || k == '\t' || k == 0x19 || k == 0x7f || k == 27;
+}
+
+- (BOOL)performKeyEquivalent:(NSEvent *)e {
+    if (e.type != NSEventTypeKeyDown || !self.window || self.window.firstResponder != self || ![self isTerminalKeyEvent:e]) return NO;
     NSData *d = [self bytesForEvent:e];
-    if (d.length) [_session writeData:d];
+    if (!d.length) return NO;
+    [_session writeData:d];
+    return YES;
 }
 
-// The input context turns control keys into text commands (this is how Enter, Delete and the arrows
-// arrive); translate them back into the shell's sequences. Arrows honour the current modifiers.
-- (NSData *)bytesForArrow:(NSString *)letter {
-    NSEventModifierFlags m = NSApp.currentEvent ? NSApp.currentEvent.modifierFlags : 0;
-    BOOL app = _session.screen.appCursorKeys;
-    if (m & (NSEventModifierFlagControl | NSEventModifierFlagShift | NSEventModifierFlagOption))
-        return [[NSString stringWithFormat:@"\x1b[1;%ld%@", (long)(1 + ((m & NSEventModifierFlagShift) ? 1 : 0) +
-                                                                ((m & NSEventModifierFlagOption) ? 2 : 0) + ((m & NSEventModifierFlagControl) ? 4 : 0)),
-                letter] dataUsingEncoding:NSUTF8StringEncoding];
-    NSString *pre = app ? @"\x1bO" : @"\x1b[";
-    return [[pre stringByAppendingString:letter] dataUsingEncoding:NSUTF8StringEncoding];
+- (void)keyDown:(NSEvent *)e {
+    if (e.modifierFlags & NSEventModifierFlagCommand) return; // app shortcuts never become PTY input
+    if ([self isTerminalKeyEvent:e]) {
+        NSData *d = [self bytesForEvent:e];
+        if (d.length) { [_session writeData:d]; return; }
+    }
+    NSEventModifierFlags saved = _keyModifiers;
+    _keyModifiers = e.modifierFlags;
+    @try {
+        if (![self.inputContext handleEvent:e]) {
+            NSData *d = [self bytesForEvent:e];
+            if (d.length) [_session writeData:d];
+        }
+    } @finally { _keyModifiers = saved; }
 }
 
+- (NSString *)cursorKey:(NSString *)letter modifiers:(NSEventModifierFlags)m {
+    NSInteger modifier = 1 + ((m & NSEventModifierFlagShift) ? 1 : 0) +
+                            ((m & NSEventModifierFlagOption) ? 2 : 0) + ((m & NSEventModifierFlagControl) ? 4 : 0);
+    if (modifier > 1) return [NSString stringWithFormat:@"\x1b[1;%ld%@", (long)modifier, letter];
+    return [(_session.screen.appCursorKeys ? @"\x1bO" : @"\x1b[") stringByAppendingString:letter];
+}
+
+- (NSString *)functionKey:(NSInteger)number modifiers:(NSEventModifierFlags)m {
+    NSInteger modifier = 1 + ((m & NSEventModifierFlagShift) ? 1 : 0) +
+                            ((m & NSEventModifierFlagOption) ? 2 : 0) + ((m & NSEventModifierFlagControl) ? 4 : 0);
+    return modifier == 1 ? [NSString stringWithFormat:@"\x1b[%ld~", (long)number] :
+                            [NSString stringWithFormat:@"\x1b[%ld;%ld~", (long)number, (long)modifier];
+}
+
+// Input methods can still issue text commands. Physical control/function keys are translated
+// before the input context: Cocoa binds Ctrl+C/Z/U/W to noop:, Ctrl+D to deleteForward:, etc.
 - (void)doCommandBySelector:(SEL)sel {
-    NSData *d = nil;
-    if (sel == @selector(insertNewline:)) d = [@"\r" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(deleteBackward:) || sel == @selector(deleteBackwardByDecomposingPreviousCharacter:)) d = [@"\x7f" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(deleteForward:)) d = [@"\x1b[3~" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(deleteWordBackward:)) d = [@"\x17" dataUsingEncoding:NSUTF8StringEncoding];        // ⌃W
-    else if (sel == @selector(deleteWordForward:)) d = [@"\x1b\x7f" dataUsingEncoding:NSUTF8StringEncoding];   // ⌥⌫
-    else if (sel == @selector(moveUp:) || sel == @selector(moveUpAndModifySelection:)) d = [self bytesForArrow:@"A"];
-    else if (sel == @selector(moveDown:) || sel == @selector(moveDownAndModifySelection:)) d = [self bytesForArrow:@"B"];
-    else if (sel == @selector(moveRight:) || sel == @selector(moveRightAndModifySelection:)) d = [self bytesForArrow:@"C"];
-    else if (sel == @selector(moveLeft:) || sel == @selector(moveLeftAndModifySelection:)) d = [self bytesForArrow:@"D"];
-    else if (sel == @selector(moveWordLeft:)) d = [@"\x1b" @"b" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(moveWordRight:)) d = [@"\x1b" @"f" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(moveToBeginningOfLine:) || sel == @selector(moveToBeginningOfDocument:)) d = [@"\x01" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(moveToEndOfLine:) || sel == @selector(moveToEndOfDocument:)) d = [@"\x05" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(pageUp:) || sel == @selector(scrollPageUp:) || sel == @selector(pageUpAndModifySelection:)) d = [@"\x1b[5~" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(pageDown:) || sel == @selector(scrollPageDown:) || sel == @selector(pageDownAndModifySelection:)) d = [@"\x1b[6~" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(insertTab:)) d = [@"\t" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(insertBacktab:)) d = [@"\x1b[Z" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(cancelOperation:)) d = [@"\x1b" dataUsingEncoding:NSUTF8StringEncoding];
-    else if (sel == @selector(transpose:)) d = [@"\x14" dataUsingEncoding:NSUTF8StringEncoding];               // ⌃T
-    if (d.length) [_session writeData:d];
+    NSString *s = nil;
+    if (sel == @selector(insertNewline:) || sel == @selector(insertLineBreak:)) s = @"\r";
+    else if (sel == @selector(deleteBackward:) || sel == @selector(deleteBackwardByDecomposingPreviousCharacter:)) s = @"\x7f";
+    else if (sel == @selector(deleteForward:)) s = @"\x1b[3~";
+    else if (sel == @selector(deleteWordBackward:)) s = @"\x17";
+    else if (sel == @selector(deleteWordForward:)) s = @"\x1b" @"d";
+    else if (sel == @selector(moveUp:) || sel == @selector(moveUpAndModifySelection:)) s = [self cursorKey:@"A" modifiers:_keyModifiers];
+    else if (sel == @selector(moveDown:) || sel == @selector(moveDownAndModifySelection:)) s = [self cursorKey:@"B" modifiers:_keyModifiers];
+    else if (sel == @selector(moveRight:) || sel == @selector(moveForward:) || sel == @selector(moveRightAndModifySelection:)) s = [self cursorKey:@"C" modifiers:_keyModifiers];
+    else if (sel == @selector(moveLeft:) || sel == @selector(moveBackward:) || sel == @selector(moveLeftAndModifySelection:)) s = [self cursorKey:@"D" modifiers:_keyModifiers];
+    else if (sel == @selector(moveWordLeft:) || sel == @selector(moveWordBackward:)) s = @"\x1b" @"b";
+    else if (sel == @selector(moveWordRight:) || sel == @selector(moveWordForward:)) s = @"\x1b" @"f";
+    else if (sel == @selector(moveToBeginningOfLine:) || sel == @selector(moveToBeginningOfParagraph:)) s = @"\x01";
+    else if (sel == @selector(moveToEndOfLine:) || sel == @selector(moveToEndOfParagraph:)) s = @"\x05";
+    else if (sel == @selector(moveToBeginningOfDocument:) || sel == @selector(scrollToBeginningOfDocument:)) s = [self cursorKey:@"H" modifiers:_keyModifiers];
+    else if (sel == @selector(moveToEndOfDocument:) || sel == @selector(scrollToEndOfDocument:) || sel == @selector(moveToEndOfDocumentAndModifySelection:)) s = [self cursorKey:@"F" modifiers:_keyModifiers];
+    else if (sel == @selector(deleteToBeginningOfLine:) || sel == @selector(deleteToBeginningOfParagraph:)) s = @"\x15";
+    else if (sel == @selector(deleteToEndOfLine:) || sel == @selector(deleteToEndOfParagraph:)) s = @"\x0b";
+    else if (sel == @selector(centerSelectionInVisibleArea:)) s = @"\x0c";
+    else if (sel == @selector(pageUp:) || sel == @selector(scrollPageUp:) || sel == @selector(pageUpAndModifySelection:)) s = [self functionKey:5 modifiers:_keyModifiers];
+    else if (sel == @selector(pageDown:) || sel == @selector(scrollPageDown:) || sel == @selector(pageDownAndModifySelection:)) s = [self functionKey:6 modifiers:_keyModifiers];
+    else if (sel == @selector(insertTab:)) s = @"\t";
+    else if (sel == @selector(insertBacktab:)) s = @"\x1b[Z";
+    else if (sel == @selector(cancelOperation:)) s = @"\x1b";
+    else if (sel == @selector(transpose:)) s = @"\x14";
+    if (s) [_session writeString:s];
 }
 
-// Escape sequences for the keys a shell expects; plain characters go through as typed.
+// Only terminal keys belong here. Printable/Option Unicode text goes through NSTextInputContext.
 - (NSData *)bytesForEvent:(NSEvent *)e {
     NSEventModifierFlags m = e.modifierFlags;
-    BOOL cmd = (m & NSEventModifierFlagCommand) != 0;
-    BOOL ctrl = (m & NSEventModifierFlagControl) != 0;
-    BOOL alt = (m & NSEventModifierFlagOption) != 0;
-    NSString *ign = e.charactersIgnoringModifiers;
-    unichar k = ign.length ? [ign characterAtIndex:0] : 0;
-    if (k >= NSUpArrowFunctionKey && k <= NSF24FunctionKey) {
-        NSString *s = nil;
-        BOOL app = _session.screen.appCursorKeys;
-        NSString *pre = app ? @"\x1bO" : @"\x1b[";
-        switch (k) {
-            case NSUpArrowFunctionKey: s = [pre stringByAppendingString:@"A"]; break;
-            case NSDownArrowFunctionKey: s = [pre stringByAppendingString:@"B"]; break;
-            case NSRightArrowFunctionKey: s = [pre stringByAppendingString:@"C"]; break;
-            case NSLeftArrowFunctionKey: s = [pre stringByAppendingString:@"D"]; break;
-            case NSHomeFunctionKey: s = [pre stringByAppendingString:@"H"]; break;
-            case NSEndFunctionKey: s = [pre stringByAppendingString:@"F"]; break;
-            case NSPageUpFunctionKey: s = @"\x1b[5~"; break;
-            case NSPageDownFunctionKey: s = @"\x1b[6~"; break;
-            case NSInsertFunctionKey: s = @"\x1b[2~"; break;
-            case NSDeleteFunctionKey: s = @"\x1b[3~"; break;
-            default:
-                if (k >= NSF1FunctionKey && k <= NSF12FunctionKey) {
-                    NSInteger nn = k - NSF1FunctionKey + 11;         // 11..14, then 15..24
-                    if (nn > 14) nn += 1;
-                    s = [NSString stringWithFormat:@"\x1b[%ld~", (long)nn];
-                }
-                break;
-        }
-        return [s dataUsingEncoding:NSUTF8StringEncoding];
-    }
-    if (cmd) return nil;                                    // ⌘ keys belong to the menus
+    unichar k = [self keyCharacter:e];
+    if (m & NSEventModifierFlagCommand) return nil;
+    BOOL ctrl = (m & NSEventModifierFlagControl) != 0, alt = (m & NSEventModifierFlagOption) != 0;
+    if (ctrl && k >= 1 && k <= 26) k = (unichar)('a' + k - 1); // Some layouts expose Ctrl+C as ETX in both character fields.
+    if (_marked.length && !ctrl) return nil;                 // composition owns Return/arrows/Escape
+    if (!k) return nil;
     NSString *s = nil;
+    if (ctrl) {
+        int control = -1;
+        if (k >= 'a' && k <= 'z') control = k - 'a' + 1;
+        else if (k >= '@' && k <= '_') control = k - '@';
+        else if (k == ' ') control = 0;
+        else if (k == '/') control = 31;
+        else if (k == '?') control = 127;
+        if (control >= 0) {
+            uint8_t byte = (uint8_t)control;
+            NSData *d = [NSData dataWithBytes:&byte length:1];
+            if (!alt) return d;
+            NSMutableData *meta = [NSMutableData dataWithBytes:"\x1b" length:1];
+            [meta appendData:d]; return meta;
+        }
+    }
     switch (k) {
-        case 0x7F: s = @"\x7f"; break;                       // delete
-        case '\r': case 3: s = @"\r"; break;
-        case '\t': s = (m & NSEventModifierFlagShift) ? @"\x1b[Z" : @"\t"; break;
+        case NSUpArrowFunctionKey: s = [self cursorKey:@"A" modifiers:m]; break;
+        case NSDownArrowFunctionKey: s = [self cursorKey:@"B" modifiers:m]; break;
+        case NSRightArrowFunctionKey: case NSLeftArrowFunctionKey:
+            if (alt && !(m & (NSEventModifierFlagControl | NSEventModifierFlagShift))) s = k == NSLeftArrowFunctionKey ? @"\x1b" @"b" : @"\x1b" @"f";
+            else s = [self cursorKey:k == NSLeftArrowFunctionKey ? @"D" : @"C" modifiers:m];
+            break;
+        case NSHomeFunctionKey: s = [self cursorKey:@"H" modifiers:m]; break;
+        case NSEndFunctionKey: s = [self cursorKey:@"F" modifiers:m]; break;
+        case NSDeleteFunctionKey:
+            if (alt && !ctrl) s = @"\x1b" @"d";
+            break;
+        case 0x7f: s = alt ? @"\x17" : ctrl ? @"\x08" : @"\x7f"; break;
+        case '\r': case 3: s = @"\r"; break;                 // Return / keypad Enter
+        case '\t': case 0x19: s = (m & NSEventModifierFlagShift) ? @"\x1b[Z" : @"\t"; break;
         case 27: s = @"\x1b"; break;
         default: break;
     }
-    if (ctrl) {
-        unichar raw = k;
-        if (raw >= 'a' && raw <= 'z') s = [NSString stringWithFormat:@"%c", (char)(raw - 'a' + 1)];
-        else if (raw >= 'A' && raw <= 'Z') s = [NSString stringWithFormat:@"%c", (char)(raw - 'A' + 1)];
-        else if (raw == ' ') s = @"\0";
-        else if (raw == '[') s = @"\x1b";
-        else if (raw == '\\') s = @"\x1c";
-        else if (raw == ']') s = @"\x1d";
-        else if (raw == '^') s = @"\x1e";
-        else if (raw == '_' || raw == '/') s = @"\x1f";
-        return [s dataUsingEncoding:NSUTF8StringEncoding];
+    NSInteger modifier = 1 + ((m & NSEventModifierFlagShift) ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+    if (!s && k >= NSF1FunctionKey && k <= NSF4FunctionKey) {
+        unichar letter = 'P' + k - NSF1FunctionKey;
+        s = modifier == 1 ? [NSString stringWithFormat:@"\x1bO%C", letter] : [NSString stringWithFormat:@"\x1b[1;%ld%C", (long)modifier, letter];
+    }
+    if (!s) {
+        NSInteger number = 0;
+        switch (k) {
+            case NSInsertFunctionKey: number = 2; break;
+            case NSDeleteFunctionKey: number = 3; break;
+            case NSPageUpFunctionKey: number = 5; break;
+            case NSPageDownFunctionKey: number = 6; break;
+            default:
+                if (k >= NSF5FunctionKey && k <= NSF12FunctionKey) {
+                    const NSInteger numbers[] = {15, 17, 18, 19, 20, 21, 23, 24};
+                    number = numbers[k - NSF5FunctionKey];
+                }
+                break;
+        }
+        if (number) s = modifier == 1 ? [NSString stringWithFormat:@"\x1b[%ld~", (long)number] :
+                                       [NSString stringWithFormat:@"\x1b[%ld;%ld~", (long)number, (long)modifier];
     }
     if (s) return [s dataUsingEncoding:NSUTF8StringEncoding];
+    if (ctrl) return nil;                                    // an unmapped Ctrl key is not text input
     NSString *typed = e.characters;
     if (!typed.length) return nil;
     if (alt && typed.length == 1 && [typed characterAtIndex:0] < 0x80)
@@ -526,7 +657,7 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
 - (NSInteger)colAtPoint:(NSPoint)p { return (NSInteger)MAX(0, floor((p.x - 8) / _cellW)); }
 
 - (void)sendMouse:(NSInteger)code at:(NSPoint)p release:(BOOL)release event:(NSEvent *)e {
-    NSInteger col = [self colAtPoint:p] + 1, row = [self lineAtPoint:p] - (NSInteger)[_session.screen historyCount] + 1;
+    NSInteger col = [self colAtPoint:p] + 1, row = [self lineAtPoint:p] - (NSInteger)self.visibleHistoryCount + 1;
     if (row < 1) return;
     [self write:[NSString stringWithFormat:@"\x1b[<%ld;%ld;%ld%c", (long)(code + (NSInteger)[self modifierBits:e]), (long)col, (long)row, release ? 'm' : 'M']];
 }
@@ -547,7 +678,7 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
 // One cell of the scrollable text (history lines first, then screen rows).
 - (TCell)absCell:(NSInteger)line col:(NSInteger)col {
     TScreen *s = _session.screen;
-    NSUInteger history = [s historyCount];
+    NSUInteger history = self.visibleHistoryCount;
     if (line < 0 || col < 0) return (TCell){0, 0, 0, 0};
     if ((NSUInteger)line < history) {
         NSUInteger n = [s historyLength:line];
@@ -638,7 +769,7 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
     if ([self appWantsMouse] && _session.screen.mouseMode == TMouseAny) { [self sendMouse:32 at:p release:NO event:e]; return; }
     NSInteger line = [self lineAtPoint:p];
-    NSUInteger history = [_session.screen historyCount];
+    NSUInteger history = self.visibleHistoryCount;
     NSString *row = nil;
     if (line >= (NSInteger)history && line - (NSInteger)history < (NSInteger)[_session.screen rows])
         row = [_session.screen textOfRow:(NSUInteger)line - history];
@@ -707,7 +838,7 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
 - (void)selectAll:(id)sender {
     _aLine = 0;
     _aCol = 0;
-    _bLine = (NSInteger)([_session.screen historyCount] + [_session.screen rows]) - 1;
+    _bLine = (NSInteger)(self.visibleHistoryCount + [_session.screen rows]) - 1;
     _bCol = (NSInteger)_session.screen.cols - 1;
     self.needsDisplay = YES;
 }
@@ -762,7 +893,7 @@ static void themeColors(BOOL dark, uint32_t *out16, uint32_t *bg, uint32_t *fg) 
 
 - (NSRect)firstRectForCharacterRange:(NSRange)r actualRange:(NSRangePointer)actual {
     TScreen *s = _session.screen;
-    NSUInteger history = [s historyCount];
+    NSUInteger history = self.visibleHistoryCount;
     NSRect local = NSMakeRect(8 + s.cursorCol * _cellW, 8 + (history + s.cursorRow) * _cellH - self.scrollY, _cellW, _cellH);
     if (actual) *actual = r;
     return [self.window convertRectToScreen:[self convertRect:local toView:nil]];

@@ -58,7 +58,8 @@ Measured on the same workspace with the same files; median of three runs. Memory
 - **Development on memory-constrained machines.** Keep the IDE for writing and debugging code; use FeatherView for everything that only needs to be opened and read.
 - **Reviewing AI-generated output.** HTML pages render with their styles and scripts, following the system's dark mode. Markdown is typeset natively, Jupyter notebooks show cells and outputs, and generated CSV or JSON files open as tables and trees.
 - **Configuration and notes.** YAML, TOML, JSON, `.env`, Dockerfiles and shell scripts are syntax-highlighted. New documents (⌘N) can be written before choosing where to save them.
-- **A terminal in the workspace.** ⌃` opens a terminal panel under the editor; terminals run your login shell in the workspace or any folder, in the panel or as a tab, with colors, mouse reporting and IME input.
+- **A terminal in the workspace.** ⌃` opens a terminal panel under the editor; terminals run your login shell in the workspace or any folder, in the panel or as a tab, with ANSI 16-color, 256-color and truecolor output, mouse reporting and IME input. Moving a terminal preserves its process, output, scrollback, viewport and selection.
+- **Side by side.** Editor and terminal each support up to three columns independently, with an independent tab strip per column. ⌘\\ splits the editor; ⌃1 / ⌃2 / ⌃3 focus editor columns. A regular new terminal adds a tab to the current terminal column, with no three-session cap. Drag a tab within or between tab strips to reorder it at the insertion line; drag to a column's left or right body edge to split, or its body center to merge. Blue previews cover only the body (half for a split), never the tab strip. Empty source columns are removed; unsaved text, undo history and terminal state are preserved. Focus changes and column removal keep the remaining viewers and tabs intact.
 - **Log inspection.** Files of hundreds of megabytes open immediately because they are memory-mapped rather than copied; soft wrap, go-to-line and find work at that scale.
 - **Data inspection.** CSV, TSV and JSON Lines become sortable, filterable tables; SQLite databases can be browsed and queried read-only; property lists (including binary ones) and JSON become collapsible trees.
 - **Code and document review.** A file tree, Quick Open (⌘P) and workspace search (⇧⌘F) covering file names and contents, with regular expressions, whole-word matching and include/exclude scopes.
@@ -78,6 +79,7 @@ Measured on the same workspace with the same files; median of three runs. Memory
 | Word | Page view from the system's Office renderer, with zoom and find; read-only, with "Open in Pages / Word" |
 | SQLite | Read-only browsing of tables and views, schema display, ad-hoc SQL queries |
 | Archives | Listing of zip, tar.gz, 7z, rar, jar, apk, whl, deb, iso and other formats; double-click to extract and open a single entry |
+| Split view | Editor and terminal each support up to three columns independently, each with its own tab strip. Expansion is off by default; double-click a tab or use ⌃⌘M to toggle it for that area. While enabled, expansion follows focus with a 180 pt minimum for the other columns (reduced when space is insufficient). Drag tabs between columns without losing document or terminal state. |
 | Workspace | File tree that follows changes made outside the app, multi-selection and batch operations, drag and drop, untitled drafts, session restore, light/dark/system appearance, auto-save |
 | Languages | English and Simplified Chinese, selected automatically from the system language |
 
@@ -116,6 +118,16 @@ open -a FeatherView ~/projects/my-app
 
 Each file opens in the view that suits it. Use **View → Preview** (⇧⌘V), **Side-by-Side Preview** (⌥⌘V) or **Source Only** to switch between the rendered and source forms of Markdown, HTML, tables and JSON.
 
+Fresh Markdown and PDF views start at the actual beginning after the first valid layout (the displayed top of page 1 for PDFs). This positioning runs once; explicit anchors, source/page jumps and find navigation take precedence, and later resize or focus changes do not reset it.
+
+The editor and terminal areas keep ordinary column widths by default. Double-click a tab to toggle expansion independently for that area; this also pins an editor preview tab. While enabled, focus gives that column the available width and keeps the others at a usable 180 pt minimum (reduced only when space is insufficient), preserving column order. Double-click again or use **Maximize Focused Area** (⌃⌘M) to restore the saved widths. Dragging a divider also disables expansion, and subsequent focus changes retain the chosen proportions without re-enabling it. Reducing an area to one or zero columns resets expansion to off.
+
+Use the title-bar sidebar button or ⌘B to hide or show the entire Files/Search sidebar; reopening restores its width. **File Tree** (⇧⌘E) and **Search in Workspace** (⇧⌘F) reveal the sidebar and select the corresponding tab. The native **Collapse All** text button above the file tree collapses all expanded folders, including nested ones, without closing any documents.
+
+In a focused terminal, ⌃C sends an interrupt even when text is selected; standard terminal controls reach the shell before text input handling. ⌃R and ⌃G reach the terminal instead of opening Switch Workspace or Go to Line; ⌘ shortcuts remain available. ⌘C copies selected text, or sends an interrupt when there is no selection.
+
+Scrolling upward in a terminal pauses follow mode; returning to the bottom resumes it. Resizing preserves the grid, scroll-region margins and scrollback; every session supports ANSI 16 colors, 256 colors and truecolor, with explicit RGB black rendered as black. Closing a terminal starts termination and still drains the final output after shell exit. Application quit waits for cleanup of all tracked sessions, including those without UI owners; the next launch recovers only valid records with a provably dead owner and matching process identities, rather than sweeping by shell name.
+
 ### Keyboard shortcuts
 
 | Action | Shortcut | Action | Shortcut |
@@ -131,6 +143,9 @@ Each file opens in the view that suits it. Use **View → Preview** (⇧⌘V), *
 | Delete line | ⇧⌘K | Toggle line comment | ⌘/ |
 | Fold / unfold | ⌥⌘[ / ⌥⌘] | Expand / shrink selection | ⌃⇧⌘→ / ⌃⇧⌘← |
 | Terminal panel | ⌃` | New terminal | ⌥⌘T |
+| Split editor | ⌘\ | Focus column 1–3 | ⌃1 / ⌃2 / ⌃3 |
+| Maximize focused area (expand / restore widths) | ⌃⌘M | Hide / show sidebar | ⌘B |
+| File tree | ⇧⌘E | | |
 | Show hidden files | ⇧⌘. | Zoom in / out / reset | ⌘= / ⌘- / ⌘0 |
 | Open as text / hex | ⌥⌘1 / ⌥⌘2 | Settings | ⌘, |
 
@@ -145,15 +160,16 @@ Each file opens in the view that suits it. Use **View → Preview** (⇧⌘V), *
 ## Project structure
 
 ```
-src/Support   Localization
+src/Support   Localization, split container and tab drag and drop
 src/App       Application delegate, window, menus, tabs and document management, settings
 src/Editor    Text buffer (piece table), editor view, syntax highlighting
 src/Files     File tree, folder watching, traversal and filtering, file operations, type detection
 src/Search    Workspace search, Quick Open
 src/Preview   Markdown, HTML, table, tree and notebook views; the Excel workbook model
 src/Viewers   Image, SVG, PDF, hex, SQLite, archive, spreadsheet and Word viewers
+src/Terminal  PTY sessions, escape parsing, cell grid, terminal view and panel
 Resources     Localized strings (en, zh-Hans)
-tests         Logic, Markdown and live-view test suites
+tests         Eight suites: logic, Markdown, terminal core/input, editing, live views, app lifecycle, file tree
 scripts       Installation, release packaging, benchmark, localization check
 ```
 

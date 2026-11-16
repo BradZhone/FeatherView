@@ -139,18 +139,32 @@ static const CGFloat kSidebarW = 260;
 }
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app { return YES; }
 
+- (void)finishTerminalShutdown:(NSApplication *)app {
+    if ([TSession shutdownAllSessionsWithTimeout:0.1]) {
+        [app replyToApplicationShouldTerminate:YES];
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        [self finishTerminalShutdown:app];
+    });
+}
+
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app {
-    if (_sessionSaved) { [_content shutdownTerminals]; return NSTerminateNow; }   // window close already asked
-    if (![_content confirmCloseAll]) return NSTerminateCancel;
-    [self saveSession];
-    [_content shutdownTerminals];                        // end every shell before the process exits
-    return NSTerminateNow;
+    if (!_sessionSaved) {
+        if (![_content confirmCloseAll]) return NSTerminateCancel;
+        [self saveSession];
+    }
+    if ([TSession shutdownAllSessionsWithTimeout:3.0]) return NSTerminateNow;
+    // Keep the application alive until its shells are reaped and pending output is drained.
+    dispatch_async(dispatch_get_main_queue(), ^{ [self finishTerminalShutdown:app]; });
+    return NSTerminateLater;
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)w {
     if (![_content confirmCloseAll]) return NO;
     [self saveSession];
     _sessionSaved = YES;
+    [_content shutdownTerminals];
     [_content closeAllWithoutAsking];
     return YES;
 }
@@ -248,8 +262,29 @@ static const CGFloat kSidebarW = 260;
 - (void)showSidebarTab:(NSInteger)tab {
     _tabs.selectedSegment = tab;
     _treeScroll.hidden = tab != 0;
+    _treeHeader.hidden = tab != 0;
     _search.view.hidden = tab != 1;
+    [self setSidebarVisible:YES];
 }
+
+- (void)setSidebarVisible:(BOOL)visible {
+    if (_sidebar.hidden != !visible) {
+        if (!visible) {
+            _sidebarWidth = _sidebar.frame.size.width;
+            NSResponder *responder = _win.firstResponder;
+            if ([responder isKindOfClass:NSView.class] && [(NSView *)responder isDescendantOf:_sidebar])
+                [_win makeFirstResponder:_content.editor];
+        }
+        _sidebar.hidden = !visible;
+        [_split adjustSubviews];
+        if (visible) [_split setPosition:MIN(MAX(180, _sidebarWidth), _split.bounds.size.width - 280) ofDividerAtIndex:0];
+    }
+    NSString *title = visible ? FTL(@"Hide Sidebar") : FTL(@"Show Sidebar");
+    _sidebarButton.toolTip = [title stringByAppendingString:@" (⌘B)"];
+    _sidebarButton.accessibilityLabel = title;
+}
+
+- (void)toggleSidebar:(id)sender { [self setSidebarVisible:_sidebar.hidden]; }
 
 - (void)tabChanged:(NSSegmentedControl *)s { [self showSidebarTab:s.selectedSegment]; }
 
@@ -260,11 +295,27 @@ static const CGFloat kSidebarW = 260;
     _win.minSize = NSMakeSize(560, 320);
     _win.delegate = self;
     _win.releasedWhenClosed = NO;
+    _sidebarButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"sidebar.left" accessibilityDescription:FTL(@"Hide Sidebar")]
+                                       target:self action:@selector(toggleSidebar:)];
+    _sidebarButton.frame = NSMakeRect(0, 0, 30, 24);
+    _sidebarButton.bordered = NO;
+    _sidebarButton.imagePosition = NSImageOnly;
+    _sidebarButton.focusRingType = NSFocusRingTypeNone;
+    NSView *sidebarAccessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 30, 24)];
+    sidebarAccessory.autoresizesSubviews = YES;
+    _sidebarButton.frame = sidebarAccessory.bounds;
+    _sidebarButton.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [sidebarAccessory addSubview:_sidebarButton];
+    NSTitlebarAccessoryViewController *sidebarControl = [NSTitlebarAccessoryViewController new];
+    sidebarControl.view = sidebarAccessory;
+    sidebarControl.layoutAttribute = NSLayoutAttributeLeft;
+    [_win addTitlebarAccessoryViewController:sidebarControl];
     [_win registerForDraggedTypes:@[NSPasteboardTypeFileURL]];          // the delegate (self) handles drops
     [_win center];
     _win.frameAutosaveName = @"FeatherMain";
     NSRect cb = _win.contentView.bounds;
-    CGFloat h = cb.size.height, headerH = 30, tabH = 28, top = headerH + tabH;
+    CGFloat h = cb.size.height, headerH = 30, tabH = 28, treeHeaderH = 28, top = headerH + tabH;
+    _sidebarWidth = kSidebarW;
 
     _split = [[NSSplitView alloc] initWithFrame:cb];
     _split.vertical = YES;
@@ -296,7 +347,10 @@ static const CGFloat kSidebarW = 260;
     _tabs.autoresizingMask = NSViewWidthSizable;
     [_sidebar addSubview:_tabs];
 
-    _treeScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, top, kSidebarW, h - top)];
+    _treeHeader = [[SidebarView alloc] initWithFrame:NSMakeRect(0, top, kSidebarW, treeHeaderH)];
+    _treeHeader.autoresizingMask = NSViewWidthSizable;
+    [_sidebar addSubview:_treeHeader];
+    _treeScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, top + treeHeaderH, kSidebarW, h - top - treeHeaderH)];
     _treeScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _treeScroll.hasVerticalScroller = YES;
     _treeScroll.autohidesScrollers = YES;
@@ -338,6 +392,11 @@ static const CGFloat kSidebarW = 260;
     _welcome = [[WelcomeView alloc] initWithFrame:NSZeroRect];
     _content.emptyView = _welcome;
     _tree = [[FileTree alloc] initWithOutlineView:_outline];
+    NSButton *collapse = _tree.collapseButton;
+    [collapse sizeToFit];
+    collapse.frame = NSMakeRect(MAX(8, kSidebarW - collapse.frame.size.width - 8), 2, collapse.frame.size.width, 24);
+    collapse.autoresizingMask = NSViewMinXMargin;
+    [_treeHeader addSubview:collapse];
     [self applySettings:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(applySettings:) name:FTSettingsDidChange object:nil];
 
@@ -394,6 +453,8 @@ static const CGFloat kSidebarW = 260;
     [self refreshWorkspaceUI];
 }
 
+- (BOOL)splitView:(NSSplitView *)sv canCollapseSubview:(NSView *)v { return v == _sidebar; }
+- (BOOL)splitView:(NSSplitView *)sv shouldHideDividerAtIndex:(NSInteger)i { return _sidebar.hidden; }
 - (BOOL)splitView:(NSSplitView *)sv shouldAdjustSizeOfSubview:(NSView *)v { return v != sv.subviews.firstObject; }
 - (CGFloat)splitView:(NSSplitView *)sv constrainMinCoordinate:(CGFloat)p ofSubviewAt:(NSInteger)i { return 180; }
 - (CGFloat)splitView:(NSSplitView *)sv constrainMaxCoordinate:(CGFloat)p ofSubviewAt:(NSInteger)i { return sv.bounds.size.width - 280; }

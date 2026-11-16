@@ -15,6 +15,8 @@
 @property (nonatomic) CGFloat scale;                       // text size, 1 = normal; re-flows, images unchanged
 @property (class, nonatomic) CGFloat defaultScale;
 - (void)setMarkdown:(NSString *)source baseDir:(NSString *)dir;
+// One fresh-open top, once mounted and TextKit has a usable viewport. Navigation takes precedence.
+- (void)applyInitialPositionIfNeeded;
 - (void)scrollToSourceLine:(CGFloat)line;      // 0-based, fractional
 - (BOOL)scrollToAnchor:(NSString *)slug;
 @end

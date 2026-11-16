@@ -70,19 +70,43 @@ build/editing_tests: tests/editing_tests.m $(LIB_SRC) $(HDR)
 	@mkdir -p build
 	clang $(CFLAGS) $(FRAMEWORKS) -o $@ tests/editing_tests.m $(LIB_SRC)
 
+build/session_lifecycle_tests: tests/session_lifecycle_tests.m $(LIB_SRC) $(HDR)
+	@mkdir -p build
+	clang $(CFLAGS) $(FRAMEWORKS) -o $@ tests/session_lifecycle_tests.m $(LIB_SRC)
+
+build/terminal_input_tests: tests/terminal_input_tests.m $(LIB_SRC) $(HDR)
+	@mkdir -p build
+	clang $(CFLAGS) $(FRAMEWORKS) -o $@ tests/terminal_input_tests.m $(LIB_SRC)
+
+build/file_tree_tests: tests/file_tree_tests.m $(LIB_SRC) $(HDR)
+	@mkdir -p build
+	clang $(CFLAGS) $(FRAMEWORKS) -o $@ tests/file_tree_tests.m $(LIB_SRC)
+
+build/tab_drag_tests: tests/tab_drag_tests.m $(LIB_SRC) $(HDR)
+	@mkdir -p build
+	clang $(CFLAGS) $(FRAMEWORKS) -o $@ tests/tab_drag_tests.m $(LIB_SRC)
+
 build/markdown_tests: tests/markdown_tests.m $(MD_SRC) src/Preview/Markdown.h
 	@mkdir -p build
 	clang $(CFLAGS) -framework Foundation -o $@ tests/markdown_tests.m $(MD_SRC)
 
-test: build/tests build/markdown_tests build/terminal_tests build/editor_tests build/editing_tests
-	python3 scripts/l10n.py
-	./build/tests
-	./build/markdown_tests
-	./build/terminal_tests
-	./build/editing_tests
-	./build/editor_tests
+# Each test process gets private defaults, shell configuration and PID records. AppDelegate tests
+# must never sweep real user terminals, even while the installed app stays open.
+TEST_RUN = bash -c 'set -e; d=$$(mktemp -d "$${TMPDIR:-/tmp}/feather-tests.XXXXXX"); trap "rm -rf -- \"$$d\"" EXIT; CFFIXED_USER_HOME="$$d" FEATHERVIEW_TERMINAL_PIDS_DIR="$$d/pids" ZDOTDIR="$$d" SHELL=/bin/sh "$$@"' --
 
-# The three test programs built with AddressSanitizer and UndefinedBehaviorSanitizer, in build/san.
+test: build/tests build/markdown_tests build/terminal_tests build/editor_tests build/editing_tests build/session_lifecycle_tests build/terminal_input_tests build/file_tree_tests build/tab_drag_tests
+	python3 scripts/l10n.py
+	$(TEST_RUN) ./build/tests
+	$(TEST_RUN) ./build/markdown_tests
+	$(TEST_RUN) ./build/terminal_tests
+	$(TEST_RUN) ./build/editing_tests
+	$(TEST_RUN) ./build/editor_tests
+	$(TEST_RUN) ./build/session_lifecycle_tests
+	$(TEST_RUN) ./build/terminal_input_tests
+	$(TEST_RUN) ./build/file_tree_tests
+	$(TEST_RUN) ./build/tab_drag_tests
+
+# Test programs built with AddressSanitizer and UndefinedBehaviorSanitizer, in build/san.
 SAN := -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g -O1
 sanitize:
 	@mkdir -p build/san
@@ -91,11 +115,22 @@ sanitize:
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) -framework Foundation -o build/san/markdown_tests tests/markdown_tests.m $(MD_SRC)
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/editor_tests tests/editor_tests.m $(LIB_SRC)
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/editing_tests tests/editing_tests.m $(LIB_SRC)
-	./build/san/tests
-	./build/san/terminal_tests
-	./build/san/markdown_tests
-	./build/san/editing_tests
-	./build/san/editor_tests
+	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/session_lifecycle_tests tests/session_lifecycle_tests.m $(LIB_SRC)
+	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/terminal_input_tests tests/terminal_input_tests.m $(LIB_SRC)
+	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/file_tree_tests tests/file_tree_tests.m $(LIB_SRC)
+	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/tab_drag_tests tests/tab_drag_tests.m $(LIB_SRC)
+
+	$(TEST_RUN) ./build/san/tests
+	$(TEST_RUN) ./build/san/terminal_tests
+	$(TEST_RUN) ./build/san/markdown_tests
+	$(TEST_RUN) ./build/san/editing_tests
+	$(TEST_RUN) ./build/san/editor_tests
+	$(TEST_RUN) ./build/san/session_lifecycle_tests
+	$(TEST_RUN) ./build/san/terminal_input_tests
+	$(TEST_RUN) ./build/san/file_tree_tests
+	$(TEST_RUN) ./build/san/tab_drag_tests
+
+
 
 # clang's static analyzer over every source file; fails on any finding.
 analyze:

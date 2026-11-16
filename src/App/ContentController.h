@@ -8,9 +8,10 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
     AutoSaveOnFocusChange,     // when switching tabs, apps or windows
 };
 
-// Right-hand pane: tab strip + active viewer + find/replace bar + status bar.
-// Text tabs keep their editor (and undo history) alive; image / Quick Look / hex
-// viewers of background tabs are released and rebuilt when the tab is activated.
+// Right-hand side: 1–3 editor columns (each a tab strip + active viewer + find/replace bar),
+// the terminal panel and the status bar. Text tabs keep their editor (and undo history) alive;
+// image / Quick Look / hex viewers of background tabs are released and rebuilt when the tab is
+// activated.
 @interface ContentController : NSObject <NSSearchFieldDelegate, NSTextFieldDelegate>
 @property (nonatomic, readonly) NSView *view;
 @property (nonatomic, strong) NSView *emptyView;              // shown when no tab is open
@@ -117,4 +118,14 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 - (void)togglePDFTwoPages;
 - (void)openInDefaultApp;
 - (BOOL)findInActive:(NSString *)text backward:(BOOL)backward;
+
+// Split view: 1–3 editor columns, each with its own tabs; the terminal panel has its own
+// 1–3 columns with independent tabs. Drag tabs to a column's edges to split, or its centre to merge.
+// Expansion defaults to off; double-click a tab or use ⌃⌘M to toggle expansion and stored widths.
+@property (nonatomic, readonly) NSInteger paneCount;      // editor columns (1..3)
+- (void)splitEditor;                                      // ⌘\: the active file opens again in a new column
+- (void)focusPane:(NSInteger)i;                           // ⌃1/⌃2/⌃3: focus column i (0-based)
+- (void)toggleMaximize;                                   // ⌃⌘M on the focused area (columns or terminal panel)
+@property (nonatomic, readonly) BOOL canToggleMaximize;   // the focused area has more than one column
+@property (nonatomic, readonly) BOOL focusedAreaMaximized;
 @end
