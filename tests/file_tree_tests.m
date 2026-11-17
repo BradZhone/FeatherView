@@ -198,6 +198,9 @@ static void sidebarControls(AppDelegate *app) {
     [app showSidebarTab:1];
     CHECK(!app->_sidebar.hidden && !app->_search.view.hidden && app->_treeHeader.hidden, "showing Search reveals a hidden sidebar");
     [app setSidebarVisible:NO];
+    CHECK(app->_sidebar.hidden && app->_split.subviews.count == 2 &&
+          app->_split.dividerStyle == NSSplitViewDividerStyleThin,
+          "sidebar collapse keeps the outer split divider controlled");
     [app showSidebarTab:0];
     CHECK(!app->_sidebar.hidden && !app->_treeHeader.hidden && !app->_treeScroll.hidden, "showing Files reveals a hidden sidebar");
 }

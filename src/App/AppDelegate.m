@@ -23,6 +23,17 @@ static const CGFloat kSidebarW = 260;
 }
 @end
 
+@interface SidebarSplitView : NSSplitView
+@end
+
+@implementation SidebarSplitView
+- (void)drawDividerInRect:(NSRect)rect {
+    BOOL sidebarHidden = self.subviews.firstObject.hidden;
+    [(sidebarHidden ? NSColor.windowBackgroundColor : NSColor.separatorColor) setFill];
+    NSRectFill(rect);
+}
+@end
+
 @implementation AppDelegate
 
 - (void)applicationWillFinishLaunching:(NSNotification *)n {
@@ -321,7 +332,7 @@ static const CGFloat kSidebarW = 260;
     CGFloat h = cb.size.height, headerH = 30, tabH = 28, treeHeaderH = 28, top = headerH + tabH;
     _sidebarWidth = kSidebarW;
 
-    _split = [[NSSplitView alloc] initWithFrame:cb];
+    _split = [[SidebarSplitView alloc] initWithFrame:cb];
     _split.vertical = YES;
     _split.dividerStyle = NSSplitViewDividerStyleThin;
     _split.wantsLayer = YES;
