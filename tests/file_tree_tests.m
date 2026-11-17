@@ -166,12 +166,26 @@ static void folderControls(AppDelegate *app, NSString *root) {
     tree.onOpen = onOpen;
 }
 
+static void saveWindowSnapshot(AppDelegate *app, NSString *name) {
+    NSString *dir = NSProcessInfo.processInfo.environment[@"FEATHERVIEW_FILE_TREE_SNAPSHOTS"];
+    if (!dir.length) return;
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSView *view = app->_win.contentView;
+    [view layoutSubtreeIfNeeded];
+    [app->_win displayIfNeeded];
+    NSBitmapImageRep *rep = [view bitmapImageRepForCachingDisplayInRect:view.bounds];
+    [view cacheDisplayInRect:view.bounds toBitmapImageRep:rep];
+    NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    [png writeToFile:[dir stringByAppendingPathComponent:name] atomically:YES];
+}
+
 static void sidebarControls(AppDelegate *app) {
     [app->_win.contentView layoutSubtreeIfNeeded];
     NSTitlebarAccessoryViewController *accessory = app->_win.titlebarAccessoryViewControllers.firstObject;
     CHECK(accessory.view != app->_sidebarButton && app->_sidebarButton.superview == accessory.view,
           "sidebar titlebar accessory keeps the button inside a stable container view");
     [app->_split setPosition:320 ofDividerAtIndex:0];
+    saveWindowSnapshot(app, @"sidebar-wide.png");
     CGFloat width = app->_sidebar.frame.size.width;
     [app->_win makeFirstResponder:app->_outline];
     clickButton(app->_sidebarButton);
@@ -198,6 +212,7 @@ static void sidebarControls(AppDelegate *app) {
     [app showSidebarTab:1];
     CHECK(!app->_sidebar.hidden && !app->_search.view.hidden && app->_treeHeader.hidden, "showing Search reveals a hidden sidebar");
     [app setSidebarVisible:NO];
+    saveWindowSnapshot(app, @"sidebar-collapsed.png");
     CHECK(app->_sidebar.hidden && app->_split.subviews.count == 2 &&
           app->_split.dividerStyle == NSSplitViewDividerStyleThin,
           "sidebar collapse keeps the outer split divider controlled");

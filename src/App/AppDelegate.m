@@ -28,9 +28,15 @@ static const CGFloat kSidebarW = 260;
 
 @implementation SidebarSplitView
 - (void)drawDividerInRect:(NSRect)rect {
-    BOOL sidebarHidden = self.subviews.firstObject.hidden;
-    [(sidebarHidden ? NSColor.windowBackgroundColor : NSColor.separatorColor) setFill];
+    NSView *sidebar = self.subviews.firstObject;
+    BOOL hidden = sidebar.hidden;
+    [NSColor.windowBackgroundColor setFill];
     NSRectFill(rect);
+    if (!hidden) {
+        [NSColor.separatorColor setFill];
+        NSRect line = NSMakeRect(NSMidX(rect), NSMinY(rect), 1, rect.size.height);
+        NSRectFill(line);
+    }
 }
 @end
 
@@ -471,7 +477,7 @@ static const CGFloat kSidebarW = 260;
 }
 
 - (BOOL)splitView:(NSSplitView *)sv canCollapseSubview:(NSView *)v { return v == _sidebar; }
-- (BOOL)splitView:(NSSplitView *)sv shouldHideDividerAtIndex:(NSInteger)i { return _sidebar.hidden; }
+- (BOOL)splitView:(NSSplitView *)sv shouldHideDividerAtIndex:(NSInteger)i { return YES; }
 - (BOOL)splitView:(NSSplitView *)sv shouldAdjustSizeOfSubview:(NSView *)v { return v != sv.subviews.firstObject; }
 - (CGFloat)splitView:(NSSplitView *)sv constrainMinCoordinate:(CGFloat)p ofSubviewAt:(NSInteger)i { return 180; }
 - (CGFloat)splitView:(NSSplitView *)sv constrainMaxCoordinate:(CGFloat)p ofSubviewAt:(NSInteger)i { return sv.bounds.size.width - 280; }
