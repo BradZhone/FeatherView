@@ -1370,6 +1370,42 @@ static void focusedSplitGroups(NSWindow *window) {
 
 static NSArray<TabBarView *> *editorBars(ContentController *cc) { return [[cc valueForKey:@"_tabBars"] copy]; }
 
+static BOOL tabIsPreview(ContentController *cc, NSString *path) {
+    for (id doc in [cc valueForKey:@"_docs"])
+        if ([[doc valueForKey:@"path"] isEqualToString:path]) return [[doc valueForKey:@"preview"] boolValue];
+    return NO;
+}
+
+// Double-clicking a preview tab must spend the first gesture on pinning it, not on resizing the
+// workspace: expansion only toggles once the tab is already kept open.
+static void previewTabDoubleClick(ContentController *cc, NSWindow *window, FTSplitView *split, NSString *path) {
+    CHECK(cc.paneCount > 1 && !split.isMaximized, "preview double-click starts with several columns and no expansion");
+    NSInteger pane = 0;
+    [cc focusPane:pane];
+    [cc openPath:path preview:YES focus:YES];
+    CHECK(tabIsPreview(cc, path) && [cc.currentPath isEqualToString:path], "the file opens as a preview tab");
+    NSArray<NSNumber *> *widths = split.weights;
+    NSInteger index = -1, seen = 0;
+    for (id doc in [cc valueForKey:@"_docs"]) {
+        if ([[doc valueForKey:@"pane"] integerValue] != pane) continue;
+        if ([[doc valueForKey:@"path"] isEqualToString:path]) { index = seen; break; }
+        seen++;
+    }
+    CHECK(index >= 0, "the preview tab has a position in its own column");
+    if (index < 0) return;
+
+    doubleClickTab(window, editorBars(cc)[pane], index);
+    CHECK(!tabIsPreview(cc, path), "the first double-click keeps a preview tab open");
+    CHECK(!split.isMaximized && [split.weights isEqualToArray:widths],
+          "pinning a preview tab leaves column widths untouched");
+    doubleClickTab(window, editorBars(cc)[pane], index);
+    CHECK(split.isMaximized, "the second double-click expands the focused column");
+    doubleClickTab(window, editorBars(cc)[pane], index);
+    CHECK(!split.isMaximized && [split.weights isEqualToArray:widths],
+          "a pinned tab keeps toggling expansion on every later double-click");
+    [cc closeActive];
+}
+
 static NSArray<NSString *> *pathsInPane(ContentController *cc, NSUInteger pane) {
     NSMutableArray *paths = [NSMutableArray array];
     for (id doc in [cc valueForKey:@"_docs"])
@@ -1689,6 +1725,9 @@ static void splits(void) {
     CHECK(split.isMaximized, "the explicit shortcut can still enable group expansion");
     [cc toggleMaximize];
     CHECK(!split.isMaximized, "the explicit shortcut can also disable group expansion");
+
+    // A preview tab needs two double-clicks: the first keeps it open, the second expands.
+    previewTabDoubleClick(cc, sw, split, c);
 
     // Dividers must be reached through the window root, even with translated split origins.
     dividerDrag(sw, split, "editor baseline");

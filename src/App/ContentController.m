@@ -2016,13 +2016,16 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
     tabBar.onDropTab = ^BOOL(NSString *token, BOOL terminal, NSInteger index) {
         return [weakSelf dropToken:token terminal:terminal inPane:weakPane zone:FTTabDropInto index:index];
     };
+    // A preview tab spends its first double-click on being kept open; only an already pinned tab
+    // toggles column expansion, so pinning never resizes the workspace behind the click.
     tabBar.onDoubleClick = ^(NSInteger i) {
         ContentController *me = weakSelf; if (!me) return;
         NSArray<Doc *> *docs = [me docsInPane:(NSInteger)[me->_panes indexOfObject:weakPane]];
         if (i < 0 || i >= (NSInteger)docs.count) return;
+        BOOL pinning = docs[i].preview;
         docs[i].preview = NO;
         [me activate:docs[i] focus:YES];
-        if (me->_panes.count > 1) me->_split.maximized = !me->_split.maximized;
+        if (!pinning && me->_panes.count > 1) me->_split.maximized = !me->_split.maximized;
     };
     tabBar.menuForIndex = ^NSMenu *(NSInteger i) {
         ContentController *me = weakSelf; if (!me) return nil;
