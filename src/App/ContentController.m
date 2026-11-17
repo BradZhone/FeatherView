@@ -225,6 +225,9 @@ static NSString *sizeString(off_t n) {
     NSMutableArray<NSString *> *_closed;
     BOOL _closingAll;
     NSUInteger _viewerLoads;                     // tests: how many viewers were built
+    CGFloat _zoomScroll;                         // ⌘-wheel delta not yet spent on a zoom step
+    NSTimeInterval _zoomScrollTime;
+    id _zoomScrollMonitor;
 }
 
 // The find/replace bar is per column; its fields all feed the same actions here.
@@ -350,8 +353,18 @@ static NSString *sizeString(off_t n) {
 
     [self makePaneAtIndex:0];
     self.emptyView = [[NSView alloc] initWithFrame:NSZeroRect];
+
+    // ⌘ + wheel has to be seen before the view under the pointer scrolls — a terminal in mouse
+    // mode forwards wheel events to the running program, so an override would never be reached.
+    _zoomScrollMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel
+                                                               handler:^NSEvent *(NSEvent *event) {
+        ContentController *me = weakSelf;
+        return me && [me zoomByScrollWheel:event] ? nil : event;
+    }];
     return self;
 }
+
+- (void)dealloc { if (_zoomScrollMonitor) [NSEvent removeMonitor:_zoomScrollMonitor]; }
 
 #pragma mark Panes (split view)
 
@@ -1037,6 +1050,41 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 - (void)zoomIn { [self zoomBy:1]; }
 - (void)zoomOut { [self zoomBy:-1]; }
 - (void)zoomReset { [self zoomBy:0]; }
+
+// ⌘ + wheel. Font sizes and preview scales move in whole steps, so the deltas are accumulated
+// and spent one step at a time; a direction change or a pause starts over. Viewers with their own
+// continuous ⌘-zoom around the pointer (images, PDF) keep handling the event themselves.
+static const CGFloat kZoomScrollStep = 18;        // trackpad points per step, ≈ one wheel notch
+
+- (BOOL)zoomByScrollWheel:(NSEvent *)event {
+    if (!(event.modifierFlags & NSEventModifierFlagCommand)) return NO;
+    if (event.modifierFlags & (NSEventModifierFlagOption | NSEventModifierFlagControl)) return NO;
+    if (!_root.window || event.window != _root.window) return NO;
+
+    NSPoint inRoot = [_root convertPoint:event.locationInWindow fromView:nil];
+    if (!NSPointInRect(inRoot, _root.bounds)) return NO;                 // sidebar, title bar, elsewhere
+    NSView *hit = [_root hitTest:inRoot];
+    if (!hit) return NO;
+    if ([hit conformsToProtocol:@protocol(FTZoomable)]) return NO;
+    for (NSView *v = hit; v && v != _root; v = v.superview)
+        if ([v conformsToProtocol:@protocol(FTZoomable)]) return NO;
+    if (!self.canZoom) return NO;
+
+    CGFloat dy = event.scrollingDeltaY;
+    if (!event.hasPreciseScrollingDeltas) dy *= kZoomScrollStep;
+    if (dy == 0) return YES;                                             // swallowed: no zoom, no scroll
+
+    NSTimeInterval now = event.timestamp > 0 ? event.timestamp : NSProcessInfo.processInfo.systemUptime;
+    if (dy * _zoomScroll < 0 || now - _zoomScrollTime > 0.5) _zoomScroll = 0;
+    _zoomScrollTime = now;
+    _zoomScroll += dy;
+    NSInteger steps = (NSInteger)(_zoomScroll / kZoomScrollStep);
+    if (steps) {
+        _zoomScroll -= steps * kZoomScrollStep;
+        for (NSInteger i = 0; i < MIN(labs(steps), 8L); i++) [self zoomBy:steps > 0 ? 1 : -1];
+    }
+    return YES;
+}
 - (void)zoomActualSize { if (self.zoomTarget == 1) [(id<FTZoomable>)_active.viewer ftZoomActualSize]; else [self zoomReset]; }
 - (void)rotate:(NSInteger)q { if (self.activeCanRotate) [(id<FTZoomable>)_active.viewer ftRotate:q]; }
 - (void)goToPage:(NSUInteger)i { [self.activePDF goToPage:i]; }

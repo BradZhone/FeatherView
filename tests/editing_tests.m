@@ -788,11 +788,20 @@ int main(void) {
 @interface EditingWheelEvent : NSEvent
 @property (nonatomic) CGFloat dx, dy;
 @property (nonatomic) BOOL precise;
+@property (nonatomic) NSEventModifierFlags flags;
+@property (nonatomic) NSWindow *eventWindow;
+@property (nonatomic) NSPoint location;
+@property (nonatomic) NSTimeInterval stamp;
 @end
 @implementation EditingWheelEvent
 - (CGFloat)scrollingDeltaX { return _dx; }
 - (CGFloat)scrollingDeltaY { return _dy; }
 - (BOOL)hasPreciseScrollingDeltas { return _precise; }
+- (NSEventModifierFlags)modifierFlags { return _flags; }
+- (NSWindow *)window { return _eventWindow; }
+- (NSPoint)locationInWindow { return _location; }
+- (NSTimeInterval)timestamp { return _stamp; }
+- (NSEventType)type { return NSEventTypeScrollWheel; }
 @end
 
 // Private color helpers are checked alongside rendered pixels, without adding test-only production API.
@@ -1376,6 +1385,94 @@ static BOOL tabIsPreview(ContentController *cc, NSString *path) {
     return NO;
 }
 
+// ⌘ + wheel resizes whatever the zoom shortcuts act on; a plain wheel must still scroll.
+static void commandWheelZoom(ContentController *cc, NSWindow *window, NSString *path) {
+    [cc closeAllWithoutAsking];
+    [cc openPath:path preview:NO focus:YES];
+    [window.contentView layoutSubtreeIfNeeded];
+    TextEditorView *ed = cc.editor;
+    CHECK(ed != nil && cc.canZoom, "the editor is the zoom target before a wheel gesture");
+    if (!ed) return;
+
+    EditingWheelEvent *wheel = [EditingWheelEvent new];
+    wheel.eventWindow = window;
+    wheel.precise = YES;
+    wheel.location = [ed convertPoint:NSMakePoint(NSMidX(ed.bounds), NSMidY(ed.bounds)) toView:nil];
+    // One continuous gesture: AppKit delivers its deltas about 10 ms apart.
+    __block NSTimeInterval stamp = 100;
+    BOOL (^spin)(CGFloat) = ^BOOL(CGFloat dy) {
+        wheel.dy = dy;
+        stamp += 0.01;
+        wheel.stamp = stamp;
+        return [cc zoomByScrollWheel:wheel];
+    };
+
+    CGFloat size = TextEditorView.defaultFontSize;
+    wheel.flags = 0;
+    CHECK(!spin(40) && TextEditorView.defaultFontSize == size, "a wheel without ⌘ is left to scroll the view");
+    wheel.flags = NSEventModifierFlagOption;
+    CHECK(!spin(40) && TextEditorView.defaultFontSize == size, "⌥ + wheel is not a zoom gesture");
+
+    // One step per accumulated notch, not one per delta: a trackpad sends many small deltas.
+    wheel.flags = NSEventModifierFlagCommand;
+    CHECK(spin(6) && TextEditorView.defaultFontSize == size,
+          "⌘ + wheel consumes a partial delta without a font step (%.0f)", TextEditorView.defaultFontSize);
+    spin(6);
+    spin(6);
+    CHECK(TextEditorView.defaultFontSize == size + 1, "accumulated ⌘ + wheel up grows the font once (%.0f -> %.0f)",
+          size, TextEditorView.defaultFontSize);
+    CHECK(ed.fontSize == TextEditorView.defaultFontSize, "the open editor follows the new default size");
+
+    // A direction change starts over instead of cancelling against the leftover delta.
+    spin(-18);
+    CHECK(TextEditorView.defaultFontSize == size, "⌘ + wheel down shrinks the font back (%.0f)", TextEditorView.defaultFontSize);
+    spin(-18 * 4);
+    CHECK(TextEditorView.defaultFontSize == size - 4, "a fast gesture spends every whole step (%.0f)", TextEditorView.defaultFontSize);
+    spin(18 * 4);
+    CHECK(TextEditorView.defaultFontSize == size, "the font returns to its starting size (%.0f)", TextEditorView.defaultFontSize);
+
+    // A pause ends the gesture, so a later nudge cannot inherit its leftover delta.
+    spin(12);
+    stamp += 1;
+    spin(12);
+    CHECK(TextEditorView.defaultFontSize == size, "a paused gesture does not carry its delta over (%.0f)", TextEditorView.defaultFontSize);
+
+    // Discrete mouse wheels report whole notches, which must step immediately.
+    stamp += 1;
+    wheel.precise = NO;
+    spin(1);
+    CHECK(TextEditorView.defaultFontSize == size + 1, "one notch of a discrete wheel is one font step (%.0f)",
+          TextEditorView.defaultFontSize);
+    spin(-1);
+    CHECK(TextEditorView.defaultFontSize == size, "a discrete notch down steps back (%.0f)", TextEditorView.defaultFontSize);
+    wheel.precise = YES;
+
+    // Outside the content area (the sidebar, the title bar) the gesture is none of our business.
+    wheel.location = NSMakePoint(-50, NSMidY(cc.view.bounds));
+    CHECK(!spin(18 * 3) && TextEditorView.defaultFontSize == size,
+          "⌘ + wheel outside the content area changes nothing (%.0f)", TextEditorView.defaultFontSize);
+
+    // The terminal is its own zoom target and keeps its own size.
+    stamp += 1;
+    TSession *session = [cc openTerminalAt:nil asTab:YES];
+    if (session) [testShells addObject:session];
+    [window.contentView layoutSubtreeIfNeeded];
+    TerminalView *tv = [[cc valueForKey:@"_terminalViews"] objectForKey:session];
+    CHECK(tv != nil && tv.window == window, "a terminal tab is open for the wheel gesture");
+    if (tv) {
+        CGFloat terminalSize = tv.fontSize;
+        wheel.location = [tv convertPoint:NSMakePoint(NSMidX(tv.bounds), NSMidY(tv.bounds)) toView:nil];
+        CHECK(spin(18) && tv.fontSize == terminalSize + 1, "⌘ + wheel grows the terminal font (%.0f -> %.0f)",
+              terminalSize, tv.fontSize);
+        CHECK(TextEditorView.defaultFontSize == size, "zooming a terminal leaves the editor font alone (%.0f)",
+              TextEditorView.defaultFontSize);
+        stamp += 1;
+        spin(-18);
+        CHECK(tv.fontSize == terminalSize, "⌘ + wheel shrinks the terminal font back (%.0f)", tv.fontSize);
+    }
+    [cc closeAllWithoutAsking];
+}
+
 // Double-clicking a preview tab must spend the first gesture on pinning it, not on resizing the
 // workspace: expansion only toggles once the tab is already kept open.
 static void previewTabDoubleClick(ContentController *cc, NSWindow *window, FTSplitView *split, NSString *path) {
@@ -1747,6 +1844,7 @@ static void splits(void) {
           (unsigned long)cc.paneCount, (unsigned long)cc.tabCount);
     [cc closeAllWithoutAsking];
     CHECK(cc.paneCount == 1 && cc.tabCount == 0, "closing everything collapses to one column");
+    commandWheelZoom(cc, sw, a);
     drain(0.3);
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
 }

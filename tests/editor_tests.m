@@ -747,6 +747,23 @@ static NSColor *pixelAt(NSView *v, NSPoint p) {
 static BOOL isRed(NSColor *c) { return c.redComponent > 0.7 && c.blueComponent < 0.4; }
 static BOOL isBlue(NSColor *c) { return c.blueComponent > 0.7 && c.redComponent < 0.3; }
 
+@interface EditorWheelEvent : NSEvent
+@property (nonatomic) CGFloat dy;
+@property (nonatomic) NSEventModifierFlags flags;
+@property (nonatomic) NSWindow *eventWindow;
+@property (nonatomic) NSPoint location;
+@end
+@implementation EditorWheelEvent
+- (CGFloat)scrollingDeltaY { return _dy; }
+- (CGFloat)scrollingDeltaX { return 0; }
+- (BOOL)hasPreciseScrollingDeltas { return YES; }
+- (NSEventModifierFlags)modifierFlags { return _flags; }
+- (NSWindow *)window { return _eventWindow; }
+- (NSPoint)locationInWindow { return _location; }
+- (NSTimeInterval)timestamp { return 0; }
+- (NSEventType)type { return NSEventTypeScrollWheel; }
+@end
+
 static void imageViewer(NSString *dir) {
     NSWindow *w; ContentController *t = offscreenController(&w);
     NSString *png = [dir stringByAppendingPathComponent:@"quad.png"];
@@ -759,6 +776,22 @@ static void imageViewer(NSString *dir) {
     NSRect r = iv.imageRect;
     CHECK(isRed(pixelAt(iv, NSMakePoint(NSMinX(r) + 20, NSMinY(r) + 20))) && isBlue(pixelAt(iv, NSMakePoint(NSMaxX(r) - 20, NSMinY(r) + 20))),
           "drawn upright (red top-left)");
+
+    // ⌘ + wheel belongs to the image itself: it zooms continuously around the pointer, so the
+    // controller must leave the event alone instead of stepping a font size.
+    EditorWheelEvent *wheel = [EditorWheelEvent new];
+    wheel.eventWindow = w;
+    wheel.flags = NSEventModifierFlagCommand;
+    wheel.dy = 40;
+    wheel.location = [iv convertPoint:NSMakePoint(NSMidX(iv.bounds), NSMidY(iv.bounds)) toView:nil];
+    CGFloat zoomBefore = iv.zoomPercent, editorSize = TextEditorView.defaultFontSize;
+    CHECK(![t zoomByScrollWheel:wheel], "⌘ + wheel over an image is left to the image's own zoom");
+    CHECK(iv.zoomPercent == zoomBefore && TextEditorView.defaultFontSize == editorSize,
+          "the controller changed neither the image zoom nor the editor font");
+    [iv scrollWheel:wheel];
+    CHECK(iv.zoomPercent > zoomBefore, "the image's own ⌘ + wheel zoom still works (%.0f -> %.0f)",
+          zoomBefore, iv.zoomPercent);
+    [iv ftZoomToFit];
 
     [t zoomIn];
     CHECK(!iv.fitsWindow && iv.zoomPercent == 125, "⌘+ steps to 125%% (%.0f)", iv.zoomPercent);

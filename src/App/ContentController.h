@@ -109,6 +109,9 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 - (void)zoomOut;
 - (void)zoomReset;                       // fit (image, PDF) or 100% / default font size
 - (void)zoomActualSize;
+// ⌘ + wheel over the content area. YES when the event was consumed as a zoom, so it must not also
+// scroll. Images and PDFs keep their own continuous zoom around the pointer and handle it themselves.
+- (BOOL)zoomByScrollWheel:(NSEvent *)event;
 @property (nonatomic, readonly) BOOL activeCanRotate;
 - (void)rotate:(NSInteger)quarterTurns;
 @property (nonatomic, readonly) PDFPreview *activePDF;
