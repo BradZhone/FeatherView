@@ -166,17 +166,91 @@ static void folderControls(AppDelegate *app, NSString *root) {
     tree.onOpen = onOpen;
 }
 
-static void saveWindowSnapshot(AppDelegate *app, NSString *name) {
+static double medianOf5(double *v) {
+    double a[5];
+    memcpy(a, v, sizeof(a));
+    for (int i = 0; i < 5; i++) for (int j = i + 1; j < 5; j++) if (a[j] < a[i]) { double t = a[i]; a[i] = a[j]; a[j] = t; }
+    return a[2];
+}
+
+// The compositor's own output, not cacheDisplayInRect:. A divider AppKit draws for a collapsed
+// subview is missing from an offscreen cache render but present on screen, so only this catches it.
+static NSBitmapImageRep *windowComposite(AppDelegate *app, NSString *name) {
+    [app->_win.contentView layoutSubtreeIfNeeded];
+    [app->_win display];
+    for (int i = 0; i < 10; i++) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+    CGImageRef image = CGWindowListCreateImage(CGRectNull, kCGWindowListOptionIncludingWindow,
+                                               (CGWindowID)app->_win.windowNumber, kCGWindowImageBoundsIgnoreFraming);
+    if (!image) return nil;                       // no Screen Recording permission for this process
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:image];
+    CGImageRelease(image);
     NSString *dir = NSProcessInfo.processInfo.environment[@"FEATHERVIEW_FILE_TREE_SNAPSHOTS"];
-    if (!dir.length) return;
-    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    NSView *view = app->_win.contentView;
-    [view layoutSubtreeIfNeeded];
-    [app->_win displayIfNeeded];
-    NSBitmapImageRep *rep = [view bitmapImageRepForCachingDisplayInRect:view.bounds];
-    [view cacheDisplayInRect:view.bounds toBitmapImageRep:rep];
-    NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
-    [png writeToFile:[dir stringByAppendingPathComponent:name] atomically:YES];
+    if (dir.length) {
+        [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+            writeToFile:[dir stringByAppendingPathComponent:name] atomically:YES];
+    }
+    return rep;
+}
+
+// x of the darkest column that is darker than the page on both sides, or -1. The step between
+// the sidebar and the editor is one-sided, so it never registers; a stray hairline does.
+static NSInteger darkLineColumn(NSBitmapImageRep *rep, double *dropOut) {
+    NSInteger W = rep.pixelsWide, H = rep.pixelsHigh, y0 = H * 0.12, y1 = H * 0.95;
+    if (W < 16 || H < 16) return -1;
+    double *lum = calloc(W, sizeof(double)), worst = 0;
+    NSInteger worstX = -1;
+    for (NSInteger x = 0; x < W; x++) {
+        double sum = 0; NSInteger n = 0;
+        for (NSInteger y = y0; y < y1; y += 3) {
+            NSColor *c = [[rep colorAtX:x y:y] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+            sum += 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent;
+            n++;
+        }
+        lum[x] = n ? sum / n : 1;
+    }
+    for (NSInteger x = 6; x + 6 < W; x++) {
+        double left[5], right[5];
+        for (int i = 0; i < 5; i++) { left[i] = lum[x - 6 + i]; right[i] = lum[x + 2 + i]; }
+        double drop = MIN(medianOf5(left), medianOf5(right)) - lum[x];
+        if (drop > worst) { worst = drop; worstX = x; }
+    }
+    free(lum);
+    if (dropOut) *dropOut = worst;
+    return worst > 0.04 ? worstX : -1;
+}
+
+static void checkNoDarkLine(AppDelegate *app, NSString *name) {
+    NSBitmapImageRep *rep = windowComposite(app, name);
+    if (!rep) { printf("  (skipped %s: on-screen capture needs Screen Recording permission)\n", name.UTF8String); return; }
+    double drop = 0;
+    NSInteger x = darkLineColumn(rep, &drop);
+    CHECK(x < 0, "%s has no stray dark hairline (column %ld, %.0f%% darker than both sides)",
+          name.UTF8String, (long)x, drop * 100);
+}
+
+// Drags the outer divider to a new x. NSSplitView tracks the mouse in its own loop, so the
+// release and the move have to be queued before the press is handed over.
+static void dragSidebarDivider(AppDelegate *app, CGFloat toX) {
+    NSSplitView *split = app->_split;
+    CGFloat fromX = app->_sidebar.frame.size.width, h = split.bounds.size.height;
+    NSPoint from = [split convertPoint:NSMakePoint(fromX, h / 2) toView:nil];
+    NSPoint to = [split convertPoint:NSMakePoint(toX, h / 2) toView:nil];
+    NSView *hit = rootHit(app->_win, from);
+    CHECK(hit == split, "the divider band hit-tests to the split view, got %s", hit.className.UTF8String);
+    static NSInteger number;
+    NSInteger eventNumber = ++number;
+    NSTimeInterval stamp = NSProcessInfo.processInfo.systemUptime;
+    NSEvent *(^mouse)(NSEventType, NSPoint, NSTimeInterval) = ^NSEvent *(NSEventType type, NSPoint p, NSTimeInterval dt) {
+        return [NSEvent mouseEventWithType:type location:p modifierFlags:0 timestamp:stamp + dt
+                              windowNumber:app->_win.windowNumber context:nil eventNumber:eventNumber
+                                 clickCount:1 pressure:type == NSEventTypeLeftMouseUp ? 0 : 1];
+    };
+    [NSApp postEvent:mouse(NSEventTypeLeftMouseUp, to, 0.3) atStart:YES];
+    [NSApp postEvent:mouse(NSEventTypeLeftMouseDragged, to, 0.2) atStart:YES];
+    [NSApp postEvent:mouse(NSEventTypeLeftMouseDragged, NSMakePoint((from.x + to.x) / 2, from.y), 0.1) atStart:YES];
+    [split mouseDown:mouse(NSEventTypeLeftMouseDown, from, 0)];
+    [app->_win.contentView layoutSubtreeIfNeeded];
 }
 
 static void sidebarControls(AppDelegate *app) {
@@ -185,7 +259,7 @@ static void sidebarControls(AppDelegate *app) {
     CHECK(accessory.view != app->_sidebarButton && app->_sidebarButton.superview == accessory.view,
           "sidebar titlebar accessory keeps the button inside a stable container view");
     [app->_split setPosition:320 ofDividerAtIndex:0];
-    saveWindowSnapshot(app, @"sidebar-wide.png");
+    checkNoDarkLine(app, @"sidebar-wide.png");
     CGFloat width = app->_sidebar.frame.size.width;
     [app->_win makeFirstResponder:app->_outline];
     clickButton(app->_sidebarButton);
@@ -212,12 +286,30 @@ static void sidebarControls(AppDelegate *app) {
     [app showSidebarTab:1];
     CHECK(!app->_sidebar.hidden && !app->_search.view.hidden && app->_treeHeader.hidden, "showing Search reveals a hidden sidebar");
     [app setSidebarVisible:NO];
-    saveWindowSnapshot(app, @"sidebar-collapsed.png");
     CHECK(app->_sidebar.hidden && app->_split.subviews.count == 2 &&
           app->_split.dividerStyle == NSSplitViewDividerStyleThin,
           "sidebar collapse keeps the outer split divider controlled");
+    // A collapsed subview keeps its width, so AppKit would otherwise draw its own divider over
+    // the editor at the stale sidebar edge. The answer here must not depend on sidebar state:
+    // AppKit caches it, so a hidden-when-asked divider reappears after the next resize.
+    CHECK([app splitView:app->_split shouldHideDividerAtIndex:0], "the split view never draws its own divider");
+    checkNoDarkLine(app, @"sidebar-collapsed.png");
     [app showSidebarTab:0];
     CHECK(!app->_sidebar.hidden && !app->_treeHeader.hidden && !app->_treeScroll.hidden, "showing Files reveals a hidden sidebar");
+
+    // The reported repro: resize the sidebar by hand, then collapse it. The hairline used to
+    // stay behind at the dragged width and move with every later resize.
+    dragSidebarDivider(app, 300);
+    CHECK(fabs(app->_sidebar.frame.size.width - 300) < 2 &&
+          fabs(app->_content.view.frame.origin.x - app->_sidebar.frame.size.width - app->_split.dividerThickness) < 2,
+          "a hidden divider still resizes the sidebar by mouse drag (width %.0f, editor x %.0f)",
+          app->_sidebar.frame.size.width, app->_content.view.frame.origin.x);
+    checkNoDarkLine(app, @"sidebar-dragged.png");
+    [app setSidebarVisible:NO];
+    checkNoDarkLine(app, @"sidebar-collapsed-after-drag.png");
+    [app setSidebarVisible:YES];
+    CHECK(fabs(app->_sidebar.frame.size.width - 300) < 2, "reopening restores the dragged width (%.0f)", app->_sidebar.frame.size.width);
+    checkNoDarkLine(app, @"sidebar-restored-after-drag.png");
 }
 
 static void emptyRoots(AppDelegate *app, NSString *root) {
