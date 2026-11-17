@@ -17,6 +17,10 @@ static const CGFloat kSidebarW = 260;
 @end
 @implementation SidebarView
 - (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirty {
+    [NSColor.windowBackgroundColor setFill];
+    NSRectFill(NSIntersectionRect(dirty, self.bounds));
+}
 @end
 
 @implementation AppDelegate
@@ -320,6 +324,8 @@ static const CGFloat kSidebarW = 260;
     _split = [[NSSplitView alloc] initWithFrame:cb];
     _split.vertical = YES;
     _split.dividerStyle = NSSplitViewDividerStyleThin;
+    _split.wantsLayer = YES;
+    _split.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
     _split.delegate = self;
     _split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
