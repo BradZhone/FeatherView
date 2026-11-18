@@ -13,6 +13,7 @@
     NSView *_sidebar, *_treeHeader;
     NSButton *_sidebarButton;
     CGFloat _sidebarWidth;
+    BOOL _sidebarWasVisibleBeforeFullScreen;
     NSPopUpButton *_rootPopup;          // sidebar header: current workspace, click to switch
     NSSegmentedControl *_tabs;
     NSScrollView *_treeScroll;
@@ -53,6 +54,7 @@
 
 @interface AppDelegate (Menu)
 - (void)buildMenu;
+- (void)togglePreviewFullScreen:(id)sender;            // ⇧⌘Return: immersive rendered preview
 + (void)applyAppearance:(NSInteger)mode;   // 0 system, 1 light, 2 dark
 - (NSMenu *)treeContextMenu;
 - (NSString *)targetPathFrom:(id)sender;               // first of targetPathsFrom:

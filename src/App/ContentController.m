@@ -75,7 +75,7 @@ static NSString *sizeString(off_t n) {
 
 // One editor column: tab strip + active viewer + find/replace bar (+ the markdown layout switch).
 @interface PaneView : FTTabDropView
-@property (nonatomic) NSView *tabBar, *content, *findBar, *empty, *layoutSwitch;
+@property (nonatomic) NSView *tabBar, *content, *findBar, *empty, *layoutSwitch, *fullScreenButton;
 @property (nonatomic) BOOL hasTabs, showsLayoutSwitch;
 @end
 
@@ -98,20 +98,43 @@ static NSString *sizeString(off_t n) {
     NSRect b = self.bounds;
     _tabBar.hidden = _content.hidden = !_hasTabs;
     _empty.hidden = _hasTabs;
-    _layoutSwitch.hidden = !(_hasTabs && _showsLayoutSwitch);
+    _layoutSwitch.hidden = _fullScreenButton.hidden = !(_hasTabs && _showsLayoutSwitch);
     if (!_hasTabs) {                                   // no tabs: the welcome view fills the column
         _findBar.hidden = YES;
         _empty.frame = b;
         return;
     }
-    CGFloat y = kTabH, sw = _layoutSwitch.hidden ? 0 : _layoutSwitch.frame.size.width + 16;
+    CGFloat y = kTabH, fsw = _fullScreenButton.hidden ? 0 : _fullScreenButton.frame.size.width + 6;
+    CGFloat sw = _layoutSwitch.hidden ? 0 : _layoutSwitch.frame.size.width + 16 + fsw;
     if (sw > b.size.width - 60) sw = 0;
-    _layoutSwitch.hidden = sw == 0;
+    _layoutSwitch.hidden = _fullScreenButton.hidden = sw == 0;
     _tabBar.frame = NSMakeRect(0, 0, MAX(0, b.size.width - sw), kTabH);
-    if (sw) _layoutSwitch.frame = (NSRect){{b.size.width - sw + 8, floor((kTabH - _layoutSwitch.frame.size.height) / 2)}, _layoutSwitch.frame.size};
+    if (sw) {
+        CGFloat x = b.size.width - sw + 8;
+        _layoutSwitch.frame = (NSRect){{x, floor((kTabH - _layoutSwitch.frame.size.height) / 2)}, _layoutSwitch.frame.size};
+        _fullScreenButton.frame = (NSRect){{NSMaxX(_layoutSwitch.frame) + 6,
+                                            floor((kTabH - _fullScreenButton.frame.size.height) / 2)}, _fullScreenButton.frame.size};
+    }
     self.needsDisplay = YES;
     if (!_findBar.hidden) { _findBar.frame = NSMakeRect(0, y, b.size.width, kFindH); y += kFindH; }
     _content.frame = NSMakeRect(0, y, b.size.width, MAX(0, b.size.height - y));
+}
+@end
+
+// Backdrop for the immersive preview: opaque, so no editor chrome shows through, and it swallows
+// clicks that miss the preview instead of letting them reach the hidden columns underneath.
+@interface CCFullScreenView : NSView
+@end
+@implementation CCFullScreenView
+- (BOOL)isFlipped { return YES; }
+- (BOOL)isOpaque { return YES; }
+- (void)drawRect:(NSRect)dirty {
+    [NSColor.textBackgroundColor setFill];
+    NSRectFill(NSIntersectionRect(dirty, self.bounds));
+}
+- (void)mouseDown:(NSEvent *)event { }
+- (void)resizeSubviewsWithOldSize:(NSSize)old {
+    for (NSView *v in self.subviews) v.frame = self.bounds;
 }
 @end
 
@@ -228,6 +251,13 @@ static NSString *sizeString(off_t n) {
     CGFloat _zoomScroll;                         // ⌘-wheel delta not yet spent on a zoom step
     NSTimeInterval _zoomScrollTime;
     id _zoomScrollMonitor;
+    NSView *_fullScreenHost;                     // covers the root while an immersive preview runs
+    Doc *_fullScreenDoc;                         // whose preview is borrowed, and where it goes back
+    NSView *_fullScreenPreview;
+    NSView *_fullScreenReturnTo;                 // the preview's superview before it was borrowed
+    MarkupLayout _fullScreenLayout;              // the layout to restore on the way out
+    BOOL _fullScreenHadLayout, _fullScreenPanelWasVisible;
+    id _fullScreenKeyMonitor;
 }
 
 // The find/replace bar is per column; its fields all feed the same actions here.
@@ -270,6 +300,24 @@ static NSString *sizeString(off_t n) {
     sw.hidden = YES;
     return sw;
 }
+
+// Sits next to the layout switch; momentary, because it enters a mode the preview itself leaves.
+- (NSButton *)makeFullScreenButton {
+    NSString *tip = [FTL(@"Full Screen Preview") stringByAppendingString:@" (⇧⌘↩)"];
+    NSButton *b = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"arrow.up.left.and.arrow.down.right"
+                                                    accessibilityDescription:tip]
+                                      target:self action:@selector(fullScreenButtonClicked:)];
+    b.bordered = NO;
+    b.imagePosition = NSImageOnly;
+    b.focusRingType = NSFocusRingTypeNone;
+    b.toolTip = tip;
+    b.accessibilityLabel = FTL(@"Full Screen Preview");
+    [b sizeToFit];
+    b.hidden = YES;
+    return b;
+}
+
+- (void)fullScreenButtonClicked:(id)sender { [self togglePreviewFullScreen]; }
 
 - (instancetype)init {
     if (!(self = [super init])) return nil;
@@ -364,7 +412,10 @@ static NSString *sizeString(off_t n) {
     return self;
 }
 
-- (void)dealloc { if (_zoomScrollMonitor) [NSEvent removeMonitor:_zoomScrollMonitor]; }
+- (void)dealloc {
+    if (_zoomScrollMonitor) [NSEvent removeMonitor:_zoomScrollMonitor];
+    if (_fullScreenKeyMonitor) [NSEvent removeMonitor:_fullScreenKeyMonitor];
+}
 
 #pragma mark Panes (split view)
 
@@ -412,8 +463,9 @@ static NSString *sizeString(off_t n) {
     TabBarView *tb = [[TabBarView alloc] initWithFrame:NSMakeRect(0, 0, 400, kTabH)];
     FindBarView *fb = [self makeFindBar];
     NSSegmentedControl *sw = [self makeLayoutSwitch];
-    pv.tabBar = tb; pv.findBar = fb; pv.layoutSwitch = sw;
-    for (NSView *v in @[tb, fb, sw]) [pv addSubview:v];
+    NSButton *fs = [self makeFullScreenButton];
+    pv.tabBar = tb; pv.findBar = fb; pv.layoutSwitch = sw; pv.fullScreenButton = fs;
+    for (NSView *v in @[tb, fb, sw, fs]) [pv addSubview:v];
     [_panes insertObject:pv atIndex:(NSUInteger)at];
     [_tabBars insertObject:tb atIndex:(NSUInteger)at];
     [_findBars insertObject:fb atIndex:(NSUInteger)at];
@@ -525,6 +577,12 @@ static NSString *sizeString(off_t n) {
 - (void)layoutRoot {
     if (!_root) return;
     NSRect b = _root.bounds;
+    if (_fullScreenHost) {                      // the immersive preview owns the whole root
+        _fullScreenHost.frame = b;
+        _split.hidden = _statusBar.hidden = YES;
+        _terminalPanel.hidden = YES;
+        return;
+    }
     BOOL panelVisible = !_terminalPanel.hidden;
     _statusBar.hidden = !_docs.count && !panelVisible;
     CGFloat panelH = panelVisible ? MIN(_terminalPanelHeight, MAX(80, b.size.height - kStatusH - 40)) : 0;
@@ -596,6 +654,76 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 }
 
 - (void)layoutSwitchChanged:(NSSegmentedControl *)s { [self setActiveMarkupLayout:(MarkupLayout)s.selectedSegment]; }
+
+#pragma mark Immersive preview
+
+- (BOOL)canPreviewFullScreen { return _active.markup != nil; }
+- (BOOL)previewFullScreen { return _fullScreenHost != nil; }
+
+- (void)togglePreviewFullScreen { [self setPreviewFullScreen:!self.previewFullScreen]; }
+
+// The whole MarkupContainer moves into a host view over the root, forced to the preview layout.
+// Moving the container (not the preview inside it) leaves its own view tree untouched, so the
+// rendered view keeps its scroll position, and a WKWebView keeps its loaded page.
+- (void)setPreviewFullScreen:(BOOL)on {
+    if (on == self.previewFullScreen) return;
+    if (on) {
+        Doc *d = _active;
+        if (!d.markup || !_root) return;
+        _fullScreenDoc = d;
+        _fullScreenPreview = d.markup;
+        _fullScreenReturnTo = d.markup.superview;
+        _fullScreenLayout = d.markup.markupLayout;
+        _fullScreenHadLayout = d.hasLayout;
+
+        _fullScreenPanelWasVisible = !_terminalPanel.hidden;
+        _fullScreenHost = [[CCFullScreenView alloc] initWithFrame:_root.bounds];
+        _fullScreenHost.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [_root addSubview:_fullScreenHost positioned:NSWindowAbove relativeTo:nil];
+        d.markup.markupLayout = MarkupPreview;              // not setActiveMarkupLayout: it persists
+        d.markup.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [_fullScreenHost addSubview:d.markup];
+        [self layoutRoot];                                  // sizes the host to the current root
+        d.markup.frame = _fullScreenHost.bounds;             // then the preview to the sized host
+        [_root.window makeFirstResponder:d.markup.focusView];
+
+        // Esc leaves. A key monitor keeps this out of every viewer's key handling.
+        __weak typeof(self) weakSelf = self;
+        _fullScreenKeyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                                                     handler:^NSEvent *(NSEvent *event) {
+            ContentController *me = weakSelf;
+            if (!me || !me.previewFullScreen || event.window != me->_root.window) return event;
+            if (event.keyCode != 53 || (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagOption))) return event;
+            [me setPreviewFullScreen:NO];
+            return nil;
+        }];
+    } else {
+        if (_fullScreenKeyMonitor) { [NSEvent removeMonitor:_fullScreenKeyMonitor]; _fullScreenKeyMonitor = nil; }
+        Doc *d = _fullScreenDoc;
+        NSView *preview = _fullScreenPreview, *back = _fullScreenReturnTo;
+        NSView *host = _fullScreenHost;
+        _fullScreenDoc = nil; _fullScreenPreview = nil; _fullScreenReturnTo = nil; _fullScreenHost = nil;
+        if (d.markup == preview) {
+            d.markup.markupLayout = _fullScreenLayout;
+            d.hasLayout = _fullScreenHadLayout;
+        }
+        if (back) {                                          // the tab may have been closed meanwhile
+            preview.frame = back.bounds;
+            [back addSubview:preview];
+        } else {
+            [preview removeFromSuperview];
+        }
+        [host removeFromSuperview];
+        _split.hidden = NO;
+        _terminalPanel.hidden = !_fullScreenPanelWasVisible;
+        [self layoutRoot];
+        for (PaneView *pv in _panes) [pv layoutPane];
+        [self syncLayoutSwitch];
+        if (d.markup == preview) [_root.window makeFirstResponder:d.markup.focusView];
+    }
+    if (self.onPreviewFullScreenChange) self.onPreviewFullScreenChange(self.previewFullScreen);
+    [self stateChanged];
+}
 
 - (void)syncLayoutSwitch {
     for (NSUInteger p = 0; p < _panes.count; p++) {
@@ -1125,6 +1253,8 @@ static const CGFloat kZoomScrollStep = 18;        // trackpad points per step, �
 }
 
 - (void)activate:(Doc *)d focus:(BOOL)focus {
+    // Another tab cannot be shown underneath an immersive preview that covers the whole window.
+    if (_fullScreenDoc && d != _fullScreenDoc) [self setPreviewFullScreen:NO];
     Doc *prev = _active;
     if (prev != d && prev && [_docs containsObject:prev] && (_autoSaveMode != AutoSaveOff || prev.untitled))
         [self autoSave:prev];
@@ -1245,6 +1375,7 @@ static const CGFloat kZoomScrollStep = 18;        // trackpad points per step, �
     if (ask && ![self askSave:d]) return NO;
     NSUInteger i = [_docs indexOfObject:d];
     if (i == NSNotFound) return YES;
+    if (d == _fullScreenDoc) [self setPreviewFullScreen:NO];   // never leave a borrowed preview behind
     NSInteger p = (NSInteger)d.pane;
     BOOL wasActive = d == _active, wasPaneActive = [self paneActive:p] == d;
     NSResponder *fr = _root.window.firstResponder;

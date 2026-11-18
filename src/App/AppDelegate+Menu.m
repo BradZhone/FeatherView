@@ -122,6 +122,8 @@ static __weak NSResponder *gFocusOverride;
                     item(FTL(@"Preview (Markdown, Tables, JSON…)"), @selector(togglePreview:), @"v", C | S),
                     item(FTL(@"Side-by-Side Preview"), @selector(splitPreview:), @"v", C | O),
                     item(FTL(@"Source Only"), @selector(sourceOnly:), nil, 0),
+                    // ⌃⌘F, the system's own full-screen shortcut: ⇧⌘Return already inserts a line.
+                    item(FTL(@"Full Screen Preview"), @selector(togglePreviewFullScreen:), @"f", C | K),
                     NSMenuItem.separatorItem,
                     item(FTL(@"Word Wrap"), @selector(toggleWordWrap:), @"z", C | O),     // not ⌥Z: that types Ω, or ż on Polish keyboards
                     item(FTL(@"Show Minimap"), @selector(toggleMinimap:), @"m", NSEventModifierFlagCommand | NSEventModifierFlagOption),
@@ -382,6 +384,10 @@ static __weak NSResponder *gFocusOverride;
         mi.state = _content.activeIsMarkup && l == mine ? NSControlStateValueOn : NSControlStateValueOff;
         return _content.activeIsMarkup;
     }
+    if (a == @selector(togglePreviewFullScreen:)) {
+        mi.title = _content.previewFullScreen ? FTL(@"Exit Full Screen Preview") : FTL(@"Full Screen Preview");
+        return _content.canPreviewFullScreen;
+    }
     BOOL pdf = _content.activePDF != nil;
     if (a == @selector(zoomInAction:) || a == @selector(zoomOutAction:) || a == @selector(zoomResetAction:) || a == @selector(zoomActualAction:)) {
         if (a == @selector(zoomResetAction:)) mi.title = (pdf || _content.activeImage) ? FTL(@"Fit to Window") : FTL(@"Default Size");
@@ -486,6 +492,7 @@ static __weak NSResponder *gFocusOverride;
 }
 - (void)splitPreview:(id)s { _content.activeMarkupLayout = _content.activeMarkupLayout == MarkupSplit ? MarkupSource : MarkupSplit; }
 - (void)sourceOnly:(id)s { _content.activeMarkupLayout = MarkupSource; }
+- (void)togglePreviewFullScreen:(id)s { [_content togglePreviewFullScreen]; }
 - (void)toggleTerminalPanel:(id)s {
     if (!_content.terminalPanelVisible && _content.terminalCount == 0)
         [self newTerminal:s];

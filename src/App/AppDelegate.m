@@ -435,6 +435,18 @@ static const CGFloat kSidebarW = 260;
         [me->_content openPath:p preview:!pinned focus:pinned && !viaKeyboard];
     };
     _content.onStateChange = ^{ [weakSelf updateTitle]; };
+    // The sidebar lives outside the content view, so it has to be hidden from here; the state it
+    // had is restored on the way out, including a sidebar that was already collapsed.
+    _content.onPreviewFullScreenChange = ^(BOOL on) {
+        AppDelegate *me = weakSelf;
+        if (!me) return;
+        if (on) {
+            me->_sidebarWasVisibleBeforeFullScreen = !me->_sidebar.hidden;
+            [me setSidebarVisible:NO];
+        } else if (me->_sidebarWasVisibleBeforeFullScreen) {
+            [me setSidebarVisible:YES];
+        }
+    };
     _content.onSaveAs = ^(NSString *p) {
         AppDelegate *me = weakSelf;
         if (!me) return;

@@ -10,6 +10,8 @@
 #import "FTSplitView.h"
 #import "FTTabDrag.h"
 #import "TabBarView.h"
+#import "MarkupView.h"
+#import "Localization.h"
 #include <signal.h>
 
 static int failures = 0;
@@ -1385,6 +1387,153 @@ static BOOL tabIsPreview(ContentController *cc, NSString *path) {
     return NO;
 }
 
+// Immersive preview: the rendered view alone fills the window, and everything it borrowed goes
+// back on the way out. The preview object itself must survive, so scroll position and a loaded
+// web page are kept.
+static void previewFullScreen(ContentController *cc, NSWindow *window, NSString *dir) {
+    [cc closeAllWithoutAsking];
+    NSString *md = [dir stringByAppendingPathComponent:@"full.md"];
+    NSMutableString *text = [NSMutableString stringWithString:@"# Title\n\n"];
+    for (int i = 0; i < 80; i++) [text appendFormat:@"paragraph %d with enough words to wrap a line\n\n", i];
+    [text writeToFile:md atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [cc openPath:md preview:NO focus:YES layout:MarkupPreview];
+    [window.contentView layoutSubtreeIfNeeded];
+    drain(0.2);
+
+    CHECK(cc.canPreviewFullScreen && !cc.previewFullScreen, "a rendered markup tab can go full screen");
+    MarkupContainer *markup = nil;
+    for (id doc in [cc valueForKey:@"_docs"]) markup = [doc valueForKey:@"markup"];
+    NSView *root = cc.view;
+    NSView *statusBar = [cc valueForKey:@"_statusBar"];
+    FTSplitView *split = [cc valueForKey:@"_split"];
+    NSView *paneBefore = nil;
+    for (id doc in [cc valueForKey:@"_docs"]) paneBefore = [[doc valueForKey:@"markup"] superview];
+    CHECK(paneBefore != nil, "the preview starts inside its column");
+
+    [cc togglePreviewFullScreen];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.previewFullScreen, "the immersive preview is on");
+    CHECK(split.hidden && statusBar.hidden, "columns and the status bar are out of the way");
+    NSView *host = nil;
+    for (NSView *v in root.subviews) if ([NSStringFromClass(v.class) isEqualToString:@"CCFullScreenView"]) host = v;
+    CHECK(host != nil && !host.hidden, "a full-screen host covers the root");
+    if (host) {
+        CHECK(fabs(host.frame.size.width - root.bounds.size.width) < 1 &&
+              fabs(host.frame.size.height - root.bounds.size.height) < 1,
+              "the host fills the window (%.0fx%.0f vs %.0fx%.0f)", host.frame.size.width, host.frame.size.height,
+              root.bounds.size.width, root.bounds.size.height);
+        NSView *shown = host.subviews.firstObject;
+        CHECK(shown != nil && fabs(shown.frame.size.width - host.bounds.size.width) < 1 &&
+              fabs(shown.frame.size.height - host.bounds.size.height) < 1,
+              "the preview fills the host edge to edge");
+        CHECK(host.isOpaque, "the backdrop is opaque, so no editor chrome shows through");
+    }
+    for (id doc in [cc valueForKey:@"_docs"]) {
+        MarkupContainer *now = [doc valueForKey:@"markup"];
+        CHECK(now == markup, "the same markup object is reused, so the preview keeps its state");
+        CHECK(now.markupLayout == MarkupPreview, "the borrowed container shows its preview");
+    }
+
+    [cc togglePreviewFullScreen];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(!cc.previewFullScreen, "toggling again leaves");
+    CHECK(!split.hidden, "the columns come back");
+    host = nil;
+    for (NSView *v in root.subviews) if ([NSStringFromClass(v.class) isEqualToString:@"CCFullScreenView"]) host = v;
+    CHECK(host == nil, "the host is gone from the view tree");
+    NSView *paneAfter = nil;
+    for (id doc in [cc valueForKey:@"_docs"]) paneAfter = [[doc valueForKey:@"markup"] superview];
+    CHECK(paneAfter == paneBefore, "the preview is back in the column it came from");
+
+    // The layout it had before must not be changed by the round trip, and must not be persisted.
+    NSInteger storedBefore = [NSUserDefaults.standardUserDefaults integerForKey:@"markdownLayout"];
+    [cc setActiveMarkupLayout:MarkupSplit];
+    [cc togglePreviewFullScreen];
+    CHECK(cc.previewFullScreen, "a side-by-side tab can go full screen too");
+    [cc togglePreviewFullScreen];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.activeMarkupLayout == MarkupSplit, "leaving restores the side-by-side layout (%ld)", (long)cc.activeMarkupLayout);
+    CHECK([NSUserDefaults.standardUserDefaults integerForKey:@"markdownLayout"] == MarkupSplit,
+          "the full-screen round trip did not persist a different default (%ld -> %ld)",
+          (long)storedBefore, (long)[NSUserDefaults.standardUserDefaults integerForKey:@"markdownLayout"]);
+
+    // Closing the tab while full screen must not leave the host or a detached preview behind.
+    [cc togglePreviewFullScreen];
+    CHECK(cc.previewFullScreen, "full screen again before closing the tab");
+    [cc closeActive];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(!cc.previewFullScreen, "closing the full-screen tab leaves the mode");
+    host = nil;
+    for (NSView *v in root.subviews) if ([NSStringFromClass(v.class) isEqualToString:@"CCFullScreenView"]) host = v;
+    CHECK(host == nil && !split.hidden, "no host or hidden column survives the close");
+
+    // Activating another tab leaves too: it cannot be shown under a full-window preview.
+    [cc openPath:md preview:NO focus:YES layout:MarkupPreview];
+    NSString *other = [dir stringByAppendingPathComponent:@"other.txt"];
+    [@"plain\n" writeToFile:other atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [cc openPath:other preview:NO focus:YES];
+    [cc openPath:md preview:NO focus:YES];
+    [window.contentView layoutSubtreeIfNeeded];
+    [cc togglePreviewFullScreen];
+    CHECK(cc.previewFullScreen, "full screen on the markdown tab");
+    [cc openPath:other preview:NO focus:YES];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(!cc.previewFullScreen, "switching tabs leaves the immersive preview");
+    CHECK(!split.hidden && [cc.currentPath isEqualToString:other], "and the other tab is shown normally");
+
+    // A plain text tab has nothing to show full screen.
+    CHECK(!cc.canPreviewFullScreen, "a plain editor tab cannot go full screen");
+    [cc togglePreviewFullScreen];
+    CHECK(!cc.previewFullScreen, "and the request is ignored");
+
+    // The toolbar button: mounted next to the layout switch, shown only for a rendered tab, and
+    // reached by a real click through the window root.
+    [cc closeAllWithoutAsking];
+    [cc openPath:md preview:NO focus:YES layout:MarkupPreview];
+    [window.contentView layoutSubtreeIfNeeded];
+    drain(0.1);
+    NSView *pane = split.items.firstObject;
+    NSButton *fsButton = nil;
+    NSSegmentedControl *layoutSwitch = nil;
+    for (NSView *v in pane.subviews) {
+        if ([v isKindOfClass:NSButton.class] && [[(NSButton *)v accessibilityLabel] isEqualToString:FTL(@"Full Screen Preview")])
+            fsButton = (NSButton *)v;
+        if ([v isKindOfClass:NSSegmentedControl.class]) layoutSwitch = (NSSegmentedControl *)v;
+    }
+    CHECK(fsButton != nil, "the full-screen button is mounted in the column");
+    if (fsButton && layoutSwitch) {
+        CHECK(!fsButton.hidden, "it shows for a rendered markup tab");
+        CHECK(NSMinX(fsButton.frame) >= NSMaxX(layoutSwitch.frame),
+              "it sits beside the layout switch, not over it (%.0f vs %.0f)",
+              NSMinX(fsButton.frame), NSMaxX(layoutSwitch.frame));
+        CHECK(!NSIntersectsRect(fsButton.frame, [(NSView *)editorBars(cc)[0] frame]),
+              "and never overlaps the tab strip");
+        NSPoint mid = [fsButton convertPoint:NSMakePoint(NSMidX(fsButton.bounds), NSMidY(fsButton.bounds)) toView:nil];
+        CHECK(rootHit(window, mid) == fsButton, "a click at the button reaches it through the window root");
+        [fsButton performClick:nil];
+        [window.contentView layoutSubtreeIfNeeded];
+        CHECK(cc.previewFullScreen, "the button enters the immersive preview");
+
+        // Esc leaves, and it must not reach the preview as an ordinary key press.
+        NSEvent *esc = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0
+                                       timestamp:NSProcessInfo.processInfo.systemUptime
+                                    windowNumber:window.windowNumber context:nil
+                                      characters:@"\e" charactersIgnoringModifiers:@"\e" isARepeat:NO keyCode:53];
+        [NSApp sendEvent:esc];                 // the path a real keystroke takes; monitors see it here
+        [window.contentView layoutSubtreeIfNeeded];
+        CHECK(!cc.previewFullScreen, "Esc leaves the immersive preview");
+        CHECK(!split.hidden, "and the columns are back");
+
+        [cc setActiveMarkupLayout:MarkupSource];
+        [window.contentView layoutSubtreeIfNeeded];
+        CHECK(!fsButton.hidden, "source layout still offers full screen for a markup tab");
+        [cc openPath:other preview:NO focus:YES];
+        [window.contentView layoutSubtreeIfNeeded];
+        CHECK(fsButton.hidden, "a plain text tab hides the button");
+    }
+    [cc closeAllWithoutAsking];
+}
+
 // ⌘ + wheel resizes whatever the zoom shortcuts act on; a plain wheel must still scroll.
 static void commandWheelZoom(ContentController *cc, NSWindow *window, NSString *path) {
     [cc closeAllWithoutAsking];
@@ -1845,6 +1994,7 @@ static void splits(void) {
     [cc closeAllWithoutAsking];
     CHECK(cc.paneCount == 1 && cc.tabCount == 0, "closing everything collapses to one column");
     commandWheelZoom(cc, sw, a);
+    previewFullScreen(cc, sw, dir);
     drain(0.3);
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
 }

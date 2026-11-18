@@ -103,6 +103,15 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 - (BOOL)flushAutoSave;                                          // NO if some file could not be saved
 @property (nonatomic, readonly) NSString *statusText;
 
+// Immersive preview: the rendered view alone fills the window, without tabs, columns, the status
+// bar or the terminal panel. The preview keeps its scroll position and loaded state throughout.
+@property (nonatomic, readonly) BOOL canPreviewFullScreen;   // a rendered markup view is showing
+@property (nonatomic, readonly) BOOL previewFullScreen;
+- (void)setPreviewFullScreen:(BOOL)on;
+- (void)togglePreviewFullScreen;
+// The window owner hides its own chrome (the sidebar) while this is on; it is outside this view.
+@property (nonatomic, copy) void (^onPreviewFullScreenChange)(BOOL on);
+
 // Zoom follows what is shown: image / PDF zoom, Markdown / HTML preview scale, or the editor font size.
 @property (nonatomic, readonly) BOOL canZoom;
 - (void)zoomIn;

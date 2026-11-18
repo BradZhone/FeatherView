@@ -373,6 +373,34 @@ static void menuActionsAreOurs(AppDelegate *app) {
     CHECK(checked > 20, "the menu audit actually covered the delegate's actions (%lu)", (unsigned long)checked);
 }
 
+// Two items cannot claim one shortcut: AppKit keeps the first and silently clears the second, so
+// the duplicate's key equivalent comes back empty and its shortcut never fires.
+// When two items ask for one shortcut, AppKit keeps the first and clears the second's key
+// equivalent, so the loser's shortcut silently never fires (it happened to Full Screen Preview,
+// which first asked for ⇧⌘Return — already taken by Insert Line Above). Comparing the built menu
+// against itself cannot see this: the evidence is erased by then. Each shortcut that matters is
+// asserted to still be there instead.
+static void shortcutsSurvived(void) {
+    struct { SEL action; NSString *key; NSEventModifierFlags mods; } want[] = {
+        {@selector(toggleFileSidebar:), @"b", NSEventModifierFlagCommand},
+        {@selector(togglePreviewFullScreen:), @"f", NSEventModifierFlagCommand | NSEventModifierFlagControl},
+        {@selector(togglePreview:), @"v", NSEventModifierFlagCommand | NSEventModifierFlagShift},
+        {@selector(splitPreview:), @"v", NSEventModifierFlagCommand | NSEventModifierFlagOption},
+        {@selector(splitEditor:), @"\\", NSEventModifierFlagCommand},
+        {@selector(showFind:), @"f", NSEventModifierFlagCommand},
+        {@selector(searchWorkspace:), @"f", NSEventModifierFlagCommand | NSEventModifierFlagShift},
+        {@selector(showFilesTab:), @"e", NSEventModifierFlagCommand | NSEventModifierFlagShift},
+        {@selector(toggleMaximizeSplit:), @"m", NSEventModifierFlagCommand | NSEventModifierFlagControl},
+    };
+    for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
+        NSMenuItem *mi = menuItemFor(want[i].action);
+        CHECK(mi != nil, "%s has a menu item", sel_getName(want[i].action));
+        CHECK([mi.keyEquivalent isEqualToString:want[i].key] && mi.keyEquivalentModifierMask == want[i].mods,
+              "%s kept its shortcut (key '%s', mods %lu)", sel_getName(want[i].action),
+              mi.keyEquivalent.UTF8String, (unsigned long)mi.keyEquivalentModifierMask);
+    }
+}
+
 static void sidebarControls(AppDelegate *app) {
     [app->_win.contentView layoutSubtreeIfNeeded];
     NSTitlebarAccessoryViewController *accessory = app->_win.titlebarAccessoryViewControllers.firstObject;
@@ -417,8 +445,48 @@ static void sidebarControls(AppDelegate *app) {
     [app showSidebarTab:0];
     CHECK(!app->_sidebar.hidden && !app->_treeHeader.hidden && !app->_treeScroll.hidden, "showing Files reveals a hidden sidebar");
 
-    // The reported repro: resize the sidebar by hand, then collapse it. The hairline used to
-    // stay behind at the dragged width and move with every later resize.
+    // ⌃⌘F enters the immersive preview, and the item names the way out while it is on.
+    NSMenuItem *fullScreen = menuItemFor(@selector(togglePreviewFullScreen:));
+    CHECK(fullScreen != nil && [fullScreen.keyEquivalent isEqualToString:@"f"] &&
+          fullScreen.keyEquivalentModifierMask == (NSEventModifierFlagCommand | NSEventModifierFlagControl),
+          "Full Screen Preview carries ⌃⌘F");
+    if (fullScreen) {
+        CHECK(responderClaiming(app, fullScreen.action) == app,
+              "the delegate is the first chain object answering the full-screen action");
+        NSString *doc = [app->_tree.rootPath stringByAppendingPathComponent:@"note.md"];
+        [@"# Heading\n\nbody\n" writeToFile:doc atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [app->_content openPath:doc preview:NO focus:YES layout:MarkupPreview];
+        [app->_win.contentView layoutSubtreeIfNeeded];
+        CHECK([app validateMenuItem:fullScreen] && [fullScreen.title isEqualToString:FTL(@"Full Screen Preview")],
+              "a rendered document enables the item under its entering title");
+        [app togglePreviewFullScreen:nil];
+        [app->_win.contentView layoutSubtreeIfNeeded];
+        CHECK(app->_content.previewFullScreen, "the menu action enters the immersive preview");
+        CHECK([app validateMenuItem:fullScreen] && [fullScreen.title isEqualToString:FTL(@"Exit Full Screen Preview")],
+              "while on, the item names the way out");
+
+        // The sidebar is outside the content view, so the immersive preview has to hide it from
+        // here, and put back exactly the state it found.
+        CHECK(app->_sidebar.hidden, "the immersive preview hides the file tree too");
+        [app togglePreviewFullScreen:nil];
+        [app->_win.contentView layoutSubtreeIfNeeded];
+        CHECK(!app->_content.previewFullScreen, "and the action leaves again");
+        CHECK(!app->_sidebar.hidden, "leaving brings the file tree back");
+
+        // A sidebar the user had already collapsed must stay collapsed afterwards.
+        [app setSidebarVisible:NO];
+        [app togglePreviewFullScreen:nil];
+        [app->_win.contentView layoutSubtreeIfNeeded];
+        CHECK(app->_content.previewFullScreen && app->_sidebar.hidden, "full screen from an already collapsed sidebar");
+        [app togglePreviewFullScreen:nil];
+        [app->_win.contentView layoutSubtreeIfNeeded];
+        CHECK(app->_sidebar.hidden, "an already collapsed file tree is not reopened on the way out");
+        [app setSidebarVisible:YES];
+
+        [app->_content closeAllWithoutAsking];
+        CHECK(![app validateMenuItem:fullScreen], "with no rendered document the item is disabled");
+    }
+
     dragSidebarDivider(app, 300);
     CHECK(fabs(app->_sidebar.frame.size.width - 300) < 2 &&
           fabs(app->_content.view.frame.origin.x - app->_sidebar.frame.size.width - app->_split.dividerThickness) < 2,
@@ -483,6 +551,7 @@ int main(void) {
             folderControls(app, workspace);
             sidebarControls(app);
             menuActionsAreOurs(app);
+            shortcutsSurvived();
             sidebarShortcut(app);
             emptyRoots(app, root);
         } @finally {

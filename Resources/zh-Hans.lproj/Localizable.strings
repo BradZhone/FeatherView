@@ -142,6 +142,7 @@
 "Empty table · " = "空表格 · ";
 "Encrypted PDF, no password entered" = "PDF 已加密，未输入密码";
 "Enter the password to open it." = "输入密码以打开。";
+"Exit Full Screen Preview" = "退出全屏预览";
 "Expand All" = "全部展开";
 "Expand All Children" = "展开全部子项";
 "Expected a property name" = "这里需要属性名";
@@ -170,6 +171,7 @@
 "Fit Width (⌘0)" = "适合宽度（⌘0）";
 "Folder" = "文件夹";
 "folder" = "文件夹";
+"Full Screen Preview" = "全屏预览";
 "Go" = "跳转";
 "Go to Line" = "跳到行";
 "Go to Line…" = "跳到行…";
