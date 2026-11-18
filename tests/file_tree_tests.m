@@ -2,10 +2,12 @@
 #import <Cocoa/Cocoa.h>
 #import "AppDelegate.h"
 #import "TextEditorView.h"
+#import "TerminalView.h"
 #import "Localization.h"
 
 @interface AppDelegate (FileTreeTests)
 - (void)buildWindow;
+- (void)buildMenu;
 @end
 
 static int failures;
@@ -253,6 +255,72 @@ static void dragSidebarDivider(AppDelegate *app, CGFloat toX) {
     [app->_win.contentView layoutSubtreeIfNeeded];
 }
 
+static NSMenuItem *menuItemFor(SEL action) {
+    for (NSMenuItem *top in NSApp.mainMenu.itemArray)
+        for (NSMenuItem *i in top.submenu.itemArray) if (i.action == action) return i;
+    return nil;
+}
+
+// ⌘B through the real main menu, including with a terminal focused: a focused terminal gets first
+// refusal on key equivalents, so it must still decline Command shortcuts.
+static void sidebarShortcut(AppDelegate *app) {
+    NSMenuItem *toggle = menuItemFor(@selector(toggleSidebar:));
+    CHECK(toggle != nil && [toggle.keyEquivalent isEqualToString:@"b"] &&
+          toggle.keyEquivalentModifierMask == NSEventModifierFlagCommand, "Hide Sidebar carries ⌘B");
+    if (!toggle) return;
+    CHECK([app validateMenuItem:toggle] && [toggle.title isEqualToString:FTL(@"Hide Sidebar")],
+          "the item is enabled and names the hide action while the sidebar shows");
+
+    NSEvent *commandB = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+                                    modifierFlags:NSEventModifierFlagCommand timestamp:0
+                                     windowNumber:app->_win.windowNumber context:nil
+                                       characters:@"b" charactersIgnoringModifiers:@"b" isARepeat:NO keyCode:11];
+    [app->_win makeFirstResponder:app->_outline];
+    CGFloat width = app->_sidebar.frame.size.width;
+    CHECK([NSApp.mainMenu performKeyEquivalent:commandB], "the main menu claims ⌘B");
+    [app->_win.contentView layoutSubtreeIfNeeded];
+    CHECK(app->_sidebar.hidden && app->_content.view.frame.origin.x == 0,
+          "⌘B collapses the file tree and hands its width to the editor (x %.0f)", app->_content.view.frame.origin.x);
+    CHECK([app validateMenuItem:toggle] && [toggle.title isEqualToString:FTL(@"Show Sidebar")],
+          "the collapsed state renames the item to the reopen action");
+    [NSApp.mainMenu performKeyEquivalent:commandB];
+    [app->_win.contentView layoutSubtreeIfNeeded];
+    CHECK(!app->_sidebar.hidden && fabs(app->_sidebar.frame.size.width - width) < 1,
+          "⌘B reopens the file tree at its previous width (%.0f -> %.0f)", width, app->_sidebar.frame.size.width);
+
+    // With the text editor focused: ⌘B is "bold" in a stock NSTextView, and the editor must not
+    // swallow it or insert anything.
+    NSString *file = [app->_tree.rootPath stringByAppendingPathComponent:@"top.txt"];
+    [app->_content openPath:file preview:NO focus:YES];
+    [app->_win.contentView layoutSubtreeIfNeeded];
+    TextEditorView *editor = app->_content.editor;
+    if (editor) {
+        [app->_win makeFirstResponder:editor];
+        NSUInteger before = editor.contentLength;
+        CHECK([NSApp.mainMenu performKeyEquivalent:commandB] && app->_sidebar.hidden,
+              "⌘B collapses the file tree while the editor has the focus");
+        CHECK(editor.contentLength == before && !editor.isDirty, "⌘B types nothing into the document");
+        [NSApp.mainMenu performKeyEquivalent:commandB];
+        CHECK(!app->_sidebar.hidden, "and reopens it");
+    }
+
+    // With a terminal focused the shortcut must still toggle instead of reaching the shell.
+    TSession *session = [app->_content openTerminalAt:nil asTab:YES];
+    [app->_win.contentView layoutSubtreeIfNeeded];
+    TerminalView *tv = [[app->_content valueForKey:@"_terminalViews"] objectForKey:session];
+    if (tv) {
+        [app->_win makeFirstResponder:tv];
+        CHECK(app->_win.firstResponder == tv, "the terminal holds the keyboard focus");
+        CHECK(![tv performKeyEquivalent:commandB], "a focused terminal declines ⌘B instead of writing to the shell");
+        CHECK([NSApp.mainMenu performKeyEquivalent:commandB] && app->_sidebar.hidden,
+              "⌘B still collapses the file tree from a terminal");
+        [NSApp.mainMenu performKeyEquivalent:commandB];
+        CHECK(!app->_sidebar.hidden, "and reopens it");
+    }
+    if (session) [app->_content closeTerminal:session];
+    [app->_content closeAllWithoutAsking];
+}
+
 static void sidebarControls(AppDelegate *app) {
     [app->_win.contentView layoutSubtreeIfNeeded];
     NSTitlebarAccessoryViewController *accessory = app->_win.titlebarAccessoryViewControllers.firstObject;
@@ -351,20 +419,25 @@ int main(void) {
         AppDelegate *app = [AppDelegate new];
         @try {
             // Build only: launching would sweep orphan shell records and open user session state.
+            [app buildMenu];                     // ⌘B is dispatched through the real main menu
             [app buildWindow];
             app->_content.untitledDirectory = folder(root, @"untitled");
             app->_content.autoSaveMode = AutoSaveOff;
             [app openRoot:workspace];
+            // main.m sets this; menu items with a nil target reach the delegate through it.
+            NSApp.delegate = (id<NSApplicationDelegate>)app;
             [app->_win makeKeyAndOrderFront:nil];
             [app->_win.contentView layoutSubtreeIfNeeded];
             folderControls(app, workspace);
             sidebarControls(app);
+            sidebarShortcut(app);
             emptyRoots(app, root);
         } @finally {
             [app->_watcher stop];
             [NSNotificationCenter.defaultCenter removeObserver:app];
             app->_content.onActivate = nil;
             [app->_content closeAllWithoutAsking];
+            NSApp.delegate = nil;
             app->_win.delegate = nil;
             [app->_win orderOut:nil];
             [NSFileManager.defaultManager removeItemAtPath:root error:nil];
