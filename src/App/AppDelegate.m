@@ -305,7 +305,10 @@ static const CGFloat kSidebarW = 260;
     _sidebarButton.accessibilityLabel = title;
 }
 
-- (void)toggleSidebar:(id)sender { [self setSidebarVisible:_sidebar.hidden]; }
+// Deliberately not named toggleSidebar:. NSWindow and NSSplitView both implement that selector,
+// and the window and its split contentView come before the delegate in the responder chain, so a
+// nil-target menu item reached AppKit's own no-op instead of this method and ⌘B did nothing.
+- (void)toggleFileSidebar:(id)sender { [self setSidebarVisible:_sidebar.hidden]; }
 
 - (void)tabChanged:(NSSegmentedControl *)s { [self showSidebarTab:s.selectedSegment]; }
 
@@ -317,7 +320,7 @@ static const CGFloat kSidebarW = 260;
     _win.delegate = self;
     _win.releasedWhenClosed = NO;
     _sidebarButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"sidebar.left" accessibilityDescription:FTL(@"Hide Sidebar")]
-                                       target:self action:@selector(toggleSidebar:)];
+                                       target:self action:@selector(toggleFileSidebar:)];
     _sidebarButton.frame = NSMakeRect(0, 0, 30, 24);
     _sidebarButton.bordered = NO;
     _sidebarButton.imagePosition = NSImageOnly;

@@ -135,7 +135,7 @@ static __weak NSResponder *gFocusOverride;
                     item(FTL(@"Unfold All"), @selector(unfoldAll:), @"]", C | O | S),
                     NSMenuItem.separatorItem,
                     item(FTL(@"File Tree"), @selector(showFilesTab:), @"e", C | S),
-                    item(FTL(@"Hide Sidebar"), @selector(toggleSidebar:), @"b", C),
+                    item(FTL(@"Hide Sidebar"), @selector(toggleFileSidebar:), @"b", C),
                     item(FTL(@"Search"), @selector(searchWorkspace:), nil, 0),
                     NSMenuItem.separatorItem,
                     item(FTL(@"Automatic"), @selector(viewAuto:), @"0", C | O),
@@ -226,7 +226,7 @@ static __weak NSResponder *gFocusOverride;
     NSMutableArray *a = [@[item(FTL(@"Next Tab"), @selector(nextTab:), right, C | O),
                            item(FTL(@"Previous Tab"), @selector(previousTab:), left, C | O),
                            NSMenuItem.separatorItem,
-                           item(FTL(@"Keep Open (Pin Preview Tab)"), @selector(pinTab:), nil, 0),
+                           item(FTL(@"Keep Open (Pin Preview Tab)"), @selector(pinPreviewTab:), nil, 0),
                            item(FTL(@"Single Click Opens a Preview Tab"), @selector(togglePreviewTabs:), nil, 0),
                            NSMenuItem.separatorItem] mutableCopy];
     for (int i = 1; i <= 9; i++) {
@@ -328,7 +328,7 @@ static __weak NSResponder *gFocusOverride;
 
 - (BOOL)validateMenuItem:(NSMenuItem *)mi {
     SEL a = mi.action;
-    if (a == @selector(toggleSidebar:)) { mi.title = _sidebar.hidden ? FTL(@"Show Sidebar") : FTL(@"Hide Sidebar"); return YES; }
+    if (a == @selector(toggleFileSidebar:)) { mi.title = _sidebar.hidden ? FTL(@"Show Sidebar") : FTL(@"Hide Sidebar"); return YES; }
     if (a == @selector(splitEditor:)) return _content.tabCount > 0 && _content.paneCount < 3;
     if (a == @selector(focusPane:)) return (NSUInteger)mi.tag < (NSUInteger)_content.paneCount;
     if (a == @selector(toggleMaximizeSplit:)) {
@@ -355,7 +355,7 @@ static __weak NSResponder *gFocusOverride;
     if (a == @selector(closeAllTabs:)) return tabs > 0;
     if (a == @selector(closeOtherTabs:) || a == @selector(nextTab:) || a == @selector(previousTab:)) return tabs > 1;
     if (a == @selector(selectTabByNumber:)) return mi.tag == 9 ? tabs > 0 : (NSUInteger)mi.tag <= tabs;
-    if (a == @selector(pinTab:)) return tabs > 0;
+    if (a == @selector(pinPreviewTab:)) return tabs > 0;
     if (a == @selector(renameItem:))
         return targets.count == 1 && ![target isEqualToString:_tree.rootPath];
     if (a == @selector(trashItem:)) {
@@ -543,7 +543,7 @@ static __weak NSResponder *gFocusOverride;
 - (void)nextTab:(id)s { [_content selectTabOffset:1]; }
 - (void)previousTab:(id)s { [_content selectTabOffset:-1]; }
 - (void)selectTabByNumber:(NSMenuItem *)s { [_content selectTabAtIndex:s.tag == 9 ? -1 : s.tag - 1]; }
-- (void)pinTab:(id)s { [_content pinActive]; }
+- (void)pinPreviewTab:(id)s { [_content pinActive]; }
 - (void)togglePreviewTabs:(id)s {
     _content.previewEnabled = !_content.previewEnabled;
     [NSUserDefaults.standardUserDefaults setBool:!_content.previewEnabled forKey:@"disablePreviewTabs"];

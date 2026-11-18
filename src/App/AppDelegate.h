@@ -42,7 +42,7 @@
 - (void)fileSystemChanged;                 // the workspace watcher fired           // after the window was closed: its session comes back, ⌘Q asks again
 - (void)showSidebarTab:(NSInteger)tab;     // 0 files, 1 search; also reveals a hidden sidebar
 - (void)setSidebarVisible:(BOOL)visible;
-- (void)toggleSidebar:(id)sender;
+- (void)toggleFileSidebar:(id)sender;     // not toggleSidebar:, which AppKit already owns
 @end
 
 // The Selection menu: its shortcuts (⌥↑, ⌘D, ⌘[ …) only apply while a text editor has the focus, so a

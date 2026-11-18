@@ -261,15 +261,40 @@ static NSMenuItem *menuItemFor(SEL action) {
     return nil;
 }
 
+// A menu item with a nil target is sent to the first object in the responder chain that answers
+// its action: key window's first responder, up to the window, its delegate, then NSApp and its
+// delegate. A test process cannot become key window, so the chain is walked explicitly here —
+// otherwise dispatch jumps straight to the delegate and hides exactly this class of bug.
+static id responderClaiming(AppDelegate *app, SEL action) {
+    NSMutableArray *chain = [NSMutableArray array];
+    for (NSResponder *r = app->_win.firstResponder; r; r = r.nextResponder) [chain addObject:r];
+    if (app->_win.delegate) [chain addObject:app->_win.delegate];
+    [chain addObject:NSApp];
+    if (NSApp.delegate) [chain addObject:NSApp.delegate];
+    for (id r in chain) if ([r respondsToSelector:action]) return r;
+    return nil;
+}
+
 // ⌘B through the real main menu, including with a terminal focused: a focused terminal gets first
 // refusal on key equivalents, so it must still decline Command shortcuts.
 static void sidebarShortcut(AppDelegate *app) {
-    NSMenuItem *toggle = menuItemFor(@selector(toggleSidebar:));
+    NSMenuItem *toggle = menuItemFor(@selector(toggleFileSidebar:));
     CHECK(toggle != nil && [toggle.keyEquivalent isEqualToString:@"b"] &&
           toggle.keyEquivalentModifierMask == NSEventModifierFlagCommand, "Hide Sidebar carries ⌘B");
     if (!toggle) return;
     CHECK([app validateMenuItem:toggle] && [toggle.title isEqualToString:FTL(@"Hide Sidebar")],
           "the item is enabled and names the hide action while the sidebar shows");
+
+    // The action must not be a selector AppKit already implements: NSWindow and NSSplitView both
+    // have toggleSidebar:, and both precede the delegate in the chain, so ⌘B hit AppKit's no-op.
+    CHECK(![NSWindow instancesRespondToSelector:toggle.action] &&
+          ![NSSplitView instancesRespondToSelector:toggle.action] &&
+          ![NSView instancesRespondToSelector:toggle.action],
+          "the sidebar action is not a selector AppKit's own window or split view answers");
+    [app->_win makeFirstResponder:app->_outline];
+    CHECK(responderClaiming(app, toggle.action) == app,
+          "the delegate is the first responder-chain object that answers the sidebar action, got %s",
+          NSStringFromClass([responderClaiming(app, toggle.action) class]).UTF8String);
 
     NSEvent *commandB = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
                                     modifierFlags:NSEventModifierFlagCommand timestamp:0
@@ -319,6 +344,33 @@ static void sidebarShortcut(AppDelegate *app) {
     }
     if (session) [app->_content closeTerminal:session];
     [app->_content closeAllWithoutAsking];
+}
+
+// Every nil-target menu action the delegate implements must be unique to it. If AppKit also
+// implements the selector, the window or a view answers first and the shortcut silently does
+// nothing — which is exactly how ⌘B was broken by being named toggleSidebar:.
+static void menuActionsAreOurs(AppDelegate *app) {
+    NSArray *appKitOwns = @[@"terminate:", @"hide:", @"orderFrontStandardAboutPanel:", @"arrangeInFront:",
+                            @"performMiniaturize:", @"performZoom:", @"performClose:", @"toggleFullScreen:",
+                            @"undo:", @"redo:", @"cut:", @"copy:", @"paste:", @"selectAll:", @"delete:",
+                            @"uppercaseWord:", @"lowercaseWord:", @"capitalizeWord:", @"startDictation:",
+                            @"orderFrontCharacterPalette:", @"toggleAutomaticSpellingCorrection:"];
+    NSArray *chainClasses = @[NSWindow.class, NSView.class, NSSplitView.class, NSScrollView.class,
+                              NSOutlineView.class, NSTableView.class, NSTextView.class, NSClipView.class];
+    NSUInteger checked = 0;
+    for (NSMenuItem *top in NSApp.mainMenu.itemArray)
+        for (NSMenuItem *mi in top.submenu.itemArray) {
+            if (!mi.action || mi.target) continue;                       // explicit targets are unambiguous
+            NSString *name = NSStringFromSelector(mi.action);
+            if ([appKitOwns containsObject:name]) continue;              // deliberately AppKit's own
+            if (![app respondsToSelector:mi.action]) continue;           // handled by the editor or a viewer
+            checked++;
+            for (Class k in chainClasses)
+                CHECK(![k instancesRespondToSelector:mi.action],
+                      "%s is the delegate's action but %s implements it too, so it would never run",
+                      name.UTF8String, NSStringFromClass(k).UTF8String);
+        }
+    CHECK(checked > 20, "the menu audit actually covered the delegate's actions (%lu)", (unsigned long)checked);
 }
 
 static void sidebarControls(AppDelegate *app) {
@@ -430,6 +482,7 @@ int main(void) {
             [app->_win.contentView layoutSubtreeIfNeeded];
             folderControls(app, workspace);
             sidebarControls(app);
+            menuActionsAreOurs(app);
             sidebarShortcut(app);
             emptyRoots(app, root);
         } @finally {
