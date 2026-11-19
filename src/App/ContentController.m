@@ -45,6 +45,9 @@ static const NSUInteger kMaxPanes = 3;                     // editor columns and
 @property (nonatomic, strong) TSession *terminal;      // a shell tab: no file, the session is the state
 @property (nonatomic) BOOL discarded;                 // the user chose "不保存"
 @property (nonatomic, copy) NSString *title;
+// Where in-place link jumps have been in this tab. Each entry is a path and the reading position
+// it was left at, so going back returns to the paragraph the link was clicked from.
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *back, *forward;
 @end
 @implementation Doc @end
 
@@ -75,8 +78,8 @@ static NSString *sizeString(off_t n) {
 
 // One editor column: tab strip + active viewer + find/replace bar (+ the markdown layout switch).
 @interface PaneView : FTTabDropView
-@property (nonatomic) NSView *tabBar, *content, *findBar, *empty, *layoutSwitch, *fullScreenButton, *inPlaceBox;
-@property (nonatomic) BOOL hasTabs, showsLayoutSwitch;
+@property (nonatomic) NSView *tabBar, *content, *findBar, *empty, *layoutSwitch, *fullScreenButton, *inPlaceBox, *history;
+@property (nonatomic) BOOL hasTabs, showsLayoutSwitch, showsHistory;
 @end
 
 @implementation PaneView
@@ -98,29 +101,39 @@ static NSString *sizeString(off_t n) {
     NSRect b = self.bounds;
     _tabBar.hidden = _content.hidden = !_hasTabs;
     _empty.hidden = _hasTabs;
-    _layoutSwitch.hidden = _fullScreenButton.hidden = _inPlaceBox.hidden = !(_hasTabs && _showsLayoutSwitch);
+    BOOL strip = _hasTabs && _showsLayoutSwitch;
+    _layoutSwitch.hidden = _fullScreenButton.hidden = _inPlaceBox.hidden = !strip;
+    _history.hidden = !(strip && _showsHistory);
     if (!_hasTabs) {                                   // no tabs: the welcome view fills the column
         _findBar.hidden = YES;
         _empty.frame = b;
         return;
     }
     // The strip gives up its pieces from the left as the column narrows: the checkbox (widest,
-    // least urgent) first, then the full-screen button, then the layout switch.
+    // least urgent) first, then back / forward, then the full-screen button, then the layout
+    // switch, which is the last to go.
     CGFloat y = kTabH;
     CGFloat boxW = _inPlaceBox ? _inPlaceBox.frame.size.width + 10 : 0;
+    CGFloat histW = (_history && _showsHistory) ? _history.frame.size.width + 8 : 0;
     CGFloat fsW = _fullScreenButton ? _fullScreenButton.frame.size.width + 6 : 0;
     CGFloat switchW = _layoutSwitch ? _layoutSwitch.frame.size.width + 16 : 0;
-    BOOL showSwitch = !_layoutSwitch.hidden, showFS = showSwitch, showBox = showSwitch;
-    CGFloat sw = showSwitch ? switchW + fsW + boxW : 0;
-    if (sw > b.size.width - 60) { showBox = NO; sw = switchW + fsW; }
-    if (showSwitch && sw > b.size.width - 60) { showFS = NO; sw = switchW; }
-    if (showSwitch && sw > b.size.width - 60) { showSwitch = NO; sw = 0; }
+    BOOL showSwitch = strip, showFS = strip, showHist = strip && _showsHistory, showBox = strip;
+    CGFloat sw = strip ? switchW + fsW + histW + boxW : 0;
+    if (strip && sw > b.size.width - 60) { showBox = NO; sw = switchW + fsW + histW; }
+    if (strip && sw > b.size.width - 60) { showHist = NO; sw = switchW + fsW; }
+    if (strip && sw > b.size.width - 60) { showFS = NO; sw = switchW; }
+    if (strip && sw > b.size.width - 60) { showSwitch = NO; sw = 0; }
     _layoutSwitch.hidden = !showSwitch;
     _fullScreenButton.hidden = !(showSwitch && showFS);
+    _history.hidden = !(showSwitch && showHist);
     _inPlaceBox.hidden = !(showSwitch && showBox);
     _tabBar.frame = NSMakeRect(0, 0, MAX(0, b.size.width - sw), kTabH);
     if (showSwitch) {
         CGFloat x = b.size.width - sw + 8;
+        if (showHist) {
+            _history.frame = (NSRect){{x, floor((kTabH - _history.frame.size.height) / 2)}, _history.frame.size};
+            x = NSMaxX(_history.frame) + 8;
+        }
         if (showBox) {
             _inPlaceBox.frame = (NSRect){{x, floor((kTabH - _inPlaceBox.frame.size.height) / 2)}, _inPlaceBox.frame.size};
             x = NSMaxX(_inPlaceBox.frame) + 10;
@@ -317,6 +330,26 @@ static NSString *sizeString(off_t n) {
     return sw;
 }
 
+// Back / forward through this tab's in-place jumps. Shown only while links are followed here,
+// because with the checkbox off every link made its own tab and the tab bar is the history.
+- (NSSegmentedControl *)makeHistoryControl {
+    NSSegmentedControl *c = [NSSegmentedControl segmentedControlWithImages:@[
+        [NSImage imageWithSystemSymbolName:@"chevron.left" accessibilityDescription:FTL(@"Back")],
+        [NSImage imageWithSystemSymbolName:@"chevron.right" accessibilityDescription:FTL(@"Forward")]]
+        trackingMode:NSSegmentSwitchTrackingMomentary target:self action:@selector(historyControlClicked:)];
+    c.controlSize = NSControlSizeSmall;
+    c.segmentStyle = NSSegmentStyleTexturedRounded;
+    [c setToolTip:[FTL(@"Back") stringByAppendingString:@" (⌃⌘←)"] forSegment:0];
+    [c setToolTip:[FTL(@"Forward") stringByAppendingString:@" (⌃⌘→)"] forSegment:1];
+    [c sizeToFit];
+    c.hidden = YES;
+    return c;
+}
+
+- (void)historyControlClicked:(NSSegmentedControl *)sender {
+    if (sender.selectedSegment == 0) [self goBack]; else [self goForward];
+}
+
 // Checked (the default): a link replaces the tab it was clicked in. Unchecked: its own tab.
 - (NSButton *)makeInPlaceLinksBox {
     NSButton *b = [NSButton checkboxWithTitle:FTL(@"Follow Links Here")
@@ -338,6 +371,8 @@ static NSString *sizeString(off_t n) {
     _followsLinksInPlace = on;
     for (NSButton *b in _inPlaceBoxes) b.state = on ? NSControlStateValueOn : NSControlStateValueOff;
     [NSUserDefaults.standardUserDefaults setBool:!on forKey:@"linksOpenNewTab"];
+    [self syncLayoutSwitch];                      // back / forward appear and disappear with it
+    [self stateChanged];
 }
 
 // Sits next to the layout switch; momentary, because it enters a mode the preview itself leaves.
@@ -506,8 +541,9 @@ static NSString *sizeString(off_t n) {
     NSSegmentedControl *sw = [self makeLayoutSwitch];
     NSButton *fs = [self makeFullScreenButton];
     NSButton *box = [self makeInPlaceLinksBox];
-    pv.tabBar = tb; pv.findBar = fb; pv.layoutSwitch = sw; pv.fullScreenButton = fs; pv.inPlaceBox = box;
-    for (NSView *v in @[tb, fb, sw, fs, box]) [pv addSubview:v];
+    NSSegmentedControl *hist = [self makeHistoryControl];
+    pv.tabBar = tb; pv.findBar = fb; pv.layoutSwitch = sw; pv.fullScreenButton = fs; pv.inPlaceBox = box; pv.history = hist;
+    for (NSView *v in @[tb, fb, sw, fs, box, hist]) [pv addSubview:v];
     [_panes insertObject:pv atIndex:(NSUInteger)at];
     [_tabBars insertObject:tb atIndex:(NSUInteger)at];
     [_findBars insertObject:fb atIndex:(NSUInteger)at];
@@ -775,6 +811,14 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
         BOOL show = pa.markup != nil && (NSInteger)p == _focusedPane;
         _panes[p].showsLayoutSwitch = show;
         if (show) ((NSSegmentedControl *)_switches[p]).selectedSegment = pa.markup.markupLayout;
+        // Back / forward belong to this tab's own trail, and only exist while links land here.
+        _panes[p].showsHistory = show && _followsLinksInPlace;
+        NSSegmentedControl *hist = (NSSegmentedControl *)_panes[p].history;
+        if (show) {
+            BOOL dirty = pa && docDirty(pa);
+            [hist setEnabled:pa.back.count > 0 && !dirty forSegment:0];
+            [hist setEnabled:pa.forward.count > 0 && !dirty forSegment:1];
+        }
         [_panes[p] layoutPane];
     }
 }
@@ -916,28 +960,75 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
     // file already open in some tab is shown there rather than duplicated.
     if (_followsLinksInPlace && from && !docDirty(from) && !from.untitled && !from.terminal &&
         ![self docForPathInAnyPane:p] && [self canNavigateInPlace:from]) {
-        MarkupLayout layout = from.markup.markupLayout;
-        BOOL hadLayout = from.hasLayout;
-        from.path = [p copy];
-        from.mode = ViewerAuto;
-        from.title = nil;
-        from.status = nil;
-        from.saveError = nil;
-        from.restoreLine = 0;
-        from.missing = from.changedOnDisk = NO;
-        from.layout = layout; from.hasLayout = hadLayout;   // the layout the reader chose stays
-        // Swapping the document inside the existing views, rather than releasing the viewer and
-        // building another, is what keeps the window from flashing empty for a frame.
-        if (![self swapDocumentInPlace:from]) [self reloadViewerOf:from];
-        if (anchor.length) [from.markup.markdownView scrollToAnchor:anchor];
-        [self reloadTabs];
-        [self stateChanged];
-        if (self.onActivate) self.onActivate(from.path);
+        if (!from.back) from.back = [NSMutableArray array];
+        [from.back addObject:[self placeOf:from]];
+        if (from.back.count > 50) [from.back removeObjectAtIndex:0];
+        [from.forward removeAllObjects];                    // a new jump ends the forward trail
+        [self navigate:from to:p anchor:anchor position:0];
         return;
     }
     if (_active.preview) { _active.preview = NO; [self reloadTabs]; }
     Doc *d = [self openPath:p mode:ViewerAuto preview:NO focus:YES];
     if (anchor.length) [d.markup.markdownView scrollToAnchor:anchor];
+}
+
+// Where this tab is now: the file, and how far down it the reader had got.
+- (NSDictionary *)placeOf:(Doc *)d {
+    return @{@"path": d.path ?: @"", @"y": @(d.markup.markdownView.scrollPosition)};
+}
+
+// One step of in-place navigation, shared by links and by back / forward.
+- (void)navigate:(Doc *)d to:(NSString *)p anchor:(NSString *)anchor position:(CGFloat)y {
+    MarkupLayout layout = d.markup.markupLayout;
+    BOOL hadLayout = d.hasLayout;
+    d.path = [p copy];
+    d.mode = ViewerAuto;
+    d.title = nil;
+    d.status = nil;
+    d.saveError = nil;
+    d.restoreLine = 0;
+    d.missing = d.changedOnDisk = NO;
+    d.layout = layout; d.hasLayout = hadLayout;             // the layout the reader chose stays
+    // Swapping the document inside the existing views, rather than releasing the viewer and
+    // building another, is what keeps the window from flashing empty for a frame.
+    if (![self swapDocumentInPlace:d]) [self reloadViewerOf:d];
+    // The preview keeps its scroll offset across a re-render (right for an edit, wrong here), so
+    // the position is always set: the anchor, the remembered place, or the top of a new document.
+    if (anchor.length) [d.markup.markdownView scrollToAnchor:anchor];
+    else [d.markup.markdownView scrollToPosition:y];
+    [self reloadTabs];
+    [self syncLayoutSwitch];         // back / forward become available, or stop being
+    [self stateChanged];
+    if (self.onActivate) self.onActivate(d.path);
+}
+
+// Walking the trail is in-place navigation, so it needs everything that allows: the setting on,
+// a rendered tab, and no unsaved edits to overwrite.
+- (BOOL)canNavigateHistory {
+    return _followsLinksInPlace && _active && !docDirty(_active) && !_active.untitled &&
+           !_active.terminal && [self canNavigateInPlace:_active];
+}
+- (BOOL)canGoBack { return _active.back.count > 0 && [self canNavigateHistory]; }
+- (BOOL)canGoForward { return _active.forward.count > 0 && [self canNavigateHistory]; }
+
+- (void)goBack {
+    Doc *d = _active;
+    if (!self.canGoBack) return;
+    NSDictionary *to = d.back.lastObject;
+    [d.back removeLastObject];
+    if (!d.forward) d.forward = [NSMutableArray array];
+    [d.forward addObject:[self placeOf:d]];
+    [self navigate:d to:to[@"path"] anchor:nil position:[to[@"y"] doubleValue]];
+}
+
+- (void)goForward {
+    Doc *d = _active;
+    if (!self.canGoForward) return;
+    NSDictionary *to = d.forward.lastObject;
+    [d.forward removeLastObject];
+    if (!d.back) d.back = [NSMutableArray array];
+    [d.back addObject:[self placeOf:d]];
+    [self navigate:d to:to[@"path"] anchor:nil position:[to[@"y"] doubleValue]];
 }
 
 // Only a rendered markup tab navigates in place: that is where links are clicked, and replacing

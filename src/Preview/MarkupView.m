@@ -300,6 +300,18 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k) {
     return r.origin.y + _textView.textContainerOrigin.y;
 }
 
+- (CGFloat)scrollPosition { return _scroll.contentView.bounds.origin.y; }
+
+// Lays out far enough down to make the offset reachable, then goes there.
+- (void)scrollToPosition:(CGFloat)y {
+    if (y <= 0) { [_textView scrollPoint:NSZeroPoint]; return; }
+    [self cancelInitialPosition];
+    [_textView.layoutManager ensureLayoutForBoundingRect:NSMakeRect(0, 0, _textView.bounds.size.width,
+        y + _scroll.contentSize.height) inTextContainer:_textView.textContainer];
+    [_textView sizeToFit];
+    [_textView scrollPoint:NSMakePoint(0, y)];
+}
+
 - (void)scrollToSourceLine:(CGFloat)line {
     // From the render that is actually on screen, which may have come from the cache.
     NSArray<NSNumber *> *L = _shown ? _shown.mapLines : _renderer.mapLines;

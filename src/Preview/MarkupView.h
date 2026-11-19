@@ -21,6 +21,9 @@
 - (void)applyInitialPositionIfNeeded;
 - (void)scrollToSourceLine:(CGFloat)line;      // 0-based, fractional
 - (BOOL)scrollToAnchor:(NSString *)slug;
+// Reading position in points, to leave and return to (link history).
+@property (nonatomic, readonly) CGFloat scrollPosition;
+- (void)scrollToPosition:(CGFloat)y;
 @end
 
 // HTML preview in WKWebView. Reloads from disk (after save), keeping the scroll position.

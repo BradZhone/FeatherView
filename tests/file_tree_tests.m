@@ -391,6 +391,11 @@ static void shortcutsSurvived(void) {
         {@selector(searchWorkspace:), @"f", NSEventModifierFlagCommand | NSEventModifierFlagShift},
         {@selector(showFilesTab:), @"e", NSEventModifierFlagCommand | NSEventModifierFlagShift},
         {@selector(toggleMaximizeSplit:), @"m", NSEventModifierFlagCommand | NSEventModifierFlagControl},
+        // ⌃⌘ arrows, not plain ⌘ ones: those move the caret in the source editor.
+        {@selector(goBackAction:), [NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey],
+         NSEventModifierFlagCommand | NSEventModifierFlagControl},
+        {@selector(goForwardAction:), [NSString stringWithFormat:@"%C", (unichar)NSRightArrowFunctionKey],
+         NSEventModifierFlagCommand | NSEventModifierFlagControl},
     };
     for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
         NSMenuItem *mi = menuItemFor(want[i].action);

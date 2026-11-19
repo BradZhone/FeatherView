@@ -124,6 +124,9 @@ static __weak NSResponder *gFocusOverride;
                     item(FTL(@"Source Only"), @selector(sourceOnly:), nil, 0),
                     // ⌃⌘F, the system's own full-screen shortcut: ⇧⌘Return already inserts a line.
                     item(FTL(@"Full Screen Preview"), @selector(togglePreviewFullScreen:), @"f", C | K),
+                    // ⌃⌘ rather than plain ⌘: ⌘← / ⌘→ move the caret in the source editor.
+                    item(FTL(@"Back"), @selector(goBackAction:), [NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey], C | K),
+                    item(FTL(@"Forward"), @selector(goForwardAction:), [NSString stringWithFormat:@"%C", (unichar)NSRightArrowFunctionKey], C | K),
                     NSMenuItem.separatorItem,
                     item(FTL(@"Word Wrap"), @selector(toggleWordWrap:), @"z", C | O),     // not ⌥Z: that types Ω, or ż on Polish keyboards
                     item(FTL(@"Show Minimap"), @selector(toggleMinimap:), @"m", NSEventModifierFlagCommand | NSEventModifierFlagOption),
@@ -388,6 +391,8 @@ static __weak NSResponder *gFocusOverride;
         mi.title = _content.previewFullScreen ? FTL(@"Exit Full Screen Preview") : FTL(@"Full Screen Preview");
         return _content.canPreviewFullScreen;
     }
+    if (a == @selector(goBackAction:)) return _content.canGoBack;
+    if (a == @selector(goForwardAction:)) return _content.canGoForward;
     BOOL pdf = _content.activePDF != nil;
     if (a == @selector(zoomInAction:) || a == @selector(zoomOutAction:) || a == @selector(zoomResetAction:) || a == @selector(zoomActualAction:)) {
         if (a == @selector(zoomResetAction:)) mi.title = (pdf || _content.activeImage) ? FTL(@"Fit to Window") : FTL(@"Default Size");
@@ -493,6 +498,8 @@ static __weak NSResponder *gFocusOverride;
 - (void)splitPreview:(id)s { _content.activeMarkupLayout = _content.activeMarkupLayout == MarkupSplit ? MarkupSource : MarkupSplit; }
 - (void)sourceOnly:(id)s { _content.activeMarkupLayout = MarkupSource; }
 - (void)togglePreviewFullScreen:(id)s { [_content togglePreviewFullScreen]; }
+- (void)goBackAction:(id)s { [_content goBack]; }
+- (void)goForwardAction:(id)s { [_content goForward]; }
 - (void)toggleTerminalPanel:(id)s {
     if (!_content.terminalPanelVisible && _content.terminalCount == 0)
         [self newTerminal:s];

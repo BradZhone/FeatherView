@@ -54,7 +54,9 @@
 
 @interface AppDelegate (Menu)
 - (void)buildMenu;
-- (void)togglePreviewFullScreen:(id)sender;            // ⇧⌘Return: immersive rendered preview
+- (void)togglePreviewFullScreen:(id)sender;            // ⌃⌘F: immersive rendered preview
+- (void)goBackAction:(id)sender;                       // ⌃⌘← / ⌃⌘→ through in-place link jumps
+- (void)goForwardAction:(id)sender;
 + (void)applyAppearance:(NSInteger)mode;   // 0 system, 1 light, 2 dark
 - (NSMenu *)treeContextMenu;
 - (NSString *)targetPathFrom:(id)sender;               // first of targetPathsFrom:

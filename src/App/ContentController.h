@@ -108,6 +108,12 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 
 // Immersive preview: the rendered view alone fills the window, without tabs, columns, the status
 // bar or the terminal panel. The preview keeps its scroll position and loaded state throughout.
+// Where in-place link jumps have been, per tab, with the reading position of each step. Only
+// in-place jumps are recorded: a link that opened its own tab left the first one as it was.
+@property (nonatomic, readonly) BOOL canGoBack, canGoForward;
+- (void)goBack;
+- (void)goForward;
+
 @property (nonatomic, readonly) BOOL canPreviewFullScreen;   // a rendered markup view is showing
 @property (nonatomic, readonly) BOOL previewFullScreen;
 - (void)setPreviewFullScreen:(BOOL)on;

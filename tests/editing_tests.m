@@ -1434,6 +1434,138 @@ static void renderCache(NSWindow *window, NSString *dir) {
     [MarkdownPreview clearRenderCache];
 }
 
+// In-place jumps replace the tab, so the trail is the only way back. Back / forward walk it and
+// return to the position each document was left at.
+static void linkHistory(ContentController *cc, NSWindow *window, NSString *dir) {
+    [cc closeAllWithoutAsking];
+    cc.followsLinksInPlace = YES;
+    NSString *a = [dir stringByAppendingPathComponent:@"h-a.md"];
+    NSString *b = [dir stringByAppendingPathComponent:@"h-b.md"];
+    NSString *c = [dir stringByAppendingPathComponent:@"h-c.md"];
+    for (NSString *p in @[a, b, c]) {
+        NSString *name = p.lastPathComponent;
+        NSMutableString *md = [NSMutableString stringWithFormat:@"# Doc %@\n\n[to a](h-a.md) [to b](h-b.md) [to c](h-c.md)\n\n", name];
+        for (int i = 0; i < 200; i++) [md appendFormat:@"Line %d of %@ with words enough to wrap.\n\n", i, name];
+        [md writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+
+    CHECK(!cc.canGoBack && !cc.canGoForward, "a fresh workspace has nothing to go back to");
+    [cc openPath:a preview:NO focus:YES layout:MarkupPreview];
+    [window.contentView layoutSubtreeIfNeeded];
+    drain(0.1);
+    CHECK(!cc.canGoBack && !cc.canGoForward, "a freshly opened tab has no trail either");
+
+    MarkupContainer *(^markup)(void) = ^MarkupContainer * {
+        for (id doc in [cc valueForKey:@"_docs"])
+            if ([[doc valueForKey:@"path"] isEqualToString:cc.currentPath]) return [doc valueForKey:@"markup"];
+        return nil;
+    };
+
+    // Leave document a part-way down, so going back has a position to restore.
+    [markup().markdownView scrollToPosition:400];
+    drain(0.05);
+    CGFloat leftA = markup().markdownView.scrollPosition;
+    CHECK(leftA > 100, "document a is scrolled down before the jump (%.0f)", leftA);
+
+    [markup() followHref:@"h-b.md"];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK([cc.currentPath isEqualToString:b] && cc.tabCount == 1, "the link replaced the tab");
+    CHECK(cc.canGoBack && !cc.canGoForward, "now there is somewhere to go back to, and nothing forward");
+    drain(0.05);
+    CHECK(markup().markdownView.scrollPosition < 40,
+          "a linked document opens at its top, not at the offset the last one was at (%.0f)",
+          markup().markdownView.scrollPosition);
+
+    // Read into b as well, at a clearly different depth. Without this the offset the preview keeps
+    // across a re-render would make a missing restore look correct.
+    [markup().markdownView scrollToPosition:1200];
+    drain(0.05);
+    CGFloat leftB = markup().markdownView.scrollPosition;
+    CHECK(leftB > 800 && fabs(leftB - leftA) > 400,
+          "document b is left at a clearly different place (%.0f vs %.0f)", leftB, leftA);
+
+    [markup() followHref:@"h-c.md"];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK([cc.currentPath isEqualToString:c] && cc.canGoBack, "a second hop extends the trail");
+
+    [cc goBack];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK([cc.currentPath isEqualToString:b], "back returns to the previous document (%s)", cc.currentPath.lastPathComponent.UTF8String);
+    CHECK(cc.canGoBack && cc.canGoForward, "and now both directions are available");
+    drain(0.1);
+    CHECK(fabs(markup().markdownView.scrollPosition - leftB) < 60,
+          "back restores b's own reading position (%.0f, left at %.0f)", markup().markdownView.scrollPosition, leftB);
+
+    [cc goBack];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK([cc.currentPath isEqualToString:a], "back again reaches the first document");
+    CHECK(!cc.canGoBack, "which is the start of the trail");
+    drain(0.1);
+    CHECK(fabs(markup().markdownView.scrollPosition - leftA) < 60,
+          "and a's position too, which differs from b's (%.0f, left at %.0f)",
+          markup().markdownView.scrollPosition, leftA);
+
+    [cc goForward];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK([cc.currentPath isEqualToString:b], "forward walks the trail again");
+    [cc goForward];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK([cc.currentPath isEqualToString:c] && !cc.canGoForward, "to its end");
+
+    // A new jump from the middle discards what was ahead, as a browser does.
+    [cc goBack];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.canGoForward, "there is a forward trail to lose");
+    [markup() followHref:@"h-a.md"];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK([cc.currentPath isEqualToString:a] && !cc.canGoForward,
+          "a fresh jump from the middle drops the forward trail");
+
+    // The trail belongs to its own tab.
+    [cc openPath:b preview:NO focus:YES];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.tabCount == 2 && !cc.canGoBack, "another tab starts with an empty trail of its own");
+    [cc closeActive];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK([cc.currentPath isEqualToString:a] && cc.canGoBack, "and the first tab still has its own");
+
+    // The control: shown only while links are followed here, enabled only where there is a trail.
+    FTSplitView *split = [cc valueForKey:@"_split"];
+    NSSegmentedControl *history = nil, *layoutSwitch = nil;
+    for (NSView *v in ((NSView *)split.items.firstObject).subviews)
+        if ([v isKindOfClass:NSSegmentedControl.class]) {
+            NSSegmentedControl *sc = (NSSegmentedControl *)v;
+            if (sc.segmentCount == 2) history = sc; else layoutSwitch = sc;
+        }
+    CHECK(history != nil && layoutSwitch != nil, "the column has both the history control and the layout switch");
+    if (history) {
+        CHECK(!history.hidden, "back / forward show while links are followed here");
+        CHECK([history isEnabledForSegment:0] && ![history isEnabledForSegment:1],
+              "back is enabled, forward is not, matching the trail");
+        NSPoint mid = [history convertPoint:NSMakePoint(history.bounds.size.width * 0.25, NSMidY(history.bounds)) toView:nil];
+        CHECK(rootHit(window, mid) == history, "a click on the back half reaches the control");
+        cc.followsLinksInPlace = NO;
+        [window.contentView layoutSubtreeIfNeeded];
+        CHECK(history.hidden, "with the checkbox off the control goes away: every link made its own tab");
+        CHECK(!cc.canGoBack && !cc.canGoForward, "and the menu actions are unavailable");
+        cc.followsLinksInPlace = YES;
+        [window.contentView layoutSubtreeIfNeeded];
+        CHECK(!history.hidden && cc.canGoBack, "turning it back on restores the control and the trail");
+    }
+
+    // Unsaved edits must not be thrown away by a back step.
+    cc.autoSaveMode = AutoSaveOff;
+    [cc setActiveMarkupLayout:MarkupSplit];
+    [window.contentView layoutSubtreeIfNeeded];
+    [(id<NSTextInputClient>)cc.editor insertText:@"edit" replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK(cc.editor.isDirty, "the document has unsaved edits");
+    CHECK(!cc.canGoBack, "back is refused while the tab is dirty");
+    NSString *before = cc.currentPath;
+    [cc goBack];
+    CHECK([cc.currentPath isEqualToString:before], "and asking anyway changes nothing");
+    [cc closeAllWithoutAsking];
+}
+
 // Clicking a link in a rendered preview: checked, the tab becomes the linked file; unchecked, the
 // link gets its own tab. Unsaved work is never replaced.
 static void inPlaceLinks(ContentController *cc, NSWindow *window, NSString *dir) {
@@ -2194,6 +2326,7 @@ static void splits(void) {
     [@"plain\n" writeToFile:[dir stringByAppendingPathComponent:@"plain.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     renderCache(sw, dir);
     inPlaceLinks(cc, sw, dir);
+    linkHistory(cc, sw, dir);
     drain(0.3);
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
 }

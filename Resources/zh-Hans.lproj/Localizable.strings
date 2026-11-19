@@ -80,6 +80,7 @@
 "Auto (%@)" = "自动（%@）";
 "Auto Save" = "自动保存";
 "Auto save:" = "自动保存：";
+"Back" = "后退";
 "Auto-save failed: %@" = "自动保存失败：%@";
 "Automatic" = "自动";
 "Binary file" = "二进制文件";
@@ -173,6 +174,7 @@
 "Folder" = "文件夹";
 "folder" = "文件夹";
 "Follow Links Here" = "就地跳转";
+"Forward" = "前进";
 "Full Screen Preview" = "全屏预览";
 "Go" = "跳转";
 "Go to Line" = "跳到行";
