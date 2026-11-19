@@ -518,8 +518,12 @@ static void markdownPreview(NSString *dir) {
     CHECK(found && mv.textView.visibleRect.origin.y > 0, "anchor link scrolls (found=%d anchors=%s y=%.0f tv=%s preview=%s)", found,
           mv.renderer.anchors.description.UTF8String, mv.textView.visibleRect.origin.y,
           NSStringFromRect(mv.textView.frame).UTF8String, NSStringFromRect(mv.frame).UTF8String);
+    // Links are followed in place by default: the tab becomes the linked file, anchor and all.
+    NSUInteger tabsBefore = t.tabCount;
     [mv textView:mv.textView clickedOnLink:@"other.md#sec" atIndex:0];
-    CHECK([t.currentPath hasSuffix:@"other.md"] && t.tabCount == 2, "relative .md link opens a tab: %s", t.currentPath.UTF8String);
+    CHECK([t.currentPath hasSuffix:@"other.md"] && t.tabCount == tabsBefore,
+          "a relative .md link replaces the tab it was clicked in: %s (%lu tabs)",
+          t.currentPath.UTF8String, (unsigned long)t.tabCount);
 
     [t openPath:readme preview:NO focus:NO];
     t.activeMarkupLayout = MarkupSplit;
@@ -683,7 +687,10 @@ static void readmeIssues(NSString *dir) {
     [mv.textView activateLinkAtIndex:api];
     spinUntil(^BOOL { return [t.statusText containsString:@"no longer exists"]; }, 2);
     CHECK([t.statusText containsString:@"docs/api.md"] && t.tabCount == 2, "clicking it says the file is missing: %s", t.statusText.UTF8String);
-    // 4b) existing link: real mouse down/up on the text view opens a new tab and keeps README
+    // 4b) existing link: real mouse down/up on the text view opens a new tab and keeps README.
+    // With links followed in place (the default) the tab would be replaced instead; that mode has
+    // its own coverage in editing_tests.
+    t.followsLinksInPlace = NO;
     NSUInteger mit = [s rangeOfString:@"MIT" options:NSBackwardsSearch].location;
     NSLayoutManager *lm = mv.textView.layoutManager;
     [lm ensureLayoutForTextContainer:mv.textView.textContainer];
@@ -703,6 +710,7 @@ static void readmeIssues(NSString *dir) {
           [[t.openPaths valueForKey:@"lastPathComponent"] componentsJoinedByString:@","].UTF8String);
     [t openPath:plain preview:YES focus:NO];
     CHECK([t.openPaths containsObject:readme], "README was pinned, so another single click doesn't replace it");
+    t.followsLinksInPlace = YES;
     [t closeAllWithoutAsking];
 }
 

@@ -88,6 +88,7 @@
 "Cancelled" = "已取消";
 "Choose where to save. The extension sets the syntax highlighting, for example .md, .py or .json." = "选择保存位置。扩展名决定语法高亮，例如 .md、.py、.json。";
 "Clear List" = "清除列表";
+"Clicking a link replaces this tab instead of opening another one" = "点击链接时替换当前标签页，而不是新开一个";
 "Clear Recent List" = "清除最近列表";
 "Close" = "关闭";
 "Close All" = "全部关闭";
@@ -171,6 +172,7 @@
 "Fit Width (⌘0)" = "适合宽度（⌘0）";
 "Folder" = "文件夹";
 "folder" = "文件夹";
+"Follow Links Here" = "就地跳转";
 "Full Screen Preview" = "全屏预览";
 "Go" = "跳转";
 "Go to Line" = "跳到行";

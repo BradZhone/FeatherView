@@ -408,6 +408,7 @@ static const CGFloat kSidebarW = 260;
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
     [ud registerDefaults:@{@"autoSaveMode": @(AutoSaveAfterDelay), @"autoSaveDelay": @1.0, @"showMinimap": @YES}];
     _content.previewEnabled = ![ud boolForKey:@"disablePreviewTabs"];
+    _content.followsLinksInPlace = ![ud boolForKey:@"linksOpenNewTab"];      // checked by default
     _content.autoSaveMode = (AutoSaveMode)[ud integerForKey:@"autoSaveMode"];
     _content.autoSaveDelay = [ud doubleForKey:@"autoSaveDelay"];
     _content.showsMinimap = [ud boolForKey:@"showMinimap"];

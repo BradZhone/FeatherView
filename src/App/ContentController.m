@@ -75,7 +75,7 @@ static NSString *sizeString(off_t n) {
 
 // One editor column: tab strip + active viewer + find/replace bar (+ the markdown layout switch).
 @interface PaneView : FTTabDropView
-@property (nonatomic) NSView *tabBar, *content, *findBar, *empty, *layoutSwitch, *fullScreenButton;
+@property (nonatomic) NSView *tabBar, *content, *findBar, *empty, *layoutSwitch, *fullScreenButton, *inPlaceBox;
 @property (nonatomic) BOOL hasTabs, showsLayoutSwitch;
 @end
 
@@ -98,22 +98,37 @@ static NSString *sizeString(off_t n) {
     NSRect b = self.bounds;
     _tabBar.hidden = _content.hidden = !_hasTabs;
     _empty.hidden = _hasTabs;
-    _layoutSwitch.hidden = _fullScreenButton.hidden = !(_hasTabs && _showsLayoutSwitch);
+    _layoutSwitch.hidden = _fullScreenButton.hidden = _inPlaceBox.hidden = !(_hasTabs && _showsLayoutSwitch);
     if (!_hasTabs) {                                   // no tabs: the welcome view fills the column
         _findBar.hidden = YES;
         _empty.frame = b;
         return;
     }
-    CGFloat y = kTabH, fsw = _fullScreenButton.hidden ? 0 : _fullScreenButton.frame.size.width + 6;
-    CGFloat sw = _layoutSwitch.hidden ? 0 : _layoutSwitch.frame.size.width + 16 + fsw;
-    if (sw > b.size.width - 60) sw = 0;
-    _layoutSwitch.hidden = _fullScreenButton.hidden = sw == 0;
+    // The strip gives up its pieces from the left as the column narrows: the checkbox (widest,
+    // least urgent) first, then the full-screen button, then the layout switch.
+    CGFloat y = kTabH;
+    CGFloat boxW = _inPlaceBox ? _inPlaceBox.frame.size.width + 10 : 0;
+    CGFloat fsW = _fullScreenButton ? _fullScreenButton.frame.size.width + 6 : 0;
+    CGFloat switchW = _layoutSwitch ? _layoutSwitch.frame.size.width + 16 : 0;
+    BOOL showSwitch = !_layoutSwitch.hidden, showFS = showSwitch, showBox = showSwitch;
+    CGFloat sw = showSwitch ? switchW + fsW + boxW : 0;
+    if (sw > b.size.width - 60) { showBox = NO; sw = switchW + fsW; }
+    if (showSwitch && sw > b.size.width - 60) { showFS = NO; sw = switchW; }
+    if (showSwitch && sw > b.size.width - 60) { showSwitch = NO; sw = 0; }
+    _layoutSwitch.hidden = !showSwitch;
+    _fullScreenButton.hidden = !(showSwitch && showFS);
+    _inPlaceBox.hidden = !(showSwitch && showBox);
     _tabBar.frame = NSMakeRect(0, 0, MAX(0, b.size.width - sw), kTabH);
-    if (sw) {
+    if (showSwitch) {
         CGFloat x = b.size.width - sw + 8;
+        if (showBox) {
+            _inPlaceBox.frame = (NSRect){{x, floor((kTabH - _inPlaceBox.frame.size.height) / 2)}, _inPlaceBox.frame.size};
+            x = NSMaxX(_inPlaceBox.frame) + 10;
+        }
         _layoutSwitch.frame = (NSRect){{x, floor((kTabH - _layoutSwitch.frame.size.height) / 2)}, _layoutSwitch.frame.size};
-        _fullScreenButton.frame = (NSRect){{NSMaxX(_layoutSwitch.frame) + 6,
-                                            floor((kTabH - _fullScreenButton.frame.size.height) / 2)}, _fullScreenButton.frame.size};
+        if (showFS)
+            _fullScreenButton.frame = (NSRect){{NSMaxX(_layoutSwitch.frame) + 6,
+                                                floor((kTabH - _fullScreenButton.frame.size.height) / 2)}, _fullScreenButton.frame.size};
     }
     self.needsDisplay = YES;
     if (!_findBar.hidden) { _findBar.frame = NSMakeRect(0, y, b.size.width, kFindH); y += kFindH; }
@@ -235,6 +250,7 @@ static NSString *sizeString(off_t n) {
     NSMutableArray<TabBarView *> *_tabBars;
     NSMutableArray<FindBarView *> *_findBars;
     NSMutableArray<NSSegmentedControl *> *_switches;
+    NSMutableArray<NSButton *> *_inPlaceBoxes;   // one per column, kept in step with the setting
     NSMutableArray *_paneActive;                 // each column's active tab (nil before its first tab)
     NSInteger _focusedPane;
     BOOL _syncingFocus;
@@ -301,6 +317,29 @@ static NSString *sizeString(off_t n) {
     return sw;
 }
 
+// Checked (the default): a link replaces the tab it was clicked in. Unchecked: its own tab.
+- (NSButton *)makeInPlaceLinksBox {
+    NSButton *b = [NSButton checkboxWithTitle:FTL(@"Follow Links Here")
+                                        target:self action:@selector(inPlaceLinksChanged:)];
+    b.controlSize = NSControlSizeSmall;
+    b.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    b.toolTip = FTL(@"Clicking a link replaces this tab instead of opening another one");
+    b.state = _followsLinksInPlace ? NSControlStateValueOn : NSControlStateValueOff;
+    [b sizeToFit];
+    b.hidden = YES;
+    return b;
+}
+
+- (void)inPlaceLinksChanged:(NSButton *)sender {
+    self.followsLinksInPlace = sender.state == NSControlStateValueOn;
+}
+
+- (void)setFollowsLinksInPlace:(BOOL)on {
+    _followsLinksInPlace = on;
+    for (NSButton *b in _inPlaceBoxes) b.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    [NSUserDefaults.standardUserDefaults setBool:!on forKey:@"linksOpenNewTab"];
+}
+
 // Sits next to the layout switch; momentary, because it enters a mode the preview itself leaves.
 - (NSButton *)makeFullScreenButton {
     NSString *tip = [FTL(@"Full Screen Preview") stringByAppendingString:@" (⇧⌘↩)"];
@@ -325,8 +364,10 @@ static NSString *sizeString(off_t n) {
     _closed = [NSMutableArray array];
     _panes = [NSMutableArray array]; _tabBars = [NSMutableArray array];
     _findBars = [NSMutableArray array]; _switches = [NSMutableArray array];
+    _inPlaceBoxes = [NSMutableArray array];
     _paneActive = [NSMutableArray array];
     _previewEnabled = YES;
+    _followsLinksInPlace = YES;                  // on by default, as the reader expects
     _autoSaveDelay = 1.0;
     _showsMinimap = YES;
 
@@ -464,12 +505,14 @@ static NSString *sizeString(off_t n) {
     FindBarView *fb = [self makeFindBar];
     NSSegmentedControl *sw = [self makeLayoutSwitch];
     NSButton *fs = [self makeFullScreenButton];
-    pv.tabBar = tb; pv.findBar = fb; pv.layoutSwitch = sw; pv.fullScreenButton = fs;
-    for (NSView *v in @[tb, fb, sw, fs]) [pv addSubview:v];
+    NSButton *box = [self makeInPlaceLinksBox];
+    pv.tabBar = tb; pv.findBar = fb; pv.layoutSwitch = sw; pv.fullScreenButton = fs; pv.inPlaceBox = box;
+    for (NSView *v in @[tb, fb, sw, fs, box]) [pv addSubview:v];
     [_panes insertObject:pv atIndex:(NSUInteger)at];
     [_tabBars insertObject:tb atIndex:(NSUInteger)at];
     [_findBars insertObject:fb atIndex:(NSUInteger)at];
     [_switches insertObject:sw atIndex:(NSUInteger)at];
+    [_inPlaceBoxes insertObject:box atIndex:(NSUInteger)at];
     [_paneActive insertObject:NSNull.null atIndex:(NSUInteger)at];
     [self rewireAllTabBars];
     _split.items = _panes;
@@ -484,6 +527,7 @@ static NSString *sizeString(off_t n) {
     [_tabBars removeObjectAtIndex:(NSUInteger)p];
     [_findBars removeObjectAtIndex:(NSUInteger)p];
     [_switches removeObjectAtIndex:(NSUInteger)p];
+    [_inPlaceBoxes removeObjectAtIndex:(NSUInteger)p];
     [_paneActive removeObjectAtIndex:(NSUInteger)p];
     if (_emptyView && ![_panes containsObject:(id)_emptyView.superview]) {
         _panes[0].empty = _emptyView;
@@ -866,9 +910,45 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 
 // A link always opens its own tab; the tab it was clicked in is kept (a preview tab gets pinned).
 - (void)openLinkedFile:(NSString *)p anchor:(NSString *)anchor {
+    Doc *from = _active;
+    // In place: the tab the link was clicked in becomes the linked file, so following a chain of
+    // links leaves one tab behind instead of one per hop. Unsaved work is never replaced, and a
+    // file already open in some tab is shown there rather than duplicated.
+    if (_followsLinksInPlace && from && !docDirty(from) && !from.untitled && !from.terminal &&
+        ![self docForPathInAnyPane:p] && [self canNavigateInPlace:from]) {
+        MarkupLayout layout = from.markup ? from.markup.markupLayout : MarkupPreview;
+        BOOL hadLayout = from.hasLayout;
+        from.path = [p copy];
+        from.mode = ViewerAuto;
+        from.title = nil;
+        from.status = nil;
+        from.saveError = nil;
+        from.restoreLine = 0;
+        from.missing = from.changedOnDisk = NO;
+        from.layout = layout; from.hasLayout = hadLayout;   // the layout the reader chose stays
+        [self reloadViewerOf:from];
+        if (anchor.length) [from.markup.markdownView scrollToAnchor:anchor];
+        [self stateChanged];
+        if (self.onActivate) self.onActivate(from.path);
+        return;
+    }
     if (_active.preview) { _active.preview = NO; [self reloadTabs]; }
     Doc *d = [self openPath:p mode:ViewerAuto preview:NO focus:YES];
     if (anchor.length) [d.markup.markdownView scrollToAnchor:anchor];
+}
+
+// Only a rendered markup tab navigates in place: that is where links are clicked, and replacing
+// anything else (a terminal, a spreadsheet with its own edits) would lose state.
+- (BOOL)canNavigateInPlace:(Doc *)d {
+    if (!d.markup) return NO;
+    return !(d.savable && d.savable.isDirty);
+}
+
+// Unlike docForPath:inPane:, this looks in every column: a file open anywhere is shown there
+// instead of replacing the tab the link was clicked in.
+- (Doc *)docForPathInAnyPane:(NSString *)p {
+    for (Doc *d in _docs) if (!d.untitled && [d.path isEqualToString:p]) return d;
+    return nil;
 }
 
 // Temporary message in the status bar; the normal status comes back on the next change.

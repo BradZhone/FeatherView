@@ -20,6 +20,9 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 @property (nonatomic, readonly) NSArray<NSString *> *openPaths;     // untitled tabs: their backup file
 @property (nonatomic, readonly) NSUInteger tabCount, dirtyCount;
 @property (nonatomic) BOOL previewEnabled;                     // VSCode-style preview tab (default YES)
+// A link clicked in a rendered preview navigates the same tab (default) instead of opening its
+// own. A tab with unsaved edits is never replaced: that link opens a tab of its own regardless.
+@property (nonatomic) BOOL followsLinksInPlace;
 @property (nonatomic) BOOL showsMinimap;                       // applies to every open editor (default YES)
 - (void)redrawEditors;                                           // after a drawing setting changed
 @property (nonatomic) BOOL wordWrap;                           // applies to every open editor (default NO)

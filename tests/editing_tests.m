@@ -1387,6 +1387,146 @@ static BOOL tabIsPreview(ContentController *cc, NSString *path) {
     return NO;
 }
 
+// Clicking a link in a rendered preview: checked, the tab becomes the linked file; unchecked, the
+// link gets its own tab. Unsaved work is never replaced.
+static void inPlaceLinks(ContentController *cc, NSWindow *window, NSString *dir) {
+    [cc closeAllWithoutAsking];
+    NSString *hub = [dir stringByAppendingPathComponent:@"hub.md"];
+    NSString *one = [dir stringByAppendingPathComponent:@"one.md"];
+    NSString *two = [dir stringByAppendingPathComponent:@"two.md"];
+    [@"# Hub\n\n[one](one.md)\n\n[two](two.md)\n" writeToFile:hub atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [@"# One\n\n[two](two.md)\n\n[back](hub.md)\n" writeToFile:one atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [@"# Two\n\n[back](hub.md)\n" writeToFile:two atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    CHECK(cc.followsLinksInPlace, "following links in place is on by default");
+
+    // Checked: one tab, whatever the chain of links.
+    [cc openPath:hub preview:NO focus:YES layout:MarkupPreview];
+    [window.contentView layoutSubtreeIfNeeded];
+    MarkupContainer *markup = nil;
+    for (id doc in [cc valueForKey:@"_docs"]) markup = [doc valueForKey:@"markup"];
+    CHECK(cc.tabCount == 1 && markup != nil, "the hub is the only tab");
+    [markup followHref:@"one.md"];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.tabCount == 1 && [cc.currentPath isEqualToString:one],
+          "a followed link replaces the tab (%lu tabs, %s)", (unsigned long)cc.tabCount, cc.currentPath.lastPathComponent.UTF8String);
+    MarkupContainer *afterHop = nil;
+    for (id doc in [cc valueForKey:@"_docs"]) afterHop = [doc valueForKey:@"markup"];
+    CHECK(afterHop != nil && afterHop.markupLayout == MarkupPreview, "it is still showing a rendered preview");
+    CHECK([afterHop.path isEqualToString:one], "the container knows its new path");
+    [afterHop followHref:@"two.md"];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.tabCount == 1 && [cc.currentPath isEqualToString:two], "a second hop still leaves one tab");
+
+    // A file already open elsewhere is shown there instead of replacing this tab.
+    [cc openPath:hub preview:NO focus:NO];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.tabCount == 2, "the hub is open in its own tab again (%lu)", (unsigned long)cc.tabCount);
+    [cc openPath:two preview:NO focus:YES];
+    MarkupContainer *onTwo = nil;
+    for (id doc in [cc valueForKey:@"_docs"])
+        if ([[doc valueForKey:@"path"] isEqualToString:two]) onTwo = [doc valueForKey:@"markup"];
+    [onTwo followHref:@"hub.md"];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.tabCount == 2 && [cc.currentPath isEqualToString:hub],
+          "a link to an already open file activates that tab (%lu tabs)", (unsigned long)cc.tabCount);
+
+    // Unsaved edits are never replaced: that link opens its own tab.
+    [cc closeAllWithoutAsking];
+    [cc openPath:hub preview:NO focus:YES layout:MarkupSplit];
+    [window.contentView layoutSubtreeIfNeeded];
+    cc.autoSaveMode = AutoSaveOff;
+    TextEditorView *editor = cc.editor;
+    CHECK(editor != nil, "the split layout gives the hub an editor");
+    [(id<NSTextInputClient>)editor insertText:@"edited" replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK(editor.isDirty, "the hub has unsaved edits");
+    for (id doc in [cc valueForKey:@"_docs"]) markup = [doc valueForKey:@"markup"];
+    [markup followHref:@"one.md"];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.tabCount == 2 && [cc.currentPath isEqualToString:one],
+          "a dirty tab is not replaced; the link opens its own tab (%lu)", (unsigned long)cc.tabCount);
+    BOOL hubStillThere = NO;
+    for (id doc in [cc valueForKey:@"_docs"]) if ([[doc valueForKey:@"path"] isEqualToString:hub]) hubStillThere = YES;
+    CHECK(hubStillThere, "and the unsaved document is still open");
+
+    // Unchecked: every link gets its own tab.
+    [cc closeAllWithoutAsking];
+    cc.followsLinksInPlace = NO;
+    [cc openPath:hub preview:NO focus:YES layout:MarkupPreview];
+    [window.contentView layoutSubtreeIfNeeded];
+    for (id doc in [cc valueForKey:@"_docs"]) markup = [doc valueForKey:@"markup"];
+    [markup followHref:@"one.md"];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.tabCount == 2 && [cc.currentPath isEqualToString:one],
+          "unchecked, a link opens a separate tab (%lu)", (unsigned long)cc.tabCount);
+    for (id doc in [cc valueForKey:@"_docs"])
+        if ([[doc valueForKey:@"path"] isEqualToString:one]) markup = [doc valueForKey:@"markup"];
+    [markup followHref:@"two.md"];
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(cc.tabCount == 3, "and each further link adds another (%lu)", (unsigned long)cc.tabCount);
+
+    // The checkbox in the strip drives the setting, and every column's box follows it.
+    cc.followsLinksInPlace = YES;
+    [cc closeAllWithoutAsking];
+    [cc openPath:hub preview:NO focus:YES layout:MarkupPreview];
+    [window.contentView layoutSubtreeIfNeeded];
+    FTSplitView *split = [cc valueForKey:@"_split"];
+    NSButton *box = nil;
+    for (NSView *v in ((NSView *)split.items.firstObject).subviews)
+        if ([v isKindOfClass:NSButton.class] && [[(NSButton *)v title] isEqualToString:FTL(@"Follow Links Here")])
+            box = (NSButton *)v;
+    CHECK(box != nil, "the checkbox is mounted in the column");
+    if (box) {
+        CHECK(!box.hidden && box.state == NSControlStateValueOn, "it shows, checked, for a rendered tab");
+        NSPoint mid = [box convertPoint:NSMakePoint(NSMidX(box.bounds), NSMidY(box.bounds)) toView:nil];
+        CHECK(rootHit(window, mid) == box, "a click at the checkbox reaches it through the window root");
+        [box performClick:nil];                 // a click toggles the box, then sends the action
+        CHECK(box.state == NSControlStateValueOff && !cc.followsLinksInPlace,
+              "unchecking it turns the setting off");
+        [box performClick:nil];
+        CHECK(box.state == NSControlStateValueOn && cc.followsLinksInPlace,
+              "checking it turns the setting back on");
+        for (NSButton *other in [cc valueForKey:@"_inPlaceBoxes"])
+            CHECK(other.state == NSControlStateValueOn, "every column's checkbox follows the setting");
+        // A narrowing column gives up the checkbox before the controls, and nothing may ever sit
+        // over the tab strip.
+        NSView *column = split.items.firstObject;
+        NSView *tabBar = editorBars(cc)[0];
+        NSButton *fsButton = nil;
+        NSSegmentedControl *layoutSwitch = nil;
+        for (NSView *v in column.subviews) {
+            if ([v isKindOfClass:NSSegmentedControl.class]) layoutSwitch = (NSSegmentedControl *)v;
+            else if ([v isKindOfClass:NSButton.class] && v != box) fsButton = (NSButton *)v;
+        }
+        NSRect wide = column.frame;
+        BOOL sawBoxDrop = NO;
+        for (CGFloat w = wide.size.width; w >= 200; w -= 30) {
+            // Resizing runs the pane's own layout through resizeSubviewsWithOldSize:.
+            [column setFrameSize:NSMakeSize(w, wide.size.height)];
+            if (!box.hidden) CHECK(!NSIntersectsRect(box.frame, tabBar.frame), "the checkbox never covers the tab strip at %.0fpt", w);
+            if (!fsButton.hidden) CHECK(!NSIntersectsRect(fsButton.frame, tabBar.frame), "the full-screen button never covers the tab strip at %.0fpt", w);
+            if (!layoutSwitch.hidden) CHECK(!NSIntersectsRect(layoutSwitch.frame, tabBar.frame), "the layout switch never covers the tab strip at %.0fpt", w);
+            if (box.hidden && !layoutSwitch.hidden) sawBoxDrop = YES;
+            if (!box.hidden) CHECK(!layoutSwitch.hidden, "the checkbox is never kept at the cost of the layout switch (%.0fpt)", w);
+        }
+        CHECK(sawBoxDrop, "a narrow column drops the checkbox while keeping the layout switch");
+        [column setFrameSize:wide.size];
+
+        // The choice is remembered: AppDelegate reads this key back as !linksOpenNewTab.
+        cc.followsLinksInPlace = NO;
+        CHECK([NSUserDefaults.standardUserDefaults boolForKey:@"linksOpenNewTab"],
+              "unchecking is written to defaults for the next launch");
+        cc.followsLinksInPlace = YES;
+        CHECK(![NSUserDefaults.standardUserDefaults boolForKey:@"linksOpenNewTab"],
+              "and checking it clears the key again");
+
+        [cc openPath:[dir stringByAppendingPathComponent:@"plain.txt"] preview:NO focus:YES];
+        [window.contentView layoutSubtreeIfNeeded];
+        CHECK(box.hidden, "a plain text tab hides the checkbox");
+    }
+    [cc closeAllWithoutAsking];
+}
+
 // Immersive preview: the rendered view alone fills the window, and everything it borrowed goes
 // back on the way out. The preview object itself must survive, so scroll position and a loaded
 // web page are kept.
@@ -1995,6 +2135,8 @@ static void splits(void) {
     CHECK(cc.paneCount == 1 && cc.tabCount == 0, "closing everything collapses to one column");
     commandWheelZoom(cc, sw, a);
     previewFullScreen(cc, sw, dir);
+    [@"plain\n" writeToFile:[dir stringByAppendingPathComponent:@"plain.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    inPlaceLinks(cc, sw, dir);
     drain(0.3);
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
 }
