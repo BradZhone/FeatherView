@@ -916,7 +916,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
     // file already open in some tab is shown there rather than duplicated.
     if (_followsLinksInPlace && from && !docDirty(from) && !from.untitled && !from.terminal &&
         ![self docForPathInAnyPane:p] && [self canNavigateInPlace:from]) {
-        MarkupLayout layout = from.markup ? from.markup.markupLayout : MarkupPreview;
+        MarkupLayout layout = from.markup.markupLayout;
         BOOL hadLayout = from.hasLayout;
         from.path = [p copy];
         from.mode = ViewerAuto;
@@ -926,8 +926,11 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
         from.restoreLine = 0;
         from.missing = from.changedOnDisk = NO;
         from.layout = layout; from.hasLayout = hadLayout;   // the layout the reader chose stays
-        [self reloadViewerOf:from];
+        // Swapping the document inside the existing views, rather than releasing the viewer and
+        // building another, is what keeps the window from flashing empty for a frame.
+        if (![self swapDocumentInPlace:from]) [self reloadViewerOf:from];
         if (anchor.length) [from.markup.markdownView scrollToAnchor:anchor];
+        [self reloadTabs];
         [self stateChanged];
         if (self.onActivate) self.onActivate(from.path);
         return;
@@ -942,6 +945,29 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
 - (BOOL)canNavigateInPlace:(Doc *)d {
     if (!d.markup) return NO;
     return !(d.savable && d.savable.isDirty);
+}
+
+// Loads d.path into the views the tab already has: a new buffer for its editor, the new path for
+// its container, then one re-render. The pane keeps the same content view throughout, so nothing
+// flashes. NO when the file needs different views (a .md link to a .html page, a missing file).
+- (BOOL)swapDocumentInPlace:(Doc *)d {
+    MarkupContainer *mc = d.markup;
+    if (!mc || !d.editor) return NO;
+    if (FKMarkupKind(d.path) != mc.kind) return NO;             // a different kind needs its own views
+    struct timespec mt = {0}; off_t sz = 0;
+    if (!statPath(d.path, &mt, &sz)) return NO;
+    NSStringEncoding enc = NSUTF8StringEncoding;
+    NSString *err = nil;
+    NSData *data = FKLoadTextAllowingNUL(d.path, &enc, NO, &err);
+    if (!data) return NO;
+    if (![d.editor loadData:data path:d.path encoding:enc]) return NO;
+    d.mtime = mt; d.size = sz;
+    d.lastEdit = d.editor.editCount;
+    mc.path = d.path;
+    [mc refreshNow];
+    // loadData: ran the editor's onChange, which is what fills in d.status.
+    if (d == _active) _status.stringValue = d.status ?: @"";
+    return YES;
 }
 
 // Unlike docForPath:inPane:, this looks in every column: a file open anywhere is shown there

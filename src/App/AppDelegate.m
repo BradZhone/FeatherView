@@ -255,6 +255,9 @@ static const CGFloat kSidebarW = 260;
 - (void)applySettings:(NSNotification *)n {
     FTSettings *st = FTSettings.shared;
     [AppDelegate applyAppearance:st.appearance];
+    // Text colours in a cached render are dynamic and follow the appearance, but rasterized
+    // images (an SVG drawn in currentColor) are baked, so those renders are dropped.
+    [MarkdownPreview clearRenderCache];
     _content.autoSaveMode = (AutoSaveMode)st.autoSaveMode;
     _content.showsMinimap = st.showsMinimap;
     _content.wordWrap = st.wordWrap;

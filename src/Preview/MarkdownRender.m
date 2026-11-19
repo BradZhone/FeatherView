@@ -44,6 +44,7 @@ static BOOL gRemoteImages = YES;
 - (NSArray<NSNumber *> *)mapLines { return _lines; }
 - (NSArray<NSNumber *> *)mapLocs { return _locs; }
 - (NSDictionary *)anchors { return _anchorMap; }
+- (BOOL)hasPendingImages { return _inflight.count > 0; }
 
 - (void)mark:(NSUInteger)line {
     NSUInteger loc = _out.length;

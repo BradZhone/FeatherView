@@ -63,6 +63,10 @@
 - (BOOL)save:(NSString **)error;
 - (BOOL)findString:(NSString *)s backward:(BOOL)backward;
 - (void)gotoLine:(NSUInteger)line;
+// Shows a different file in this same view: new buffer, path and highlighter, with every
+// per-document state (cursors, undo, folds, wrap, caches) reset. NO when the view has unsaved
+// edits, which must never be dropped. Saves rebuilding the viewer when a link is followed.
+- (BOOL)loadData:(NSData *)data path:(NSString *)path encoding:(NSStringEncoding)encoding;
 @end
 
 @interface TextEditorView (Search)

@@ -1387,6 +1387,53 @@ static BOOL tabIsPreview(ContentController *cc, NSString *path) {
     return NO;
 }
 
+// Rendered documents are cached so going back to one does not re-render it. The cache must never
+// serve the wrong text: edited content, a different width and a different zoom all re-render.
+static void renderCache(NSWindow *window, NSString *dir) {
+    NSString *path = [dir stringByAppendingPathComponent:@"cached.md"];
+    NSMutableString *md = [NSMutableString stringWithString:@"# Start\n\n## Target Heading\n\n"];
+    for (int i = 0; i < 120; i++) [md appendFormat:@"Paragraph %d with enough words to wrap a line of text.\n\n", i];
+    [md writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    [MarkdownPreview clearRenderCache];
+    MarkdownPreview *mp = [[MarkdownPreview alloc] initWithFrame:NSMakeRect(0, 0, 700, 500)];
+    [window.contentView addSubview:mp];
+    [window.contentView layoutSubtreeIfNeeded];
+
+    [mp setMarkdown:md baseDir:dir];
+    NSString *firstPass = [mp.textView.string copy];
+    CHECK(firstPass.length > 0 && [firstPass containsString:@"Target Heading"], "the document renders");
+    CHECK([mp scrollToAnchor:@"target-heading"], "its anchors work on a fresh render");
+
+    // Same input again: the cached render must be identical, anchors included.
+    [mp setMarkdown:md baseDir:dir];
+    CHECK([mp.textView.string isEqualToString:firstPass], "a cached render produces the same text");
+    CHECK([mp scrollToAnchor:@"target-heading"], "and the cached render keeps its anchors");
+
+    // Edited content is a different document, so it must not come from the cache.
+    NSMutableString *edited = [md mutableCopy];
+    [edited appendString:@"\n## Added Later\n\nnew paragraph\n"];
+    [mp setMarkdown:edited baseDir:dir];
+    CHECK([mp.textView.string containsString:@"Added Later"], "edited text re-renders instead of being served stale");
+    CHECK([mp scrollToAnchor:@"added-later"], "the new heading is anchored");
+    [mp setMarkdown:md baseDir:dir];
+    CHECK(![mp.textView.string containsString:@"Added Later"], "and going back gives the earlier text, not the newer one");
+
+    // A different zoom re-flows the text, so it cannot reuse the entry rendered at 1.0.
+    CGFloat savedScale = MarkdownPreview.defaultScale;
+    mp.scale = 1.4;
+    NSString *big = [mp.textView.string copy];
+    NSFont *bigFont = [mp.textView.textStorage attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL];
+    mp.scale = 1.0;
+    NSFont *normalFont = [mp.textView.textStorage attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL];
+    CHECK(big.length > 0 && bigFont.pointSize > normalFont.pointSize + 0.5,
+          "a zoomed render is not served the unzoomed entry (%.1f vs %.1f)", bigFont.pointSize, normalFont.pointSize);
+    mp.scale = savedScale;
+
+    [mp removeFromSuperview];
+    [MarkdownPreview clearRenderCache];
+}
+
 // Clicking a link in a rendered preview: checked, the tab becomes the linked file; unchecked, the
 // link gets its own tab. Unsaved work is never replaced.
 static void inPlaceLinks(ContentController *cc, NSWindow *window, NSString *dir) {
@@ -1406,6 +1453,7 @@ static void inPlaceLinks(ContentController *cc, NSWindow *window, NSString *dir)
     MarkupContainer *markup = nil;
     for (id doc in [cc valueForKey:@"_docs"]) markup = [doc valueForKey:@"markup"];
     CHECK(cc.tabCount == 1 && markup != nil, "the hub is the only tab");
+    NSTextView *textView = markup.markdownView.textView;
     [markup followHref:@"one.md"];
     [window.contentView layoutSubtreeIfNeeded];
     CHECK(cc.tabCount == 1 && [cc.currentPath isEqualToString:one],
@@ -1414,6 +1462,14 @@ static void inPlaceLinks(ContentController *cc, NSWindow *window, NSString *dir)
     for (id doc in [cc valueForKey:@"_docs"]) afterHop = [doc valueForKey:@"markup"];
     CHECK(afterHop != nil && afterHop.markupLayout == MarkupPreview, "it is still showing a rendered preview");
     CHECK([afterHop.path isEqualToString:one], "the container knows its new path");
+    // Rebuilding the viewer left the column empty for a frame — the flash the reader saw. The
+    // document is swapped inside the views already on screen instead.
+    CHECK(afterHop == markup, "the jump reuses the container instead of building another");
+    CHECK(afterHop.superview != nil, "so the column is never left without its content view");
+    CHECK(textView != nil && afterHop.markdownView.textView == textView,
+          "the TextKit stack is reused as well, not rebuilt");
+    CHECK([textView.string containsString:@"One"] && ![textView.string containsString:@"Hub"],
+          "and it is showing the linked document, not the old one");
     [afterHop followHref:@"two.md"];
     [window.contentView layoutSubtreeIfNeeded];
     CHECK(cc.tabCount == 1 && [cc.currentPath isEqualToString:two], "a second hop still leaves one tab");
@@ -2136,6 +2192,7 @@ static void splits(void) {
     commandWheelZoom(cc, sw, a);
     previewFullScreen(cc, sw, dir);
     [@"plain\n" writeToFile:[dir stringByAppendingPathComponent:@"plain.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    renderCache(sw, dir);
     inPlaceLinks(cc, sw, dir);
     drain(0.3);
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];

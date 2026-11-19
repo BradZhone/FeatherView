@@ -12,4 +12,6 @@
 // From the last render: block start positions (source line → character index), heading anchors.
 @property (nonatomic, readonly) NSArray<NSNumber *> *mapLines, *mapLocs;
 @property (nonatomic, readonly) NSDictionary<NSString *, NSNumber *> *anchors;
+// A remote image is still on its way, so this render will be replaced and must not be cached.
+@property (nonatomic, readonly) BOOL hasPendingImages;
 @end

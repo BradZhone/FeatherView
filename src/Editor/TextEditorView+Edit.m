@@ -442,6 +442,50 @@ static BOOL writeAll(int fd, const void *p, size_t n) {
     return YES;
 }
 
+// Reuses this view for another file. Everything derived from the old document goes: cursors, undo
+// history, folds, the wrap table, and the caches keyed by edit count. Refusing while dirty keeps
+// the caller from silently dropping edits.
+- (BOOL)loadData:(NSData *)data path:(NSString *)path encoding:(NSStringEncoding)encoding {
+    if (!data || !path.length || self.isDirty) return NO;
+    [self clearFolds];
+    CGFloat top = [self beginBulkEdit];
+    _buf = [[PieceTable alloc] initWithData:data];
+    _path = [path copy];
+    _encoding = encoding;
+    _hl = [Highlighter highlighterForPath:path];
+
+    _caret = _anchor = 0;
+    _desiredX = -1;
+    _extra = nil;
+    _cursorHistory = nil;
+    _occurrenceSels = nil;
+    _expandStack = nil;
+    _expandLast = nil;
+    _autoClosed = nil;
+    _killed = nil;
+    _markedText = nil;
+    _markedSel = NSMakeRange(NSNotFound, 0);
+    [_undo removeAllObjects];
+    [_redo removeAllObjects];
+    _serial = _savedSerial = 0;
+    _coalesceBroken = YES;
+    _editCount++;
+    _bracketValid = NO;
+    _uindex = nil;
+    _uindexEdit = 0;
+    [_mapCache removeAllObjects];
+    _mapCacheEdit = 0;
+    _widestLine = 0;
+
+    [self endBulkEdit:0];
+    (void)top;                           // the new document starts at its own top, not the old line
+    self.scrollY = 0;
+    self.scrollX = 0;
+    [self notifyChange];
+    self.needsDisplay = YES;
+    return YES;
+}
+
 - (BOOL)save:(NSString **)error {
     NSString *real = _path.stringByResolvingSymlinksInPath;
     // The file is replaced by a rename, which only needs a writable folder: check the file itself first.

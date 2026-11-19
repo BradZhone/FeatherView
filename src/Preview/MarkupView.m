@@ -80,6 +80,16 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
 
 @end
 
+// One rendered document: the attributed string plus the maps that scrolling and anchors read off
+// the renderer afterwards. Caching the string alone would break "jump to this heading".
+@interface MDRendered : NSObject
+@property (nonatomic, copy) NSString *source;    // checked on a hit: a hash alone could collide
+@property (nonatomic, strong) NSAttributedString *text;
+@property (nonatomic, copy) NSArray<NSNumber *> *mapLines, *mapLocs;
+@property (nonatomic, copy) NSDictionary<NSString *, NSNumber *> *anchors;
+@end
+@implementation MDRendered @end
+
 @implementation MarkdownPreview {
     NSTextStorage *_storage;                 // the text view does not own its storage
     NSScrollView *_scroll;
@@ -87,7 +97,28 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
     NSString *_source, *_dir;
     CGFloat _renderedWidth;
     BOOL _rerenderQueued, _initialPositionPending;
+    MDRendered *_shown;                      // serves mapLines/anchors when a cached render is used
 }
+
+// Rendering dominates a link jump (~80% of it), and following links back and forth re-renders
+// documents that have not changed. Keyed by source, base directory, width and scale, because all
+// four change the output. NSCache gives it back under memory pressure.
+static NSCache *renderCache(void) {
+    static NSCache *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSCache new];
+        cache.countLimit = 8;                // a few documents' worth of back-and-forth
+    });
+    return cache;
+}
+
+static NSString *renderKey(NSString *source, NSString *dir, CGFloat width, CGFloat scale) {
+    return [NSString stringWithFormat:@"%lu|%lu|%.0f|%.3f|%@", (unsigned long)source.length,
+            (unsigned long)source.hash, width, scale, dir ?: @""];
+}
+
++ (void)clearRenderCache { [renderCache() removeAllObjects]; }
 
 - (instancetype)initWithFrame:(NSRect)f {
     if (!(self = [super initWithFrame:f])) return nil;
@@ -188,8 +219,27 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
     _renderedWidth = self.contentWidth;
     _renderer.baseDir = _dir;
     _renderer.maxImageWidth = MIN(_renderedWidth, 840);
-    NSAttributedString *a = [_renderer render:MDParse(_source)];
-    if (fabs(_scale - 1) > 0.01) a = scaled(a, _scale);
+    NSString *key = renderKey(_source, _dir, _renderedWidth, _scale);
+    MDRendered *hit = [renderCache() objectForKey:key];
+    if (hit && ![hit.source isEqualToString:_source]) hit = nil;      // hash collision: render it
+    NSAttributedString *a;
+    if (hit) {
+        a = hit.text;
+        _shown = hit;
+    } else {
+        a = [_renderer render:MDParse(_source)];
+        if (fabs(_scale - 1) > 0.01) a = scaled(a, _scale);
+        MDRendered *fresh = [MDRendered new];
+        fresh.source = _source;
+        fresh.text = a;
+        fresh.mapLines = _renderer.mapLines;
+        fresh.mapLocs = _renderer.mapLocs;
+        fresh.anchors = _renderer.anchors;
+        _shown = fresh;
+        // A document still waiting for remote images re-renders when they arrive; caching it now
+        // would pin the version with alt text in its place.
+        if (!_renderer.hasPendingImages) [renderCache() setObject:fresh forKey:key];
+    }
     NSPoint keep = _scroll.contentView.bounds.origin;
     [_textView.textStorage setAttributedString:a];
     // Replacing storage invalidates layout. Grow it before restoring the reading offset, otherwise
@@ -251,7 +301,9 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k) {
 }
 
 - (void)scrollToSourceLine:(CGFloat)line {
-    NSArray<NSNumber *> *L = _renderer.mapLines, *C = _renderer.mapLocs;
+    // From the render that is actually on screen, which may have come from the cache.
+    NSArray<NSNumber *> *L = _shown ? _shown.mapLines : _renderer.mapLines;
+    NSArray<NSNumber *> *C = _shown ? _shown.mapLocs : _renderer.mapLocs;
     if (!L.count) return;
     [self cancelInitialPosition];
     NSInteger lo = 0, hi = (NSInteger)L.count - 1;
@@ -269,7 +321,8 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k) {
 
 - (BOOL)scrollToAnchor:(NSString *)slug {
     NSString *s = (slug.stringByRemovingPercentEncoding ?: slug).lowercaseString;
-    NSNumber *loc = _renderer.anchors[s] ?: _renderer.anchors[MDSlug(s)];
+    NSDictionary<NSString *, NSNumber *> *map = _shown ? _shown.anchors : _renderer.anchors;
+    NSNumber *loc = map[s] ?: map[MDSlug(s)];
     if (!loc) return NO;
     [self cancelInitialPosition];
     [_textView scrollPoint:NSMakePoint(0, MAX(0, [self yForLocation:loc.unsignedIntegerValue] - 12))];
