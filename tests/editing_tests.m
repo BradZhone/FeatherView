@@ -1410,6 +1410,29 @@ static void renderCache(NSWindow *window, NSString *dir) {
     CHECK([mp.textView.string isEqualToString:firstPass], "a cached render produces the same text");
     CHECK([mp scrollToAnchor:@"target-heading"], "and the cached render keeps its anchors");
 
+    // A different document starts at its top. The offset is kept across a re-render of the same
+    // document, and on a shorter document AppKit clamps it — which left readers in mid-page.
+    NSMutableString *shorter = [NSMutableString stringWithString:@"# Shorter\n\nonly a few lines\n\nand no more\n"];
+    [mp setMarkdown:md baseDir:dir];
+    [mp scrollToPosition:900];
+    drain(0.05);
+    CHECK(mp.scrollPosition > 600, "the long document is scrolled well down (%.0f)", mp.scrollPosition);
+    [mp prepareForNewDocument];
+    [mp setMarkdown:shorter baseDir:dir];
+    drain(0.05);
+    CHECK(mp.scrollPosition < 40, "a shorter document opens at its top, not clamped to its middle (%.0f)",
+          mp.scrollPosition);
+
+    // The same document re-rendered (an edit, a zoom, an image arriving) keeps its place.
+    [mp setMarkdown:md baseDir:dir];
+    [mp scrollToPosition:900];
+    drain(0.05);
+    CGFloat held = mp.scrollPosition;
+    [mp setMarkdown:md baseDir:dir];
+    drain(0.05);
+    CHECK(fabs(mp.scrollPosition - held) < 40,
+          "re-rendering the same document keeps the reading position (%.0f, was %.0f)", mp.scrollPosition, held);
+
     // Edited content is a different document, so it must not come from the cache.
     NSMutableString *edited = [md mutableCopy];
     [edited appendString:@"\n## Added Later\n\nnew paragraph\n"];

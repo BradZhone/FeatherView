@@ -212,6 +212,14 @@ static NSString *renderKey(NSString *source, NSString *dir, CGFloat width, CGFlo
     [self render];
 }
 
+// About to show a different file in this view: start it at its top rather than at the offset the
+// previous document was left at. Also covered in render by comparing the rendered source, so a
+// caller that forgets this still behaves; this just makes the intent explicit at the call site.
+- (void)prepareForNewDocument {
+    _initialPositionPending = YES;
+    [_textView scrollPoint:NSZeroPoint];
+}
+
 - (void)render {
     _rerenderQueued = NO;
     if (!_source) return;
@@ -240,7 +248,10 @@ static NSString *renderKey(NSString *source, NSString *dir, CGFloat width, CGFlo
         // would pin the version with alt text in its place.
         if (!_renderer.hasPendingImages) [renderCache() setObject:fresh forKey:key];
     }
-    NSPoint keep = _scroll.contentView.bounds.origin;
+    // The reading offset is kept across a re-render of the same document — an edit, a zoom, an
+    // image arriving — which is what it exists for. A different document starts at its top:
+    // on a shorter one AppKit clamps the old offset and the reader lands in its middle.
+    NSPoint keep = _initialPositionPending ? NSZeroPoint : _scroll.contentView.bounds.origin;
     [_textView.textStorage setAttributedString:a];
     // Replacing storage invalidates layout. Grow it before restoring the reading offset, otherwise
     // AppKit may clamp the old offset against a temporarily short document (images/zoom do this too).
@@ -248,7 +259,7 @@ static NSString *renderKey(NSString *source, NSString *dir, CGFloat width, CGFlo
         MAX(_scroll.contentSize.height, keep.y + _scroll.contentSize.height)) inTextContainer:_textView.textContainer];
     [_textView sizeToFit];
     [_textView scrollPoint:keep];
-    if (_initialPositionPending) self.needsLayout = YES;
+    if (_initialPositionPending) { self.needsLayout = YES; [self applyInitialPositionIfNeeded]; }
 }
 
 // Text zoom: scales fonts, indents and spacing so the text re-flows; images keep their size.
@@ -302,9 +313,20 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k) {
 
 - (CGFloat)scrollPosition { return _scroll.contentView.bounds.origin.y; }
 
+// Going to the top of a freshly shown document is the job the pending-initial-position machinery
+// already does: it waits for a real viewport and for the document to have its height, which a
+// scrollPoint: right after a re-render does not have (the offset is clamped against a document
+// that is still short, and the next layout pass leaves it part-way down).
+- (void)scrollToTopWhenLaidOut {
+    _initialPositionPending = YES;
+    [_textView scrollPoint:NSZeroPoint];
+    self.needsLayout = YES;
+    [self applyInitialPositionIfNeeded];
+}
+
 // Lays out far enough down to make the offset reachable, then goes there.
 - (void)scrollToPosition:(CGFloat)y {
-    if (y <= 0) { [_textView scrollPoint:NSZeroPoint]; return; }
+    if (y <= 0) { [self scrollToTopWhenLaidOut]; return; }
     [self cancelInitialPosition];
     [_textView.layoutManager ensureLayoutForBoundingRect:NSMakeRect(0, 0, _textView.bounds.size.width,
         y + _scroll.contentSize.height) inTextContainer:_textView.textContainer];

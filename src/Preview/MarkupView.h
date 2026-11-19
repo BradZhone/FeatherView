@@ -15,6 +15,9 @@
 @property (nonatomic) CGFloat scale;                       // text size, 1 = normal; re-flows, images unchanged
 @property (class, nonatomic) CGFloat defaultScale;
 - (void)setMarkdown:(NSString *)source baseDir:(NSString *)dir;
+// Say so before showing a different file in this view: the reading offset is otherwise preserved
+// across the re-render (right for an edit), which lands the reader mid-way down the new document.
+- (void)prepareForNewDocument;
 // Rendered documents are kept so following links back and forth does not re-render them.
 + (void)clearRenderCache;                      // tests, and when the appearance changes
 // One fresh-open top, once mounted and TextKit has a usable viewport. Navigation takes precedence.

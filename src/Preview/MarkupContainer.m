@@ -297,7 +297,11 @@ static NSString *absolute(NSString *p) {
 }
 
 - (void)setPath:(NSString *)p {
+    BOOL different = _path.length && ![_path isEqualToString:p];
     _path = [p copy];
+    // A rename leaves the same text on screen, so its reading position is still meaningful. A
+    // link jump replaces the document, and the old position must not be carried into it.
+    if (different) [self.markdownView prepareForNewDocument];
     if (self.htmlView) { self.htmlView.path = p; [self.htmlView reload]; }
 }
 
