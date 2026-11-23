@@ -28,6 +28,22 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
     [super scrollRangeToVisible:range];
 }
 
+// The first line of the page and the top of the page are the same place to a reader: the margin
+// above it belongs to it. AppKit disagrees — re-flowing a text view in a scroll view makes it
+// reveal the line at the insertion point (-_setFrameSize:forceScroll:), flush to the top edge, and
+// a tab opened side by side showed its heading jammed against the divider with the margin scrolled
+// away. A reveal that reaches into the first line is taken to the top of the document instead.
+- (BOOL)scrollRectToVisible:(NSRect)rect {
+    NSLayoutManager *lm = self.layoutManager;
+    if (lm.numberOfGlyphs) {
+        NSRect first = [lm lineFragmentRectForGlyphAtIndex:0 effectiveRange:NULL];
+        // Moved up to the top rather than grown to reach it: a rect taller than the viewport would
+        // have AppKit show its bottom edge, which is further down than what was asked for.
+        if (NSMinY(rect) <= NSMaxY(first) + self.textContainerOrigin.y) rect.origin.y = 0;
+    }
+    return [super scrollRectToVisible:rect];
+}
+
 - (void)scrollWheel:(NSEvent *)event {
     if (self.onNavigate) self.onNavigate();
     [super scrollWheel:event];
@@ -340,6 +356,11 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k) {
     NSArray<NSNumber *> *L = _shown ? _shown.mapLines : _renderer.mapLines;
     NSArray<NSNumber *> *C = _shown ? _shown.mapLocs : _renderer.mapLocs;
     if (!L.count) return;
+    // An editor at its first line means the top of the document, margin included. Going to that
+    // line's own y instead left a freshly opened side-by-side tab 34 points down, with its heading
+    // against the top edge — and cancelled the pending top before the view had a window, so the
+    // position that was meant to be applied once there was a viewport never was.
+    if (line <= 0) { [self scrollToTopWhenLaidOut]; return; }
     [self cancelInitialPosition];
     NSInteger lo = 0, hi = (NSInteger)L.count - 1;
     while (lo < hi) { NSInteger mid = (lo + hi + 1) / 2; if (L[mid].doubleValue <= line) lo = mid; else hi = mid - 1; }

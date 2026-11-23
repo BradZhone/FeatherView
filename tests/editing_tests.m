@@ -1650,8 +1650,61 @@ static void linkHistory(ContentController *cc, NSWindow *window, NSString *dir) 
     [cc closeAllWithoutAsking];
 }
 
-// Clicking a link in a rendered preview: checked, the tab becomes the linked file; unchecked, the
-// link gets its own tab. Unsaved work is never replaced.
+// A document opened side by side starts at its top, margin included. Two things used to move it
+// down: the preview being synced to the editor's first line (which scrolled to that line's own y,
+// 8 points above it, and cancelled the pending top before the view had a window), and AppKit
+// revealing the insertion point's line flush to the top edge after the re-flow into the column.
+static void sideBySideStartsAtTop(ContentController *cc, NSWindow *window, NSString *dir) {
+    [cc closeAllWithoutAsking];
+    NSString *path = [dir stringByAppendingPathComponent:@"top.md"];
+    NSMutableString *md = [NSMutableString stringWithString:@"# Heading\n\n"];
+    for (int i = 0; i < 300; i++) [md appendFormat:@"Paragraph %d with enough words to take a line or two.\n\n", i];
+    [md writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    [cc openPath:path preview:NO focus:YES layout:MarkupSplit];
+    [window.contentView layoutSubtreeIfNeeded];
+    MarkupContainer *mc = nil;
+    for (id doc in [cc valueForKey:@"_docs"]) mc = [doc valueForKey:@"markup"];
+    MarkdownPreview *mp = mc.markdownView;
+    CHECK(mp != nil && mc.markupLayout == MarkupSplit, "the document is side by side with its source");
+    CHECK(mc.editor.topVisibleLine == 0, "its editor is at the first line");
+    drain(0.1);
+    [window.contentView layoutSubtreeIfNeeded];
+    CHECK(mp.scrollPosition == 0, "a fresh side-by-side tab starts at the very top (%.1f)", mp.scrollPosition);
+
+    // The reader scrolls the preview itself: that must survive the layout passes and a resize,
+    // which is what sending it to the top on every first-line sync would have broken.
+    [mp.textView scrollPoint:NSMakePoint(0, 600)];
+    mp.needsLayout = YES;
+    [mp layoutSubtreeIfNeeded];
+    [window.contentView layoutSubtreeIfNeeded];
+    drain(0.1);
+    CHECK(mp.scrollPosition > 100, "the reader's own scroll is left alone (%.1f)", mp.scrollPosition);
+
+    // Scrolling the source still drives the preview, in both directions.
+    [mc.editor gotoLine:150];
+    [mc editorScrolled];
+    CHECK(mp.scrollPosition > 100, "the preview follows the source down (%.1f)", mp.scrollPosition);
+    [mc.editor gotoLine:1];
+    [mc editorScrolled];
+    CHECK(mp.scrollPosition == 0, "and back at the first line it shows the top, margin included (%.1f)", mp.scrollPosition);
+
+    // AppKit reveals the insertion point's line after a re-flow, which only happens for real in an
+    // on-screen window. What it calls is tested directly: a reveal of the first line must take the
+    // margin above it along, and one further down must be left as asked.
+    [mp.textView scrollPoint:NSMakePoint(0, 900)];
+    NSLayoutManager *lm = mp.textView.layoutManager;
+    NSRect firstLine = [lm lineFragmentRectForGlyphAtIndex:0 effectiveRange:NULL];
+    CGFloat inset = mp.textView.textContainerOrigin.y;
+    [mp.textView scrollRectToVisible:NSMakeRect(0, NSMinY(firstLine) + inset, 100, mp.bounds.size.height)];
+    CHECK(mp.scrollPosition == 0, "revealing the first line shows the top of the page (%.1f)", mp.scrollPosition);
+    [mp.textView scrollPoint:NSZeroPoint];
+    CGFloat farDown = MAX(0, mp.textView.bounds.size.height - mp.bounds.size.height - 50);
+    [mp.textView scrollRectToVisible:NSMakeRect(0, farDown, 100, 20)];
+    CHECK(mp.scrollPosition > 100, "a reveal further down is left alone (%.1f)", mp.scrollPosition);
+    [cc closeAllWithoutAsking];
+}
+
 // Selecting in the rendered view is as much a selection as one in the editor, and the status bar
 // reports it. The whole document's character count is shown in every layout.
 static void previewSelectionCount(ContentController *cc, NSWindow *window, NSString *dir) {
@@ -1740,6 +1793,8 @@ static void previewSelectionCount(ContentController *cc, NSWindow *window, NSStr
     [cc closeAllWithoutAsking];
 }
 
+// Clicking a link in a rendered preview: checked, the tab becomes the linked file; unchecked, the
+// link gets its own tab. Unsaved work is never replaced.
 static void inPlaceLinks(ContentController *cc, NSWindow *window, NSString *dir) {
     [cc closeAllWithoutAsking];
     NSString *hub = [dir stringByAppendingPathComponent:@"hub.md"];
@@ -2497,6 +2552,7 @@ static void splits(void) {
     previewFullScreen(cc, sw, dir);
     [@"plain\n" writeToFile:[dir stringByAppendingPathComponent:@"plain.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     renderCache(sw, dir);
+    sideBySideStartsAtTop(cc, sw, dir);
     previewSelectionCount(cc, sw, dir);
     inPlaceLinks(cc, sw, dir);
     linkHistory(cc, sw, dir);
