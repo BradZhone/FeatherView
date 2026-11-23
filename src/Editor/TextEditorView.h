@@ -13,7 +13,15 @@
 @property (nonatomic, copy) void (^onChange)(void);      // caret / content / dirty changed
 
 - (NSString *)statusText;
+// For a document shown next to its rendered view: characters selected there are the selection the
+// reader made and can see, so they are reported instead of this view's own. 0 means they selected
+// nothing there, and this view's own selection is reported.
+- (NSString *)statusTextWithPreviewSelection:(NSUInteger)chars;
 - (NSUInteger)caretLine;          // 1-based
+// Characters, not bytes: "中" counts once. The whole text, and what the selections cover (every
+// cursor's, added up).
+@property (nonatomic, readonly) NSUInteger characterCount;
+@property (nonatomic, readonly) NSUInteger selectedCharacterCount;
 @property (nonatomic) BOOL showsMinimap;
 @property (nonatomic) BOOL wordWrap;                     // soft wrap at the view's width (off for very large files)
 @property (nonatomic, readonly) BOOL wrapsLines;         // wrapping is actually in effect

@@ -15,10 +15,24 @@
 static int failures = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
 
+// Characters a byte range covers, straight from the reference bytes.
+static NSUInteger refChars(NSData *ref, NSRange r) {
+    const uint8_t *b = ref.bytes;
+    NSUInteger c = 0;
+    for (NSUInteger i = r.location; i < NSMaxRange(r) && i < ref.length; i++) c += (b[i] & 0xC0) != 0x80;
+    return c;
+}
+
 static void verify(PieceTable *pt, NSData *ref, int step) {
     CHECK(pt.length == ref.length, "step %d length %lu vs %lu", step, pt.length, ref.length);
     NSData *all = [pt dataInRange:NSMakeRange(0, pt.length)];
     CHECK([all isEqualToData:ref], "step %d content mismatch", step);
+    NSUInteger chars = refChars(ref, NSMakeRange(0, ref.length));
+    CHECK(pt.characterCount == chars, "step %d characterCount %lu vs %lu", step, pt.characterCount, chars);
+    for (NSUInteger k = 0; k < ref.length; k += 11) {
+        NSRange r = NSMakeRange(k, MIN((NSUInteger)17, ref.length - k));
+        CHECK([pt characterCountInRange:r] == refChars(ref, r), "step %d characterCountInRange(%lu,%lu)", step, r.location, r.length);
+    }
     const uint8_t *b = ref.bytes;
     NSUInteger lines = 1;
     for (NSUInteger i = 0; i < ref.length; i++) if (b[i] == '\n') {
@@ -42,7 +56,9 @@ static void fuzz(void) {
             NSUInteger at = ref.length ? random() % (ref.length + 1) : 0;
             NSUInteger n = 1 + random() % 6;
             uint8_t buf[8];
-            for (NSUInteger i = 0; i < n; i++) buf[i] = alphabet[random() % strlen(alphabet)];
+            // every so often a multi-byte character, so deletions keep cutting through one
+            if (random() % 8 == 0) { memcpy(buf, "中😀", 7); n = 7; }
+            else for (NSUInteger i = 0; i < n; i++) buf[i] = alphabet[random() % strlen(alphabet)];
             [pt insertBytes:buf length:n at:at];
             [ref replaceBytesInRange:NSMakeRange(at, 0) withBytes:buf length:n];
         } else {
@@ -71,7 +87,8 @@ static void batchFuzz(void) {
             NSUInteger loc = at + (room ? random() % (room / (n - k) + 1) : 0);
             NSUInteger rem = loc < len && random() % 2 ? random() % MIN((NSUInteger)4, len - loc + 1) : 0;
             NSUInteger ins = random() % 3 ? random() % 6 : 0;
-            for (NSUInteger j = 0; j < ins; j++) bytes[k][j] = alphabet[random() % strlen(alphabet)];
+            if (ins >= 3 && random() % 6 == 0) { memcpy(bytes[k], "中", 3); ins = 3; }   // characters to cut through
+            else for (NSUInteger j = 0; j < ins; j++) bytes[k][j] = alphabet[random() % strlen(alphabet)];
             e[k] = (PTEdit){loc, rem, bytes[k], ins};
             at = loc + rem;
         }
@@ -115,6 +132,31 @@ static void search(void) {
     CHECK([pt find:[@"zzz" dataUsingEncoding:NSUTF8StringEncoding] from:0 backward:NO] == NSNotFound, "absent");
     CHECK([pt findExact:n from:0] == 14 && [pt findExact:n from:15] == 14, "exact find skips other cases and wraps");
     CHECK([pt findExact:[@"TWO" dataUsingEncoding:NSUTF8StringEncoding] from:0] == 18, "exact find");
+}
+
+// Characters, not bytes: what the status bar shows for the whole text and for a selection.
+static void characterCounts(void) {
+    NSData *d = [@"ab中文😀\n" dataUsingEncoding:NSUTF8StringEncoding];
+    PieceTable *pt = [[PieceTable alloc] initWithData:d];
+    CHECK(pt.length == 13 && pt.characterCount == 6, "6 characters in 13 bytes (%lu in %lu)", pt.characterCount, pt.length);
+    CHECK([pt characterCountInRange:NSMakeRange(0, 13)] == 6, "the whole range");
+    CHECK([pt characterCountInRange:NSMakeRange(2, 6)] == 2, "“中文” is two characters");
+    CHECK([pt characterCountInRange:NSMakeRange(0, 0)] == 0 && [pt characterCountInRange:NSMakeRange(99, 3)] == 0, "empty and out of range");
+    CHECK([pt characterCountInRange:NSMakeRange(3, 4)] == 1, "a range starting inside a character skips it");
+
+    [pt insertBytes:(const uint8_t *)"哈" length:3 at:0];
+    CHECK(pt.characterCount == 7, "insert adds one character for three bytes (%lu)", pt.characterCount);
+    [pt deleteRange:NSMakeRange(0, 3)];
+    CHECK(pt.characterCount == 6, "delete takes it back (%lu)", pt.characterCount);
+    [pt deleteRange:NSMakeRange(2, 4)];                        // "中" and the first byte of "文"
+    CHECK(pt.characterCount == 4 && pt.length == 9, "a cut through a character leaves its continuation bytes uncounted (%lu in %lu)", pt.characterCount, pt.length);
+
+    PieceTable *b = [[PieceTable alloc] initWithData:[@"一二三" dataUsingEncoding:NSUTF8StringEncoding]];
+    PTEdit e[] = {{0, 3, (const uint8_t *)"x", 1}, {6, 3, (const uint8_t *)"中文", 6}};
+    [b applyEdits:e count:2];
+    CHECK(b.characterCount == 4, "a batch of edits (multiple cursors) keeps the count (%lu)", b.characterCount);
+    PieceTable *empty = [[PieceTable alloc] initWithData:nil];
+    CHECK(empty.characterCount == 0 && [empty characterCountInRange:NSMakeRange(0, 1)] == 0, "empty buffer");
 }
 
 static void crlf(void) {
@@ -646,7 +688,7 @@ static void docTypesNeverTakeOver(void) {
 int main(void) {
     @autoreleasepool {
         docTypesNeverTakeOver();
-        fuzz(); batchFuzz(); search(); crlf(); utf8(); guessKindByContent(); fuzzy();
+        fuzz(); batchFuzz(); search(); crlf(); characterCounts(); utf8(); guessKindByContent(); fuzzy();
         NSString *root = makeTree();
         walker(root);
         workspaceSearch(root, NO);

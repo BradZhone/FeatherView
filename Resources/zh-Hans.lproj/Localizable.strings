@@ -4,8 +4,8 @@
 "\nContents searched with the built-in scanner" = "\n内容由内置扫描器搜索";
 "\nWildcards match file names only" = "\n通配符只匹配文件名";
 "\n… (output truncated)" = "\n… （输出太长，已截断）";
-"   %lu byte selected" = "   已选 %lu 字节";
-"   %lu bytes selected" = "   已选 %lu 字节";
+"   %@ character selected" = "   已选 %@ 个字符";
+"   %@ characters selected" = "   已选 %@ 个字符";
 "   %lu frames%@" = "   %lu 帧%@";
 "   Encrypted" = "   已加密";
 "   Large file, not wrapped" = "   文件较大，未自动换行";
@@ -29,6 +29,8 @@
 "%@\nClick to switch workspaces" = "%@\n点击切换工作区";
 "%@   New document · ⌘S to choose where to save%@" = "%@   未保存的新文档 · ⌘S 选择保存位置%@";
 "%@ and %lu more" = "%@ 以及另外 %lu 个";
+"%@ character" = "%@ 个字符";
+"%@ characters" = "%@ 个字符";
 "%@ node" = "%@ 个节点";
 "%@ nodes" = "%@ 个节点";
 "%@ of %@ rows" = "%@ / %@ 行";
@@ -201,7 +203,7 @@
 "Light" = "浅色";
 "Line %lu, column %lu: %@" = "第 %lu 行第 %lu 列：%@";
 "Linked file not found: %@" = "链接的文件不存在：%@";
-"Ln %lu, Col %lu   %@   %@" = "行 %lu，列 %lu   %@   %@";
+"Ln %lu, Col %lu   %@   %@   %@" = "行 %lu，列 %lu   %@   %@   %@";
 "macOS refused this change" = "macOS 拒绝了这个更改";
 "macOS ties .html to the default web browser, so another app can’t become its default. You can still open HTML files in FeatherView directly." = "macOS 把 .html 交给默认浏览器管理，编辑器设置不了。可以在 FeatherView 里直接打开 HTML 文件。";
 "Malformed" = "格式错误";
@@ -451,6 +453,8 @@
 /* Multiple cursors and line commands (Selection menu) */
 "   %lu selection" = "   %lu 个选区";
 "   %lu selections" = "   %lu 个选区";
+", %@ character selected" = "，已选 %@ 个字符";
+", %@ characters selected" = "，已选 %@ 个字符";
 "Selection" = "选择";
 "Add Cursor Above" = "在上方添加光标";
 "Add Cursor Below" = "在下方添加光标";

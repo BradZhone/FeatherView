@@ -161,6 +161,12 @@ static NSString *absolute(NSString *p) {
 - (MarkdownPreview *)markdownView { return [_preview isKindOfClass:MarkdownPreview.class] ? (MarkdownPreview *)_preview : nil; }
 - (HTMLPreview *)htmlView { return [_preview isKindOfClass:HTMLPreview.class] ? (HTMLPreview *)_preview : nil; }
 
+// Only while the rendered view is on screen: a background tab's preview is released, and in the
+// source layout the editor's own selection is the one the status bar reports.
+- (NSUInteger)previewSelectedCharacterCount {
+    return _markupLayout == MarkupSource ? 0 : self.markdownView.selectedCharacterCount;
+}
+
 - (void)setMarkupLayout:(MarkupLayout)l {
     if (l == _markupLayout && _built) return;
     _markupLayout = l;
@@ -177,6 +183,7 @@ static NSString *absolute(NSString *p) {
     if (self.rendersAsMarkdown) {
         MarkdownPreview *m = [[MarkdownPreview alloc] initWithFrame:self.bounds];
         m.onLink = ^(NSString *href) { [weakSelf followHref:href]; };
+        m.onSelectionChange = ^{ MarkupContainer *me = weakSelf; if (me.onSelectionChange) me.onSelectionChange(); };
         return m;
     }
     HTMLPreview *h = [[HTMLPreview alloc] initWithFrame:self.bounds path:_path root:_root];

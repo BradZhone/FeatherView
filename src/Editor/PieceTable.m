@@ -2,6 +2,15 @@
 
 typedef struct { uint8_t src; NSUInteger start, len; } Piece;   // src 0 = original, 1 = add
 
+// Characters in a run of UTF-8: every byte that is not a continuation byte starts one. Counting per
+// byte means a run cut mid-character contributes exactly the characters that start inside it, which
+// is what keeps the running total right across any insertion or removal.
+static NSUInteger countChars(const uint8_t *b, NSUInteger n) {
+    NSUInteger c = 0;
+    for (NSUInteger i = 0; i < n; i++) c += ((b[i] & 0xC0) != 0x80);
+    return c;
+}
+
 @implementation PieceTable {
     NSData *_orig;
     NSMutableData *_add;
@@ -34,6 +43,7 @@ typedef struct { uint8_t src; NSUInteger start, len; } Piece;   // src 0 = origi
         p++;
         [self pushLine:(uint32_t)(p - b)];
     }
+    _characterCount = countChars(b, _length);
     return self;
 }
 
@@ -125,6 +135,24 @@ typedef struct { uint8_t src; NSUInteger start, len; } Piece;   // src 0 = origi
     return d;
 }
 
+// Walks the pieces in place: a selection of the whole buffer costs nothing, any other one is counted
+// without copying its bytes out.
+- (NSUInteger)characterCountInRange:(NSRange)r {
+    if (r.location >= _length || !r.length) return 0;
+    NSUInteger want = MIN(r.length, _length - r.location);
+    if (r.location == 0 && want == _length) return _characterCount;
+    NSUInteger chars = 0, done = 0, s;
+    NSUInteger i = [self pieceAt:r.location start:&s];
+    NSUInteger inPiece = r.location - s;
+    while (done < want && i < _count) {
+        Piece p = _pieces[i];
+        NSUInteger n = MIN(p.len - inPiece, want - done);
+        chars += countChars([self bytesOf:p] + inPiece, n);
+        done += n; inPiece = 0; i++;
+    }
+    return chars;
+}
+
 - (void)ensurePieceCap:(NSUInteger)extra {
     if (_count + extra <= _cap) return;
     while (_count + extra > _cap) _cap *= 2;
@@ -178,6 +206,7 @@ typedef struct { uint8_t src; NSUInteger start, len; } Piece;   // src 0 = origi
         _lineCount += nl;
     }
     _length += n;
+    _characterCount += countChars(ins, n);
     _cacheIdx = _cacheStart = 0;
     _startsValid = NO;
 }
@@ -186,6 +215,7 @@ typedef struct { uint8_t src; NSUInteger start, len; } Piece;   // src 0 = origi
     if (r.location >= _length || !r.length) return;
     r.length = MIN(r.length, _length - r.location);
     NSUInteger a = r.location, b = NSMaxRange(r);
+    NSUInteger goneChars = [self characterCountInRange:r];      // while the pieces still hold them
 
     Piece *out = malloc((_count + 1) * sizeof(Piece));
     NSUInteger oc = 0, s = 0;
@@ -209,6 +239,7 @@ typedef struct { uint8_t src; NSUInteger start, len; } Piece;   // src 0 = origi
     memmove(&_lines[first], &_lines[last], (_lineCount - last) * sizeof(uint32_t));
     _lineCount -= removed;
     _length -= r.length;
+    _characterCount -= goneChars;
     _cacheIdx = _cacheStart = 0;
     _startsValid = NO;
 }
@@ -228,6 +259,13 @@ static inline void putPiece(Piece *out, NSUInteger *n, Piece p) {
         if (e.inserted) [self insertBytes:e.bytes length:e.inserted at:e.location];
         return;
     }
+    // characters, while the pieces still hold the text being replaced; the edits don't overlap
+    NSInteger charDelta = 0;
+    for (NSUInteger k = 0; k < count; k++) {
+        charDelta += (NSInteger)countChars(edits[k].bytes, edits[k].inserted);
+        charDelta -= (NSInteger)[self characterCountInRange:NSMakeRange(edits[k].location, edits[k].removed)];
+    }
+
     // pieces: copy the kept stretches, drop the removed ones, add one piece per insertion
     NSUInteger addBase = _add.length, nlIns = 0;
     for (NSUInteger k = 0; k < count; k++) {
@@ -274,6 +312,7 @@ static inline void putPiece(Piece *out, NSUInteger *n, Piece p) {
     free(_lines);
     _lines = lines; _lineCount = w; _lineCap = MAX(cap, (NSUInteger)1024);
     _length = (NSUInteger)((NSInteger)_length + delta);
+    _characterCount = (NSUInteger)((NSInteger)_characterCount + charDelta);
     _cacheIdx = _cacheStart = 0;
     _startsValid = NO;
 }

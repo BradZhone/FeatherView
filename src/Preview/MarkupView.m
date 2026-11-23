@@ -97,6 +97,7 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k);
     NSString *_source, *_dir;
     CGFloat _renderedWidth;
     BOOL _rerenderQueued, _initialPositionPending;
+    NSUInteger _reportedSelection;           // what onSelectionChange last reported
     MDRendered *_shown;                      // serves mapLines/anchors when a cached render is used
 }
 
@@ -368,6 +369,36 @@ static NSAttributedString *scaled(NSAttributedString *src, CGFloat k) {
     if ([href hasPrefix:@"#"]) { if (![self scrollToAnchor:[href substringFromIndex:1]]) NSBeep(); return YES; }
     if (self.onLink) self.onLink(href);
     return YES;
+}
+
+// UTF-16 units are what the text view deals in; a character outside the BMP ("😀", a rare CJK one)
+// takes two of them and counts once. Copied out in blocks rather than read unit by unit, so
+// selecting a whole long document stays cheap.
+- (NSUInteger)selectedCharacterCount {
+    NSString *s = _textView.string;
+    NSUInteger chars = 0, len = s.length;
+    unichar buf[1024];
+    for (NSValue *v in _textView.selectedRanges) {
+        NSRange sel = v.rangeValue;
+        if (sel.location >= len) continue;
+        sel.length = MIN(sel.length, len - sel.location);
+        for (NSUInteger at = 0; at < sel.length; at += sizeof buf / sizeof *buf) {
+            NSUInteger n = MIN(sizeof buf / sizeof *buf, sel.length - at);
+            [s getCharacters:buf range:NSMakeRange(sel.location + at, n)];
+            for (NSUInteger i = 0; i < n; i++) chars += !CFStringIsSurrogateLowCharacter(buf[i]);
+        }
+    }
+    return chars;
+}
+
+// Rendering replaces the text storage, and TextKit reports that as a selection change even though
+// the reader selected nothing. Only a change in what is selected is passed on, so a status message
+// isn't wiped by a re-render and no keystroke recomposes the status bar twice.
+- (void)textViewDidChangeSelection:(NSNotification *)note {
+    NSUInteger chars = self.selectedCharacterCount;
+    if (chars == _reportedSelection) return;
+    _reportedSelection = chars;
+    if (self.onSelectionChange) self.onSelectionChange();
 }
 
 - (BOOL)isAccessibilityElement { return NO; }

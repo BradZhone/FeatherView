@@ -13,6 +13,12 @@ typedef struct { NSUInteger location, removed; const uint8_t *bytes; NSUInteger 
 @property (nonatomic, readonly) NSUInteger lineCount;
 @property (nonatomic, readonly) BOOL usesCRLF;
 
+// Characters rather than bytes: one per Unicode scalar of the UTF-8 contents ("中" is one, not three).
+// Every edit keeps it up to date, so the status bar can show it on each keystroke without a walk.
+@property (nonatomic, readonly) NSUInteger characterCount;
+// The same count over a byte range (a selection). A range that starts inside a character skips it.
+- (NSUInteger)characterCountInRange:(NSRange)range;
+
 - (NSUInteger)lineStart:(NSUInteger)line;
 // End of line content, excluding "\n" / "\r\n".
 - (NSUInteger)lineEnd:(NSUInteger)line;

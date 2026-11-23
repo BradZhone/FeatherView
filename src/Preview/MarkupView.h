@@ -15,6 +15,10 @@
 @property (nonatomic) CGFloat scale;                       // text size, 1 = normal; re-flows, images unchanged
 @property (class, nonatomic) CGFloat defaultScale;
 - (void)setMarkdown:(NSString *)source baseDir:(NSString *)dir;
+// What the reader has selected in the rendered text, in characters (Unicode scalars). The rendered
+// text is what is counted: no "##", but the bullet a list item is drawn with.
+@property (nonatomic, readonly) NSUInteger selectedCharacterCount;
+@property (nonatomic, copy) void (^onSelectionChange)(void);     // so the status bar can show the count
 // Say so before showing a different file in this view: the reading offset is otherwise preserved
 // across the re-render (right for an edit), which lands the reader mid-way down the new document.
 - (void)prepareForNewDocument;
@@ -57,6 +61,9 @@
 @property (nonatomic, copy) void (^onOpenFile)(NSString *path, NSString *anchor);
 @property (nonatomic, copy) void (^onMessage)(NSString *message);   // e.g. link target missing
 @property (nonatomic, copy) void (^onLayoutChange)(MarkupLayout layout); // the container switched itself (jump to source)
+@property (nonatomic, copy) void (^onSelectionChange)(void);            // text selected in the rendered view
+// Characters selected in the rendered view, 0 when there is no such view or nothing is selected.
+@property (nonatomic, readonly) NSUInteger previewSelectedCharacterCount;
 - (BOOL)focusPreviewFilter;  // table / tree: ⌘F goes to their filter box
 - (NSView *)focusView;
 - (void)textChanged;        // debounced live re-render (Markdown)

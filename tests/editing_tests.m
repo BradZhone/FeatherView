@@ -720,6 +720,66 @@ static void manyCursors(void) {
            t1 - t0, t2 - t1, t3 - t2, t4 - t3);
 }
 
+// The status bar counts characters, not bytes: for the whole text and for what is selected.
+static void characterCounts(void) {
+    TextEditorView *ed = editor(@"|ab中文😀\n", nil);
+    CHECK(ed.characterCount == 6 && ed->_buf.length == 13, "6 characters in 13 bytes (%lu in %lu)",
+          (unsigned long)ed.characterCount, (unsigned long)ed->_buf.length);
+    CHECK([ed.statusText containsString:@"6 characters"], "the whole text is counted: %s", ed.statusText.UTF8String);
+    CHECK(ed.selectedCharacterCount == 0 && ![ed.statusText containsString:@"selected"], "nothing selected, nothing said");
+
+    // a drag selection over "中文😀"
+    ed = editor(@"ab[中文😀|]\n", nil);
+    CHECK(ed.selectedCharacterCount == 3, "three characters selected (%lu)", (unsigned long)ed.selectedCharacterCount);
+    CHECK([ed.statusText containsString:@"3 characters selected"], "and shown: %s", ed.statusText.UTF8String);
+    [ed moveLeft:nil];
+    CHECK(ed.selectedCharacterCount == 0 && ![ed.statusText containsString:@"selected"], "dropping the selection drops the count");
+
+    ed = editor(@"[a|]bc\n", nil);
+    CHECK([ed.statusText containsString:@"1 character selected"], "singular: %s", ed.statusText.UTF8String);
+
+    // every cursor's selection adds up
+    ed = editor(@"[ab|]\n[中文|]\n[x|]", nil);
+    CHECK(ed.cursorCount == 3 && ed.selectedCharacterCount == 5, "three selections, five characters (%lu)",
+          (unsigned long)ed.selectedCharacterCount);
+    CHECK([ed.statusText containsString:@"3 selections"] && [ed.statusText containsString:@"5 characters selected"],
+          "both are shown: %s", ed.statusText.UTF8String);
+    ed = editor(@"a|b\nc|d", nil);
+    CHECK([ed.statusText containsString:@"2 selections"] && ![ed.statusText containsString:@"selected"],
+          "carets without selections only count as cursors: %s", ed.statusText.UTF8String);
+
+    // typing keeps the total right
+    ed = editor(@"|abc", nil);
+    type(ed, @"中");
+    CHECK(ed.characterCount == 4 && [ed.statusText containsString:@"4 characters"], "typing a character: %s", ed.statusText.UTF8String);
+    [ed deleteBackward:nil];
+    CHECK(ed.characterCount == 3, "backspace takes it back (%lu)", (unsigned long)ed.characterCount);
+    [ed selectAll:nil];
+    [ed deleteBackward:nil];
+    CHECK(ed.characterCount == 0 && ed.selectedCharacterCount == 0 && [ed.statusText containsString:@"0 characters"],
+          "an empty document: %s", ed.statusText.UTF8String);
+
+    // grouped, and cheap on a large selection on every keystroke
+    NSMutableString *t = [NSMutableString stringWithString:@"|"];
+    for (int i = 0; i < 40000; i++) [t appendString:@"一二三四五六七八九十\n"];
+    ed = editor(t, nil);
+    CHECK(ed.characterCount == 440000 && [ed.statusText containsString:@"440,000 characters"], "grouped: %s",
+          [ed.statusText substringToIndex:MIN((NSUInteger)60, ed.statusText.length)].UTF8String);
+    [ed selectAll:nil];
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    for (int i = 0; i < 200; i++) (void)ed.statusText;
+    double whole = (CFAbsoluteTimeGetCurrent() - t0) * 1000 / 200;
+    CHECK(ed.selectedCharacterCount == 440000, "⌘A selects every character (%lu)", (unsigned long)ed.selectedCharacterCount);
+    // one character short of everything, so the count is walked rather than taken from the buffer's own
+    [ed moveLeftAndModifySelection:nil];
+    t0 = CFAbsoluteTimeGetCurrent();
+    for (int i = 0; i < 200; i++) (void)ed.statusText;
+    double part = (CFAbsoluteTimeGetCurrent() - t0) * 1000 / 200;
+    CHECK(ed.selectedCharacterCount == 439999 && whole < 0.1 && part < 2,
+          "a 1.3 MB selection stays cheap on every keystroke (whole %.3f ms, partial %.3f ms)", whole, part);
+    printf("   status bar, 440,000 characters selected: %.3f ms (⌘A) / %.3f ms (partial)\n", whole, part);
+}
+
 int main(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
@@ -746,6 +806,7 @@ int main(void) {
             expandSelection();
             guidesAndWhitespace();
             wrapFuzz();
+            characterCounts();
             manyCursors();
         } @catch (NSException *exception) {
             CHECK(NO, "uncaught %s: %s", exception.name.UTF8String, exception.reason.UTF8String);
@@ -1591,6 +1652,94 @@ static void linkHistory(ContentController *cc, NSWindow *window, NSString *dir) 
 
 // Clicking a link in a rendered preview: checked, the tab becomes the linked file; unchecked, the
 // link gets its own tab. Unsaved work is never replaced.
+// Selecting in the rendered view is as much a selection as one in the editor, and the status bar
+// reports it. The whole document's character count is shown in every layout.
+static void previewSelectionCount(ContentController *cc, NSWindow *window, NSString *dir) {
+    [cc closeAllWithoutAsking];
+    NSString *path = [dir stringByAppendingPathComponent:@"counted.md"];
+    [@"# 标题\n\n一二三四五，abcde。\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [cc openPath:path preview:NO focus:YES layout:MarkupPreview];
+    [window.contentView layoutSubtreeIfNeeded];
+    MarkupContainer *markup = nil;
+    for (id doc in [cc valueForKey:@"_docs"]) markup = [doc valueForKey:@"markup"];
+    NSTextView *tv = markup.markdownView.textView;
+    CHECK(tv != nil && markup.markupLayout == MarkupPreview, "the document is showing its rendered view");
+    // 19 characters in 37 bytes: the count never follows the byte size
+    CHECK([cc.statusText containsString:@"19 characters"] && [cc.statusText containsString:@"37 bytes"],
+          "the source's character count is shown in preview layout: %s", cc.statusText.UTF8String);
+    CHECK(![cc.statusText containsString:@"selected"], "nothing is selected yet: %s", cc.statusText.UTF8String);
+
+    // what a drag over the rendered text reaches the status bar as
+    NSUInteger at = [tv.string rangeOfString:@"一二三"].location;
+    CHECK(at != NSNotFound, "the rendered text contains the paragraph");
+    [tv setSelectedRange:NSMakeRange(at, 3)];
+    CHECK(markup.previewSelectedCharacterCount == 3, "three characters selected in the preview (%lu)",
+          (unsigned long)markup.previewSelectedCharacterCount);
+    CHECK([cc.statusText containsString:@"3 characters selected"], "and the status bar says so: %s", cc.statusText.UTF8String);
+    [tv setSelectedRange:NSMakeRange(at, 0)];
+    CHECK(![cc.statusText containsString:@"selected"], "deselecting clears it: %s", cc.statusText.UTF8String);
+
+    // an astral character is one, not two UTF-16 units
+    NSString *emoji = [dir stringByAppendingPathComponent:@"emoji.md"];
+    [@"😀😀 ok\n" writeToFile:emoji atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [cc openPath:emoji preview:NO focus:YES layout:MarkupPreview];
+    [window.contentView layoutSubtreeIfNeeded];
+    for (id doc in [cc valueForKey:@"_docs"])
+        if ([[doc valueForKey:@"path"] isEqualToString:emoji]) markup = [doc valueForKey:@"markup"];
+    NSTextView *etv = markup.markdownView.textView;
+    [etv setSelectedRange:NSMakeRange(0, 4)];                      // two emoji, four UTF-16 units
+    CHECK(markup.previewSelectedCharacterCount == 2, "two emoji count as two characters (%lu)",
+          (unsigned long)markup.previewSelectedCharacterCount);
+
+    // side by side: the editor's own selection is reported while the preview has none
+    [cc closeAllWithoutAsking];
+    [cc openPath:path preview:NO focus:YES layout:MarkupSplit];
+    [window.contentView layoutSubtreeIfNeeded];
+    for (id doc in [cc valueForKey:@"_docs"]) markup = [doc valueForKey:@"markup"];
+    TextEditorView *ed = cc.editor;
+    CHECK(ed != nil, "the split layout has an editor");
+    [ed moveRightAndModifySelection:nil];
+    [ed moveRightAndModifySelection:nil];
+    CHECK([cc.statusText containsString:@"2 characters selected"], "the editor's selection is reported: %s", cc.statusText.UTF8String);
+    NSUInteger where = [markup.markdownView.textView.string rangeOfString:@"abcde"].location;
+    [markup.markdownView.textView setSelectedRange:NSMakeRange(where, 5)];
+    CHECK([cc.statusText containsString:@"5 characters selected"],
+          "a selection in the rendered view takes over, instead of showing two counts: %s", cc.statusText.UTF8String);
+
+    // Dragging over a long document re-counts on every selection change: it has to stay cheap.
+    NSString *big = [dir stringByAppendingPathComponent:@"big.md"];
+    NSMutableString *md = [NSMutableString string];
+    for (int i = 0; i < 20000; i++) [md appendString:@"一二三四五六七八九十 and some plain words too\n\n"];
+    [md writeToFile:big atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [cc openPath:big preview:NO focus:YES layout:MarkupPreview];
+    [window.contentView layoutSubtreeIfNeeded];
+    for (id doc in [cc valueForKey:@"_docs"])
+        if ([[doc valueForKey:@"path"] isEqualToString:big]) markup = [doc valueForKey:@"markup"];
+    NSTextView *btv = markup.markdownView.textView;
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    for (int i = 0; i < 50; i++) [btv setSelectedRange:NSMakeRange(0, btv.string.length - i)];
+    double each = (CFAbsoluteTimeGetCurrent() - t0) * 1000 / 50;
+    CHECK(markup.previewSelectedCharacterCount > 500000 && each < 5,
+          "a whole 880,000-character preview selected: %.2f ms per change", each);
+    printf("   preview selection of %lu characters: %.2f ms per change\n",
+           (unsigned long)markup.previewSelectedCharacterCount, each);
+    [cc closeAllWithoutAsking];
+    [cc openPath:path preview:NO focus:YES layout:MarkupSplit];
+    [window.contentView layoutSubtreeIfNeeded];
+    for (id doc in [cc valueForKey:@"_docs"]) markup = [doc valueForKey:@"markup"];
+
+    // A render replaces the text storage, and TextKit reports that as a selection change. Taking it
+    // for the reader selecting something wiped the warning a missing link had just put up.
+    [markup.markdownView.textView setSelectedRange:NSMakeRange(0, 0)];
+    [markup followHref:@"nope.md"];
+    CHECK([cc.statusText containsString:@"nope.md"], "a missing link target is reported: %s", cc.statusText.UTF8String);
+    [markup refreshNow];
+    [markup.markdownView displayIfNeeded];
+    drain(0.1);
+    CHECK([cc.statusText containsString:@"nope.md"], "and a re-render leaves that message alone: %s", cc.statusText.UTF8String);
+    [cc closeAllWithoutAsking];
+}
+
 static void inPlaceLinks(ContentController *cc, NSWindow *window, NSString *dir) {
     [cc closeAllWithoutAsking];
     NSString *hub = [dir stringByAppendingPathComponent:@"hub.md"];
@@ -2348,6 +2497,7 @@ static void splits(void) {
     previewFullScreen(cc, sw, dir);
     [@"plain\n" writeToFile:[dir stringByAppendingPathComponent:@"plain.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     renderCache(sw, dir);
+    previewSelectionCount(cc, sw, dir);
     inPlaceLinks(cc, sw, dir);
     linkHistory(cc, sw, dir);
     drain(0.3);

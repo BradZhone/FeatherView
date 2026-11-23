@@ -1,10 +1,11 @@
 #import "TextEditorView+Private.h"
 #import "FileKind.h"
 #import "Localization.h"
+#import "DataPreviews.h"             // FTGrouped, for the character count in the status bar
 
 @implementation TextEditorView
 @synthesize path = _path, encoding = _encoding;
-@dynamic cursorCount, pasteboard;
+@dynamic cursorCount, pasteboard, selectedCharacterCount;
 
 static CGFloat gDefaultFontSize = 13;
 + (CGFloat)defaultFontSize { return gDefaultFontSize; }
@@ -461,16 +462,28 @@ static inline BOOL wordUnit(unichar c) { return c >= 0x80 || c == '_' || (c >= '
 
 - (NSUInteger)caretLine { return [_buf lineForOffset:_caret] + 1; }
 
-- (NSString *)statusText {
+- (NSUInteger)characterCount { return _buf.characterCount; }
+
+- (NSString *)statusText { return [self statusTextWithPreviewSelection:0]; }
+
+- (NSString *)statusTextWithPreviewSelection:(NSUInteger)inPreview {
     NSUInteger L = [_buf lineForOffset:_caret];
     NSUInteger col = [self utf16Index:_caret inLine:L] + 1;
     NSString *enc = FKEncodingName(_encoding);
-    NSMutableString *s = [NSMutableString stringWithFormat:FTL(@"Ln %lu, Col %lu   %@   %@"),
-                          (unsigned long)L + 1, (unsigned long)col, enc, _buf.usesCRLF ? @"CRLF" : @"LF"];
-    NSRange sel = self.selection;
-    NSUInteger n = self.cursorCount;
-    if (n > 1) [s appendFormat:FTLP(n, @"   %lu selection", @"   %lu selections"), (unsigned long)n];
-    else if (sel.length) [s appendFormat:FTLP(sel.length, @"   %lu byte selected", @"   %lu bytes selected"), (unsigned long)sel.length];
+    NSUInteger total = _buf.characterCount;
+    NSString *chars = [NSString stringWithFormat:FTLP(total, @"%@ character", @"%@ characters"), FTGrouped(total)];
+    NSMutableString *s = [NSMutableString stringWithFormat:FTL(@"Ln %lu, Col %lu   %@   %@   %@"),
+                          (unsigned long)L + 1, (unsigned long)col, chars, enc, _buf.usesCRLF ? @"CRLF" : @"LF"];
+    // Several cursors are an editor-only thing: when the rendered view holds the selection, that one
+    // count is what the reader is looking at.
+    NSUInteger n = inPreview ? 1 : self.cursorCount;
+    NSUInteger selChars = inPreview ?: self.selectedCharacterCount;
+    if (n > 1) {
+        [s appendFormat:FTLP(n, @"   %lu selection", @"   %lu selections"), (unsigned long)n];
+        if (selChars) [s appendFormat:FTLP(selChars, @", %@ character selected", @", %@ characters selected"), FTGrouped(selChars)];
+    } else if (selChars) {
+        [s appendFormat:FTLP(selChars, @"   %@ character selected", @"   %@ characters selected"), FTGrouped(selChars)];
+    }
     if (self.wrapLimited) [s appendString:FTL(@"   Large file, not wrapped")];
     return s;
 }

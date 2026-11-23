@@ -916,8 +916,9 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
         BOOL dirty = e.isDirty;
         NSString *warn = doc.saveError ? [@"   ⚠️ " stringByAppendingString:doc.saveError]
                        : doc.changedOnDisk ? FTL(@"   ⚠️ Changed on disk") : @"";
-        doc.status = doc.untitled ? [NSString stringWithFormat:FTL(@"%@   New document · ⌘S to choose where to save%@"), e.statusText, warn]
-                                  : [NSString stringWithFormat:@"%@   %@%@", e.statusText, sizeString(doc.size), warn];
+        NSString *status = [e statusTextWithPreviewSelection:doc.markup.previewSelectedCharacterCount];
+        doc.status = doc.untitled ? [NSString stringWithFormat:FTL(@"%@   New document · ⌘S to choose where to save%@"), status, warn]
+                                  : [NSString stringWithFormat:@"%@   %@%@", status, sizeString(doc.size), warn];
         if (doc == me->_active) me->_status.stringValue = doc.status;
         if (e.editCount != doc.lastEdit) {             // content changed (not just the caret)
             doc.lastEdit = e.editCount;
@@ -938,6 +939,7 @@ static BOOL docDirty(Doc *d) { return d.untitled ? untitledHasText(d) : d.savabl
         MarkupContainer *mc = [[MarkupContainer alloc] initWithEditor:ed kind:mk path:d.path root:_workspaceRoot];
         mc.onOpenFile = ^(NSString *p, NSString *anchor) { [weakSelf openLinkedFile:p anchor:anchor]; };
         mc.onMessage = ^(NSString *msg) { [weakSelf flashStatus:msg]; };
+        mc.onSelectionChange = ^{ if (weakEd.onChange) weakEd.onChange(); };   // recompose the status line
         mc.onLayoutChange = ^(MarkupLayout l) {
             ContentController *me = weakSelf; Doc *doc = weakDoc;
             if (!me || !doc) return;

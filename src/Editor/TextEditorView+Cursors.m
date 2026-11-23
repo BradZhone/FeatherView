@@ -24,6 +24,14 @@ static int byStart(const void *x, const void *y) {
 
 - (NSUInteger)cursorCount { return 1 + _extra.length / sizeof(Sel); }
 
+// Every cursor's selection added up; the cursors never overlap, so nothing is counted twice.
+- (NSUInteger)selectedCharacterCount {
+    NSUInteger chars = [_buf characterCountInRange:self.selection], n = _extra.length / sizeof(Sel);
+    const Sel *x = _extra.bytes;
+    for (NSUInteger i = 0; i < n; i++) chars += [_buf characterCountInRange:SelRange(x[i])];
+    return chars;
+}
+
 - (NSMutableData *)cursors:(NSUInteger *)primary {
     NSUInteger n = _extra.length / sizeof(Sel);
     NSMutableData *out = [NSMutableData dataWithLength:(n + 1) * sizeof(Sel)];
