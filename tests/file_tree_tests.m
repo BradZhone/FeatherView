@@ -389,7 +389,9 @@ static void shortcutsSurvived(void) {
         {@selector(splitEditor:), @"\\", NSEventModifierFlagCommand},
         {@selector(showFind:), @"f", NSEventModifierFlagCommand},
         {@selector(searchWorkspace:), @"f", NSEventModifierFlagCommand | NSEventModifierFlagShift},
-        {@selector(showFilesTab:), @"e", NSEventModifierFlagCommand | NSEventModifierFlagShift},
+        // ⌃⌘1, not ⇧⌘E: that one is the floating workspace's system-wide hot key, which stays
+        // claimed while this app is in front too, so no menu item may share it.
+        {@selector(showFilesTab:), @"1", NSEventModifierFlagCommand | NSEventModifierFlagControl},
         {@selector(toggleMaximizeSplit:), @"m", NSEventModifierFlagCommand | NSEventModifierFlagControl},
         // ⌃⌘ arrows, not plain ⌘ ones: those move the caret in the source editor.
         {@selector(goBackAction:), [NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey],

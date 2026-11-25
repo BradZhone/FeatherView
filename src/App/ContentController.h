@@ -52,6 +52,9 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 - (NSDictionary *)sessionState;
 - (void)restoreSession:(NSDictionary *)state;
 - (void)checkExternalChanges;
+// Is this file open here with edits not yet written out? The floating workspace asks before showing
+// a file from disk, which would otherwise present older text as if it were the file.
+- (BOOL)hasUnsavedEditsForPath:(NSString *)path;
 
 // Untitled documents (⌘N): "未命名-N" tabs whose text lives in a backup file until the user saves it somewhere.
 // They stay with the workspace (switching away or quitting keeps them, nothing is asked); only closing such a

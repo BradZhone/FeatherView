@@ -25,6 +25,7 @@
 " · Working…" = " · 处理中…";
 " × %@ column" = " × %@ 列";
 " × %@ columns" = " × %@ 列";
+"%@ (missing)" = "%@（已不存在）";
 "%2$@ in %1$@%3$@" = "%1$@中 %2$@%3$@";
 "%@\nClick to switch workspaces" = "%@\n点击切换工作区";
 "%@   New document · ⌘S to choose where to save%@" = "%@   未保存的新文档 · ⌘S 选择保存位置%@";
@@ -71,6 +72,7 @@
 "All" = "全部";
 "Always hide:" = "始终隐藏：";
 "An item with that name already exists" = "已存在同名项目";
+"Another app is already using that shortcut." = "这个快捷键已被其他应用占用。";
 "Appearance" = "外观";
 "Apply" = "应用";
 "Archive   " = "压缩包   ";
@@ -92,7 +94,11 @@
 "Choose where to save. The extension sets the syntax highlighting, for example .md, .py or .json." = "选择保存位置。扩展名决定语法高亮，例如 .md、.py、.json。";
 "Clear List" = "清除列表";
 "Clicking a link replaces this tab instead of opening another one" = "点击链接时替换当前标签页，而不是新开一个";
+"Choose a Folder" = "选择文件夹";
+"Choose a Folder…" = "选择文件夹…";
 "Clear Recent List" = "清除最近列表";
+"Choose" = "选择";
+"Choose a file in the list" = "在左侧选择一个文件";
 "Close" = "关闭";
 "Close All" = "全部关闭";
 "Close All Tabs" = "关闭所有标签页";
@@ -123,6 +129,7 @@
 "Couldn’t create a temporary file in this folder" = "无法在该目录创建临时文件";
 "Couldn’t keep a backup: %@" = "无法暂存：%@";
 "Couldn’t Move to Trash" = "无法移到废纸篓";
+"Couldn’t save: %@" = "保存失败：%@";
 "Couldn’t read the file" = "无法读取文件";
 "Couldn’t read the property list: %@" = "无法解析属性列表：%@";
 "Couldn’t read this archive (it may be damaged or encrypted)" = "无法读取这个压缩包（可能已损坏或加密）";
@@ -138,6 +145,7 @@
 "Deleted" = "已删除";
 "Detect delimiter" = "自动识别分隔符";
 "done" = "已完成";
+"Discard" = "放弃";
 "Don’t Save" = "不保存";
 "Edit" = "编辑";
 "Editor" = "编辑器";
@@ -173,6 +181,10 @@
 "Fit to Window / Default Size" = "适合窗口 / 恢复默认大小";
 "Fit width " = "适合宽度 ";
 "Fit Width (⌘0)" = "适合宽度（⌘0）";
+"Floating Workspace (%@)" = "浮窗工作区（%@）";
+"Floating Workspace Folder" = "浮窗工作区文件夹";
+"Floating Workspace (%@ unavailable)" = "浮窗工作区（%@ 不可用）";
+"Floating Workspace" = "浮窗工作区";
 "Folder" = "文件夹";
 "folder" = "文件夹";
 "Follow Links Here" = "就地跳转";
@@ -196,6 +208,7 @@
 "Images" = "图片";
 "Invalid name" = "名称无效";
 "Invalid regular expression" = "正则表达式有误";
+"Its changes are lost if you don’t save them." = "不保存就会丢失所做的更改。";
 "Keep Open" = "保持打开";
 "Keep Open (Pin Preview Tab)" = "保持打开（固定预览标签页）";
 "Kind" = "类型";
@@ -241,6 +254,7 @@
 "Now: " = "现在：";
 "Off" = "关闭";
 "On Switching Files or Windows" = "切换文件或窗口时保存";
+"Open with unsaved changes in the main window; opened there instead" = "主窗口里有未保存的修改，已在主窗口打开";
 "Open" = "打开";
 "Open a folder first" = "先打开一个文件夹";
 "Open Another Folder…" = "打开其他文件夹…";
@@ -259,6 +273,7 @@
 "Permission denied" = "没有权限";
 "Pipe |" = "竖线 |";
 "Text and logs" = "纯文本、日志";
+"Preview" = "预览";
 "Preview (Markdown, Tables, JSON…)" = "预览（Markdown、表格、JSON…）";
 "Preview (⇧⌘V)" = "预览（⇧⌘V）";
 "Preview zoom %.0f%%" = "预览缩放 %.0f%%";
@@ -297,6 +312,7 @@
 "Rotate Page" = "旋转当前页";
 "Rotate Right" = "向右旋转";
 "Save" = "保存";
+"Save “%@” in the floating workspace?" = "保存浮窗里的“%@”？";
 "Save All" = "全部保存";
 "Save “%@”?" = "要保存“%@”吗？";
 "Save…" = "保存…";
@@ -320,6 +336,7 @@
 "Show hidden files (dot files and files hidden in Finder)" = "显示隐藏文件（以 . 开头的文件和访达中隐藏的文件）";
 "Show in Finder" = "在访达中显示";
 "Show in Source (Line %lu)" = "在源码中显示（第 %lu 行）";
+"Show in Finder" = "在访达中显示";
 "Show Minimap" = "显示小地图";
 "Show minimap" = "显示小地图";
 "Show Only Rows with This “%@”" = "只看“%@”是这个值的行";
@@ -357,6 +374,9 @@
 "The name is too long" = "名称太长";
 "The previous app for .%@ no longer exists; choose one in Finder’s Get Info window" = ".%@ 原来的打开方式已不存在，请在访达“显示简介”里另选";
 "The text can’t be saved in its original encoding" = "内容无法用原编码保存";
+"That combination can’t be used; include ⌘, ⌃ or ⌥." = "这个组合不能用，需要含 ⌘、⌃ 或 ⌥。";
+"That folder is no longer there" = "这个文件夹已不存在";
+"The folder the floating workspace shows" = "浮窗工作区显示的文件夹";
 "Theme:" = "主题：";
 "This document has never been saved. Its contents will be lost if you don’t save it." = "这是新建的文档，还没有存成文件。不保存的话内容会丢失。";
 "Thumbnails (⌥⌘T)" = "缩略图（⌥⌘T）";
@@ -455,11 +475,14 @@
 "   %lu selections" = "   %lu 个选区";
 ", %@ character selected" = "，已选 %@ 个字符";
 ", %@ characters selected" = "，已选 %@ 个字符";
+"A folder the floating workspace can show" = "浮窗工作区可以显示的文件夹";
 "Selection" = "选择";
+"Add Folder…" = "添加文件夹…";
 "Add Cursor Above" = "在上方添加光标";
 "Add Cursor Below" = "在下方添加光标";
 "Add Cursors to Line Ends" = "在行尾添加光标";
 "Add Next Occurrence" = "添加下一个匹配项";
+"Add…" = "添加…";
 "Move Last Selection to Next Occurrence" = "将最后一个选区移到下一个匹配项";
 "Select All Occurrences" = "选择所有匹配项";
 "Undo Cursor" = "撤销光标操作";
@@ -511,7 +534,17 @@
 "Terminal font size %.0f" = "终端字号 %.0f";
 "Clear" = "清屏";
 "ended" = "已结束";
+"Folders:" = "文件夹：";
+"Hide it as soon as it loses the keyboard" = "失去键盘焦点时立即隐藏";
 "The terminal could not be started" = "终端无法启动";
 
 /* Terminal panel controls */
 "Hide Terminal Panel" = "隐藏终端面板";
+"Hold ⌘, ⌃ or ⌥ as well." = "还需要按住 ⌘、⌃ 或 ⌥。";
+"Off: it stays up until you press the shortcut again or Esc." = "关闭时浮窗会一直显示，直到再次按快捷键或 Esc。";
+"Press a combination…" = "请按组合键…";
+"Remove" = "移除";
+"Shortcut:" = "快捷键：";
+"That combination can’t be used." = "这个组合不能用。";
+"The panel’s header switches between these. Double-click one to show it in Finder." = "浮窗顶部可以在这些文件夹之间切换。双击可在访达中显示。";
+"Works in any app, so it is taken from every other one. Click and press a combination; ⌫ clears it." = "在任何应用里都有效，因此会占用其他应用的这个组合。点击后按下组合键；⌫ 清除。";

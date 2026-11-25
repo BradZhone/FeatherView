@@ -83,6 +83,10 @@ static const CGFloat kSidebarW = 260;
         [self openRoot:root.stringByStandardizingPath];
     }
     [_content adoptUntitledBackups:self.orphanUntitledBackups];
+    // Built at launch, not on first use: its shortcut is a system-wide one and has to answer
+    // straight away, from whatever app is in front. The panel itself is cheap — no file tree is
+    // read until it has a folder, and no window is shown until it is asked for.
+    (void)self.floatPanel;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ [ArchivePreview removeStaleExtractions]; [DocumentPreview removeStaleRenderings]; });
     [self openPendingFiles];
     [_win makeKeyAndOrderFront:nil];
@@ -117,6 +121,36 @@ static const CGFloat kSidebarW = 260;
     [_pendingFiles removeAllObjects];
     for (NSString *p in files) [self openFile:p];
 }
+
+// Built on first use: someone who never opens it pays nothing, and no second file tree or watcher
+// exists until then.
+- (FloatPanel *)floatPanel {
+    if (_float) return _float;
+    _float = [FloatPanel new];
+    __weak typeof(self) weakSelf = self;
+    // What the panel can't show itself — an image, a PDF, a file the main window is already
+    // holding unsaved edits in — goes to the main window, which has every viewer and that copy.
+    _float.onOpenElsewhere = ^(NSString *path) {
+        AppDelegate *me = weakSelf;
+        if (!me) return;
+        if (!me->_win.isVisible) { [me mainWindowWillReappear]; [me->_win makeKeyAndOrderFront:nil]; }
+        [NSApp activateIgnoringOtherApps:YES];
+        [me openFile:path];
+    };
+    _float.hasUnsavedEditsElsewhere = ^BOOL(NSString *path) {
+        AppDelegate *me = weakSelf;
+        return me ? [me->_content hasUnsavedEditsForPath:path] : NO;
+    };
+    // The main window keeps each file's modification time so it never overwrites a file changed
+    // behind its back. A save in the panel is such a change, so it is told to look again.
+    _float.onSaved = ^(NSString *path) {
+        AppDelegate *me = weakSelf;
+        [me->_content checkExternalChanges];
+    };
+    return _float;
+}
+
+- (void)toggleFloatPanel:(id)sender { [self.floatPanel toggle]; }
 
 - (void)applicationDidBecomeActive:(NSNotification *)n {
     if (!_tree.rootPath) return;
@@ -155,6 +189,7 @@ static const CGFloat kSidebarW = 260;
 - (BOOL)performDragOperation:(id<NSDraggingInfo>)info { return [self openDroppedURLs:[self draggedURLs:info]]; }
 - (void)applicationWillResignActive:(NSNotification *)n {
     [_content flushAutoSave];          // switching to another app counts as a focus change
+    [_float flushAutoSave];            // the panel's tabs are editors too
     [self saveSession];
     [self updateTitle];
 }
@@ -171,6 +206,9 @@ static const CGFloat kSidebarW = 260;
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app {
+    // The panel's own file is asked about too: it is a separate editor, and ⌘Q would otherwise
+    // drop its changes without a word. Only when it exists — nil answers NO and would cancel.
+    if (_float && ![_float confirmUnsavedBeforeClosing]) return NSTerminateCancel;
     if (!_sessionSaved) {
         if (![_content confirmCloseAll]) return NSTerminateCancel;
         [self saveSession];
@@ -182,11 +220,18 @@ static const CGFloat kSidebarW = 260;
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)w {
+    if (w != _win) return YES;                 // the floating panel answers for itself
+    // Asked only when the panel exists: a message to nil answers NO, which would have refused
+    // every close in a session that never opened one.
+    if (_float && ![_float confirmUnsavedBeforeClosing]) return NO;
     if (![_content confirmCloseAll]) return NO;
     [self saveSession];
     _sessionSaved = YES;
     [_content shutdownTerminals];
     [_content closeAllWithoutAsking];
+    // The panel goes down with the window. Left up it would keep the app alive with nothing but a
+    // floating workspace on screen, which has no menu bar of its own to get back from.
+    [_float hide];
     return YES;
 }
 

@@ -5,6 +5,7 @@
 #import "QuickPicker.h"
 #import "WelcomeView.h"
 #import "FileWatcher.h"
+#import "FloatPanel.h"
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSSplitViewDelegate, NSMenuDelegate, NSMenuItemValidation> {
 @public
@@ -31,7 +32,11 @@
     NSPasteboard *_pasteboard;                          // tests: instead of the general pasteboard
     FileWatcher *_watcher;                              // the workspace folder
     __weak NSWindow *_keyWindowOverride;                // tests: stands in for NSApp.keyWindow
+    FloatPanel *_float;                                 // the floating workspace, built on first use
 }
+// The floating workspace panel; built the first time it is asked for.
+- (FloatPanel *)floatPanel;
+- (void)toggleFloatPanel:(id)sender;
 - (void)openRoot:(NSString *)root;
 - (BOOL)switchToRoot:(NSString *)root;     // asks about unsaved tabs first
 - (void)openFile:(NSString *)path;         // pinned tab + reveal in tree
@@ -64,6 +69,10 @@
 - (void)copyItemPath:(id)sender;
 - (void)rebuildRootPopupMenu:(NSMenu *)menu;
 - (NSWindow *)windowForClose;                          // the key window when it isn't the main one
+// YES when this command belongs to the main window and the floating panel is the one in front, so
+// it must not be carried out somewhere the reader isn't looking.
+- (BOOL)floatPanelHasNoAnswerFor:(SEL)action;
+- (BOOL)commandIsMainWindowOnly:(SEL)action;           // the policy, without the frontmost gate
 @end
 
 @interface AppDelegate (Workspace)

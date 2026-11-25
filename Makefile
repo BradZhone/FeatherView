@@ -11,6 +11,7 @@ INC      := $(addprefix -Isrc/,$(MODULES))
 ARCH     ?=
 CFLAGS   := -O2 -fobjc-arc -Wall -Wextra -Wno-unused-parameter -Wno-nullability-completeness -mmacosx-version-min=12.0 $(INC) $(ARCH)
 FRAMEWORKS := -framework Cocoa -framework CoreText -framework ImageIO -framework UniformTypeIdentifiers \
+              -framework Carbon \
               -framework WebKit -framework PDFKit -framework CoreServices -lsqlite3 -lz
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
@@ -86,6 +87,10 @@ build/tab_drag_tests: tests/tab_drag_tests.m $(LIB_SRC) $(HDR)
 	@mkdir -p build
 	clang $(CFLAGS) $(FRAMEWORKS) -o $@ tests/tab_drag_tests.m $(LIB_SRC)
 
+build/float_panel_tests: tests/float_panel_tests.m $(LIB_SRC) $(HDR)
+	@mkdir -p build
+	clang $(CFLAGS) $(FRAMEWORKS) -o $@ tests/float_panel_tests.m $(LIB_SRC)
+
 build/markdown_tests: tests/markdown_tests.m $(MD_SRC) src/Preview/Markdown.h
 	@mkdir -p build
 	clang $(CFLAGS) -framework Foundation -o $@ tests/markdown_tests.m $(MD_SRC)
@@ -94,7 +99,7 @@ build/markdown_tests: tests/markdown_tests.m $(MD_SRC) src/Preview/Markdown.h
 # must never sweep real user terminals, even while the installed app stays open.
 TEST_RUN = bash -c 'set -e; d=$$(mktemp -d "$${TMPDIR:-/tmp}/feather-tests.XXXXXX"); trap "rm -rf -- \"$$d\"" EXIT; CFFIXED_USER_HOME="$$d" FEATHERVIEW_TERMINAL_PIDS_DIR="$$d/pids" ZDOTDIR="$$d" SHELL=/bin/sh "$$@"' --
 
-test: build/tests build/markdown_tests build/terminal_tests build/editor_tests build/editing_tests build/session_lifecycle_tests build/terminal_input_tests build/file_tree_tests build/tab_drag_tests
+test: build/tests build/markdown_tests build/terminal_tests build/editor_tests build/editing_tests build/session_lifecycle_tests build/terminal_input_tests build/file_tree_tests build/tab_drag_tests build/float_panel_tests
 	python3 scripts/l10n.py
 	$(TEST_RUN) ./build/tests
 	$(TEST_RUN) ./build/markdown_tests
@@ -105,6 +110,7 @@ test: build/tests build/markdown_tests build/terminal_tests build/editor_tests b
 	$(TEST_RUN) ./build/terminal_input_tests
 	$(TEST_RUN) ./build/file_tree_tests
 	$(TEST_RUN) ./build/tab_drag_tests
+	$(TEST_RUN) ./build/float_panel_tests
 
 # Test programs built with AddressSanitizer and UndefinedBehaviorSanitizer, in build/san.
 SAN := -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g -O1
@@ -119,6 +125,7 @@ sanitize:
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/terminal_input_tests tests/terminal_input_tests.m $(LIB_SRC)
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/file_tree_tests tests/file_tree_tests.m $(LIB_SRC)
 	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/tab_drag_tests tests/tab_drag_tests.m $(LIB_SRC)
+	clang $(filter-out -O2,$(CFLAGS)) $(SAN) $(FRAMEWORKS) -o build/san/float_panel_tests tests/float_panel_tests.m $(LIB_SRC)
 
 	$(TEST_RUN) ./build/san/tests
 	$(TEST_RUN) ./build/san/terminal_tests
@@ -129,6 +136,7 @@ sanitize:
 	$(TEST_RUN) ./build/san/terminal_input_tests
 	$(TEST_RUN) ./build/san/file_tree_tests
 	$(TEST_RUN) ./build/san/tab_drag_tests
+	$(TEST_RUN) ./build/san/float_panel_tests
 
 
 

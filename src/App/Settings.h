@@ -17,6 +17,11 @@ extern NSNotificationName const FTSettingsDidChange;
 @property (nonatomic) BOOL showWhitespace;                        // default NO
 @property (nonatomic) BOOL autoCloseBrackets;                     // typing ( [ { and quotes adds the closing one (default YES)
 @property (nonatomic) BOOL remoteImages;                          // Markdown preview loads https images (default YES)
+// The floating workspace: the folders its header offers, its system-wide shortcut, and whether it
+// goes away as soon as it loses the keyboard. The panel reads and writes the same keys.
+@property (nonatomic, copy) NSArray<NSString *> *floatFolders;    // most recently used first
+@property (nonatomic, copy) NSString *floatShortcut;              // "⇧⌘E"; empty = none registered
+@property (nonatomic) BOOL floatHidesWhenInactive;                // default NO: it stays open
 - (void)resetFileLists;
 - (void)apply;                    // pushes the lists to the file walker; call once at launch
 + (NSArray<NSString *> *)listFromString:(NSString *)s;            // "a, b  c" → [a, b, c]

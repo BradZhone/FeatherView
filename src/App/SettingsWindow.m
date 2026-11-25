@@ -1,11 +1,18 @@
 #import "SettingsWindow.h"
 #import "Localization.h"
 #import "Settings.h"
+#import "ShortcutField.h"
+#import "HotKey.h"
 
 @implementation SettingsWindow {
     NSButton *_showHiddenBox, *_gitignoreBox, *_minimapBox, *_wrapBox, *_remoteBox, *_closeBox, *_guidesBox, *_spaceBox;
     NSTextField *_alwaysHiddenField, *_searchSkippedField;
     NSPopUpButton *_appearancePopup, *_autoSavePopup;
+    // The floating workspace
+    NSButton *_floatHideBox, *_floatAddButton, *_floatRemoveButton;
+    NSTableView *_floatFolderTable;
+    FTShortcutField *_floatShortcutField;
+    NSTextField *_floatShortcutNote;
 }
 
 + (instancetype)shared {
@@ -76,6 +83,42 @@ static NSStackView *column(NSArray<NSView *> *views) {
     _guidesBox = [NSButton checkboxWithTitle:FTL(@"Show indent guides") target:self action:@selector(boxChanged:)];
     _spaceBox = [NSButton checkboxWithTitle:FTL(@"Show whitespace") target:self action:@selector(boxChanged:)];
 
+    // The floating workspace: its folders, its system-wide shortcut, and whether it stays open.
+    _floatShortcutField = [FTShortcutField new];
+    __weak typeof(self) weakSelf = self;
+    _floatShortcutField.validate = ^BOOL(NSString *s, NSString **problem) {
+        return [weakSelf validateFloatShortcut:s problem:problem];
+    };
+    _floatShortcutField.onChange = ^(NSString *s) { [weakSelf floatShortcutPicked:s]; };
+    _floatShortcutNote = note(@"");
+
+    _floatFolderTable = [NSTableView new];
+    NSTableColumn *fc = [[NSTableColumn alloc] initWithIdentifier:@"folder"];
+    fc.width = 320;
+    [_floatFolderTable addTableColumn:fc];
+    _floatFolderTable.headerView = nil;
+    _floatFolderTable.rowHeight = 18;
+    _floatFolderTable.dataSource = self;
+    _floatFolderTable.delegate = self;
+    _floatFolderTable.allowsMultipleSelection = NO;
+    _floatFolderTable.doubleAction = @selector(revealFloatFolder:);
+    _floatFolderTable.target = self;
+    NSScrollView *folderScroll = [NSScrollView new];
+    folderScroll.documentView = _floatFolderTable;
+    folderScroll.hasVerticalScroller = YES;
+    folderScroll.borderType = NSBezelBorder;
+    [folderScroll.widthAnchor constraintEqualToConstant:360].active = YES;
+    [folderScroll.heightAnchor constraintEqualToConstant:84].active = YES;
+
+    _floatAddButton = [NSButton buttonWithTitle:FTL(@"Add…") target:self action:@selector(addFloatFolder:)];
+    _floatRemoveButton = [NSButton buttonWithTitle:FTL(@"Remove") target:self action:@selector(removeFloatFolder:)];
+    _floatAddButton.controlSize = _floatRemoveButton.controlSize = NSControlSizeSmall;
+    NSStackView *folderButtons = [NSStackView stackViewWithViews:@[_floatAddButton, _floatRemoveButton]];
+    folderButtons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    folderButtons.spacing = 6;
+
+    _floatHideBox = [NSButton checkboxWithTitle:FTL(@"Hide it as soon as it loses the keyboard") target:self action:@selector(boxChanged:)];
+
     NSGridView *grid = [NSGridView gridViewWithViews:@[
         @[heading(FTL(@"Appearance")), NSGridCell.emptyContentView],
         @[rowLabel(FTL(@"Theme:")), _appearancePopup],
@@ -89,13 +132,21 @@ static NSStackView *column(NSArray<NSView *> *views) {
         @[NSGridCell.emptyContentView, column(@[_wrapBox, note(FTL(@"Toggle with ⌥⌘Z. Files over 1 million lines or 32 MB are not wrapped."))])],
         @[NSGridCell.emptyContentView, column(@[_minimapBox, _guidesBox, _spaceBox])],
         @[NSGridCell.emptyContentView, column(@[_closeBox, note(FTL(@"Quotes are not closed in plain text and Markdown."))])],
+        @[heading(FTL(@"Floating Workspace")), NSGridCell.emptyContentView],
+        @[rowLabel(FTL(@"Shortcut:")), column(@[_floatShortcutField,
+            note(FTL(@"Works in any app, so it is taken from every other one. Click and press a combination; ⌫ clears it.")),
+            _floatShortcutNote])],
+        @[rowLabel(FTL(@"Folders:")), column(@[folderScroll, folderButtons,
+            note(FTL(@"The panel’s header switches between these. Double-click one to show it in Finder."))])],
+        @[NSGridCell.emptyContentView, column(@[_floatHideBox,
+            note(FTL(@"Off: it stays up until you press the shortcut again or Esc."))])],
         @[heading(FTL(@"Previews")), NSGridCell.emptyContentView],
         @[NSGridCell.emptyContentView, column(@[_remoteBox, note(FTL(@"Off: images such as README badges show their description instead, and nothing is downloaded."))])]]];
     grid.rowSpacing = 10;
     grid.columnSpacing = 10;
     [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
-    const NSInteger headings[] = {0, 2, 7, 12};
-    for (int k = 0; k < 4; k++) {
+    const NSInteger headings[] = {0, 2, 7, 12, 16};
+    for (int k = 0; k < 5; k++) {
         NSInteger r = headings[k];
         NSGridRow *row = [grid rowAtIndex:r];
         [row mergeCellsInRange:NSMakeRange(0, 2)];
@@ -153,6 +204,17 @@ static NSStackView *column(NSArray<NSView *> *views) {
     [_autoSavePopup selectItemAtIndex:MIN(2, MAX(0, s.autoSaveMode))];
     if (self.window.firstResponder != _alwaysHiddenField.currentEditor) _alwaysHiddenField.stringValue = [s.alwaysHidden componentsJoinedByString:@", "];
     if (self.window.firstResponder != _searchSkippedField.currentEditor) _searchSkippedField.stringValue = [s.searchSkipped componentsJoinedByString:@", "];
+
+    _floatHideBox.state = s.floatHidesWhenInactive;
+    if (!_floatShortcutField.recording) _floatShortcutField.shortcut = s.floatShortcut;
+    [_floatFolderTable reloadData];
+    _floatRemoveButton.enabled = _floatFolderTable.selectedRow >= 0;
+    // Whether macOS actually gave us the combination is only known once the panel has tried, and
+    // it is worth saying plainly: a refused shortcut is a key that silently does nothing.
+    NSString *problem = self.floatShortcutStatus ? self.floatShortcutStatus() : nil;
+    _floatShortcutNote.stringValue = problem ?: @"";
+    _floatShortcutNote.textColor = NSColor.systemRedColor;
+    _floatShortcutNote.hidden = problem.length == 0;
 }
 
 - (void)appearanceChanged:(NSPopUpButton *)p { FTSettings.shared.appearance = p.indexOfSelectedItem; }
@@ -167,6 +229,7 @@ static NSStackView *column(NSArray<NSView *> *views) {
     else if (b == _closeBox) s.autoCloseBrackets = b.state == NSControlStateValueOn;
     else if (b == _guidesBox) s.showIndentGuides = b.state == NSControlStateValueOn;
     else if (b == _spaceBox) s.showWhitespace = b.state == NSControlStateValueOn;
+    else if (b == _floatHideBox) s.floatHidesWhenInactive = b.state == NSControlStateValueOn;
 }
 
 - (void)commitFields {
@@ -183,4 +246,102 @@ static NSStackView *column(NSArray<NSView *> *views) {
 
 - (void)resetFiles:(id)sender { [FTSettings.shared resetFileLists]; [self.window makeFirstResponder:nil]; [self reloadFromSettings]; }
 
+#pragma mark The floating workspace
+
+- (NSButton *)floatHidesBox { return _floatHideBox; }
+- (NSButton *)floatAddButton { return _floatAddButton; }
+- (NSButton *)floatRemoveButton { return _floatRemoveButton; }
+- (NSTableView *)floatFolderTable { return _floatFolderTable; }
+- (FTShortcutField *)floatShortcutField { return _floatShortcutField; }
+- (NSTextField *)floatShortcutNote { return _floatShortcutNote; }
+
+// A global shortcut is taken from every other app, so macOS refuses one without ⌘, ⌃ or ⌥. Whether
+// another app already holds it only shows once it has been tried, which is what the note reports.
+- (BOOL)validateFloatShortcut:(NSString *)s problem:(NSString **)problem {
+    if (![FTHotKey isUsableShortcut:s]) {
+        if (problem) *problem = FTL(@"Hold ⌘, ⌃ or ⌥ as well.");
+        return NO;
+    }
+    return YES;
+}
+
+- (void)floatShortcutPicked:(NSString *)s {
+    FTSettings.shared.floatShortcut = s ?: @"";
+    [self reloadFromSettings];      // the panel has tried to register it by now
+}
+
+- (void)addFloatFolder:(id)sender {
+    if (_folderChooser) {
+        NSString *p = _folderChooser();
+        if (p.length) [self adoptFolder:p];
+        return;
+    }
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.canChooseDirectories = YES;
+    p.canChooseFiles = NO;
+    p.prompt = FTL(@"Choose");
+    p.message = FTL(@"A folder the floating workspace can show");
+    __weak typeof(self) weakSelf = self;
+    [p beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+        if (r == NSModalResponseOK) [weakSelf adoptFolder:p.URL.path];
+    }];
+}
+
+- (void)adoptFolder:(NSString *)path {
+    NSString *p = path.stringByStandardizingPath;
+    if (!p.length) return;
+    NSMutableArray *list = [FTSettings.shared.floatFolders mutableCopy];
+    [list removeObject:p];
+    [list insertObject:p atIndex:0];        // most recently chosen first, as the panel orders them
+    while (list.count > 10) [list removeLastObject];
+    FTSettings.shared.floatFolders = list;
+    [self reloadFromSettings];
+    NSUInteger row = [FTSettings.shared.floatFolders indexOfObject:p];
+    if (row != NSNotFound) [_floatFolderTable selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
+}
+
+- (void)removeFloatFolder:(id)sender {
+    NSInteger row = _floatFolderTable.selectedRow;
+    NSArray *folders = FTSettings.shared.floatFolders;
+    if (row < 0 || row >= (NSInteger)folders.count) return;
+    NSMutableArray *list = [folders mutableCopy];
+    [list removeObjectAtIndex:(NSUInteger)row];
+    FTSettings.shared.floatFolders = list;
+    [self reloadFromSettings];
+}
+
+- (void)revealFloatFolder:(id)sender {
+    NSInteger row = _floatFolderTable.clickedRow;
+    NSArray *folders = FTSettings.shared.floatFolders;
+    if (row < 0 || row >= (NSInteger)folders.count) return;
+    [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:folders[(NSUInteger)row]]]];
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)t { return (NSInteger)FTSettings.shared.floatFolders.count; }
+
+// A folder that has gone is still listed, greyed and marked, so it can be removed.
+- (NSView *)tableView:(NSTableView *)t viewForTableColumn:(NSTableColumn *)c row:(NSInteger)row {
+    NSArray *folders = FTSettings.shared.floatFolders;
+    if (row < 0 || row >= (NSInteger)folders.count) return nil;
+    NSString *path = folders[(NSUInteger)row];
+    NSTextField *label = [t makeViewWithIdentifier:@"folder" owner:self];
+    if (!label) {
+        label = [NSTextField labelWithString:@""];
+        label.identifier = @"folder";
+        label.font = [NSFont systemFontOfSize:11];
+        label.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    }
+    BOOL there = [NSFileManager.defaultManager fileExistsAtPath:path];
+    label.stringValue = there ? path.stringByAbbreviatingWithTildeInPath
+                              : [NSString stringWithFormat:FTL(@"%@ (missing)"), path.stringByAbbreviatingWithTildeInPath];
+    label.textColor = there ? NSColor.labelColor : NSColor.secondaryLabelColor;
+    label.toolTip = path;
+    return label;
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification *)n {
+    _floatRemoveButton.enabled = _floatFolderTable.selectedRow >= 0;
+}
+
 @end
+

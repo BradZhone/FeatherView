@@ -1910,6 +1910,14 @@ static const CGFloat kZoomScrollStep = 18;        // trackpad points per step, â
     else { [self installActive:NO]; [self reloadTabs]; }
 }
 
+- (BOOL)hasUnsavedEditsForPath:(NSString *)path {
+    NSString *p = path.stringByStandardizingPath;
+    if (!p.length) return NO;
+    for (Doc *d in _docs)
+        if (!d.untitled && !d.terminal && [d.path.stringByStandardizingPath isEqualToString:p] && docDirty(d)) return YES;
+    return NO;
+}
+
 - (void)checkExternalChanges {
     BOOL changed = NO;
     for (Doc *d in _docs.copy) {

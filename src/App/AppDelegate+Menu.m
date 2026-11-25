@@ -139,9 +139,15 @@ static __weak NSResponder *gFocusOverride;
                     item(FTL(@"Fold All"), @selector(foldAll:), @"[", C | O | S),
                     item(FTL(@"Unfold All"), @selector(unfoldAll:), @"]", C | O | S),
                     NSMenuItem.separatorItem,
-                    item(FTL(@"File Tree"), @selector(showFilesTab:), @"e", C | S),
+                    // ⌃⌘1, freeing ⇧⌘E for the floating workspace's global shortcut below.
+                    item(FTL(@"File Tree"), @selector(showFilesTab:), @"1", C | K),
                     item(FTL(@"Hide Sidebar"), @selector(toggleFileSidebar:), @"b", C),
                     item(FTL(@"Search"), @selector(searchWorkspace:), nil, 0),
+                    // No key equivalent: its shortcut is a system-wide hot key, which stays claimed
+                    // while this app is in front too. A menu item on the same combination would run
+                    // as well, toggling the panel twice. validateMenuItem: shows the hot key in the
+                    // title instead, so it is still discoverable.
+                    item(FTL(@"Floating Workspace"), @selector(toggleFloatPanel:), nil, 0),
                     NSMenuItem.separatorItem,
                     item(FTL(@"Automatic"), @selector(viewAuto:), @"0", C | O),
                     item(FTL(@"As Text"), @selector(viewText:), @"1", C | O),
@@ -331,9 +337,54 @@ static __weak NSResponder *gFocusOverride;
     if (_tree.rootPath) [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:_tree.rootPath]]];
 }
 
+// Commands the floating workspace has no answer for. A nil-target menu item reaches this delegate
+// whatever window is in front, so with the panel focused ⌥⌘T opened a terminal in the main window
+// and ⌘\ split its editor — work done somewhere the reader wasn't looking. Those items are turned
+// off instead, which also stops their shortcuts.
+- (BOOL)floatPanelHasNoAnswerFor:(SEL)a {
+    // The gate: only while the panel is the window in front, so a nil-target command routes to it.
+    if (!_float.visible || !_float.panel.isKeyWindow) return NO;
+    return [self commandIsMainWindowOnly:a];
+}
+
+// The policy, apart from the gate, so it can be checked without a real key window.
+- (BOOL)commandIsMainWindowOnly:(SEL)a {
+    static NSArray<NSString *> *mainWindowOnly;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        mainWindowOnly = @[
+            // terminals, columns, tabs and the workspace all belong to the main window
+            @"newTerminal:", @"openTerminalHere:", @"toggleTerminalPanel:",
+            @"splitEditor:", @"focusPane:", @"toggleMaximizeSplit:",
+            @"closeTab:", @"closeOtherTabs:", @"closeAllTabs:", @"reopenClosedTab:",
+            @"nextTab:", @"previousTab:", @"firstTab:", @"lastTab:", @"pinPreviewTab:",
+            @"openFolder:", @"switchWorkspace:", @"openRecent:", @"clearRecent:",
+            @"quickOpen:", @"searchWorkspace:", @"showFilesTab:", @"toggleFileSidebar:",
+            @"newFile:", @"newWindow:", @"splitPreview:", @"togglePreviewFullScreen:",
+            @"saveAllDocuments:", @"revealRootInFinder:", @"renameItem:", @"trashItem:",
+            @"copyItemPath:", @"promptGoToLine:", @"showReplace:",
+            @"viewAuto:", @"viewText:", @"viewHex:", @"viewQuickLook:",
+            @"togglePDFThumbsAction:", @"togglePDFTwoPagesAction:", @"openInDefaultApp:",
+        ];
+    });
+    return [mainWindowOnly containsObject:NSStringFromSelector(a)];
+}
+
 - (BOOL)validateMenuItem:(NSMenuItem *)mi {
     SEL a = mi.action;
+    // Before anything else: with the panel in front, a command meant for the main window is off.
+    if ([self floatPanelHasNoAnswerFor:a]) return NO;
     if (a == @selector(toggleFileSidebar:)) { mi.title = _sidebar.hidden ? FTL(@"Show Sidebar") : FTL(@"Hide Sidebar"); return YES; }
+    if (a == @selector(toggleFloatPanel:)) {
+        mi.state = _float.visible ? NSControlStateValueOn : NSControlStateValueOff;
+        // The shortcut is a global hot key, so it can't be the item's key equivalent; showing it in
+        // the title is how the reader finds out what it is. A refused one is said so plainly.
+        NSString *s = _float.shortcut;
+        mi.title = !s.length ? FTL(@"Floating Workspace")
+                 : _float.shortcutRegistered ? [NSString stringWithFormat:FTL(@"Floating Workspace (%@)"), s]
+                 : [NSString stringWithFormat:FTL(@"Floating Workspace (%@ unavailable)"), s];
+        return YES;
+    }
     if (a == @selector(splitEditor:)) return _content.tabCount > 0 && _content.paneCount < 3;
     if (a == @selector(focusPane:)) return (NSUInteger)mi.tag < (NSUInteger)_content.paneCount;
     if (a == @selector(toggleMaximizeSplit:)) {
@@ -437,7 +488,20 @@ static __weak NSResponder *gFocusOverride;
 }
 - (void)reloadTree:(id)s { [_tree reload]; }
 - (void)toggleHidden:(id)s { FTSettings.shared.showHidden = !FTSettings.shared.showHidden; }
-- (void)showSettings:(id)s { [SettingsWindow.shared reloadFromSettings]; [SettingsWindow.shared showWindow:nil]; [SettingsWindow.shared.window makeKeyAndOrderFront:nil]; }
+- (void)showSettings:(id)s {
+    SettingsWindow *w = SettingsWindow.shared;
+    // Only the panel knows whether macOS gave it the combination; the window asks it so a refused
+    // shortcut is said out loud rather than being a key that does nothing.
+    __weak typeof(self) weakSelf = self;
+    w.floatShortcutStatus = ^NSString * {
+        AppDelegate *me = weakSelf;
+        FloatPanel *fp = me ? me.floatPanel : nil;
+        return fp.shortcut.length && !fp.shortcutRegistered ? fp.shortcutProblem : nil;
+    };
+    [w reloadFromSettings];
+    [w showWindow:nil];
+    [w.window makeKeyAndOrderFront:nil];
+}
 - (void)revealInFinder:(id)s {
     NSMutableArray *urls = [NSMutableArray array];
     for (NSString *p in [self targetPathsFrom:s]) [urls addObject:[NSURL fileURLWithPath:p]];

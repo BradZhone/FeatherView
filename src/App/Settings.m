@@ -51,6 +51,17 @@ static NSArray *strings(id v) {
 - (NSArray<NSString *> *)searchSkipped { return strings([ud() objectForKey:@"searchSkipped"]); }
 - (void)setSearchSkipped:(NSArray<NSString *> *)a { [ud() setObject:strings(a) forKey:@"searchSkipped"]; [self changed]; }
 
+// The floating workspace's own keys, the same ones the panel reads and writes.
+- (NSArray<NSString *> *)floatFolders { return strings([ud() objectForKey:@"floatFolders"]); }
+- (void)setFloatFolders:(NSArray<NSString *> *)a { [ud() setObject:strings(a) forKey:@"floatFolders"]; [self changed]; }
+- (NSString *)floatShortcut {
+    NSString *s = [ud() objectForKey:@"floatShortcut"];
+    return s ? s : @"⇧⌘E";        // "" is the reader turning it off, which is not the same as unset
+}
+- (void)setFloatShortcut:(NSString *)s { [ud() setObject:s ?: @"" forKey:@"floatShortcut"]; [self changed]; }
+- (BOOL)floatHidesWhenInactive { return [ud() boolForKey:@"floatHidesWhenInactive"]; }
+- (void)setFloatHidesWhenInactive:(BOOL)v { [ud() setBool:v forKey:@"floatHidesWhenInactive"]; [self changed]; }
+
 - (void)resetFileLists {
     [ud() removeObjectForKey:@"alwaysHidden"];
     [ud() removeObjectForKey:@"searchSkipped"];
