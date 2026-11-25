@@ -381,6 +381,14 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 
 // An open panel on the panel itself, so it appears over the floating window rather than behind it.
 - (void)chooseFolder:(id)sender {
+    if (_folderChooser) {
+        NSString *p = _folderChooser();
+        if (p.length) [self addFolder:p];
+        return;
+    }
+    // "Add Folder…" comes from the header pull-down, whose action fires while AppKit is still
+    // tearing the menu's tracking down. A sheet begun inside that unwind never appears — the reader
+    // sees nothing happen. Letting the menu finish first (next main-loop turn) is what shows it.
     NSOpenPanel *p = [NSOpenPanel openPanel];
     p.canChooseDirectories = YES;
     p.canChooseFiles = NO;
@@ -388,9 +396,17 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     p.message = FTL(@"The folder the floating workspace shows");
     p.directoryURL = [NSURL fileURLWithPath:_folder ?: NSHomeDirectory()];
     __weak FloatPanel *weak = self;
-    [p beginSheetModalForWindow:_panel completionHandler:^(NSModalResponse r) {
-        if (r == NSModalResponseOK) [weak addFolder:p.URL.path];
-    }];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        FloatPanel *me = weak;
+        if (!me) return;
+        // The panel must be in front for a sheet to attach to it; a hotkey-shown panel over
+        // another app can lose that by the time this runs.
+        [NSApp activateIgnoringOtherApps:YES];
+        [me->_panel makeKeyAndOrderFront:nil];
+        [p beginSheetModalForWindow:me->_panel completionHandler:^(NSModalResponse r) {
+            if (r == NSModalResponseOK) [me addFolder:p.URL.path];
+        }];
+    });
 }
 
 - (void)folderPicked:(NSMenuItem *)item {

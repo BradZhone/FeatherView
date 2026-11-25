@@ -978,6 +978,25 @@ static void folderList(NSString *unusedA, NSString *unusedB) {
     CHECK([folderPopupOf(next).menu.itemArray.firstObject.title containsString:@"missing"],
           "and the header says so (\"%s\")", folderPopupOf(next).menu.itemArray.firstObject.title.UTF8String);
     [next removeFolder:gone];
+
+    // "Add Folder…" in the header pull-down reaches the picker. It used to open a sheet while the
+    // menu was still unwinding, so nothing appeared; the seam stands in for the open panel here.
+    FloatPanel *add = newPanel();
+    __block NSUInteger asked = 0;
+    add.folderChooser = ^NSString * { asked++; return a; };
+    [add show];
+    spin(0.2);
+    NSMenu *menu = folderPopupOf(add).menu;
+    openMenu(menu);
+    NSMenuItem *addItem = nil;
+    for (NSMenuItem *i in menu.itemArray) if (i.action == @selector(chooseFolder:)) { addItem = i; break; }
+    CHECK(addItem != nil && addItem.target == add, "the pull-down offers Add Folder…, aimed at the panel");
+    if (addItem) [NSApp sendAction:addItem.action to:addItem.target from:addItem];
+    spin(0.2);
+    CHECK(asked == 1, "choosing it opens the picker (%lu)", (unsigned long)asked);
+    CHECK([add.folder isEqualToString:a] && [add.folders containsObject:a], "and the chosen folder is adopted");
+    [add hide];
+
     [fp hide];
     [next hide];
     for (NSString *d in @[a, b]) [NSFileManager.defaultManager removeItemAtPath:d error:nil];

@@ -27,6 +27,8 @@
 - (void)addFolder:(NSString *)path;        // adds and switches to it
 - (void)removeFolder:(NSString *)path;     // switches away if it was the current one
 - (void)chooseFolder:(id)sender;           // "Add Folder…": an open panel on the panel itself
+// Answers the folder picker without a sheet; nil uses the real NSOpenPanel. For tests.
+@property (nonatomic, copy) NSString *(^folderChooser)(void);
 
 // Files the panel can't show itself (images, PDFs, binaries) go to the main window, as does a file
 // the main window already has unsaved edits in — its copy is the current one, not the disk's.
