@@ -39,6 +39,12 @@
 // The file in the active tab, nil when there is none.
 @property (nonatomic, readonly) NSString *openPath;
 - (void)openFile:(NSString *)path;         // in a tab; falls back to onOpenElsewhere
+// Can the panel show this file itself (text, markup, an image or a PDF)? The main window asks before
+// offering "Move to Floating Workspace", since anything else would only bounce back to it.
+- (BOOL)canShow:(NSString *)path;
+// Reopens the tabs that were open when the app last quit, skipping any file no longer there. Called
+// once at launch; opens straight from disk and never hands a file to the main window.
+- (void)restoreTabs;
 @property (nonatomic, readonly) BOOL dirty;              // any tab has unsaved work
 - (BOOL)save;                              // ⌘S on the active tab
 - (BOOL)saveAll;                           // ⌥⌘S

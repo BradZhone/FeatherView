@@ -147,6 +147,7 @@ static NSString *const kDefaultFrameName = @"FeatherFloat";
     NSTimer *_autoSaveTimer;
     BOOL _shortcutRelinquished;
     NSString *_frameName;
+    BOOL _restoring;      // reopening last session's tabs: open from disk, never bounce elsewhere
 }
 
 @synthesize autoSaveDelay = _autoSaveDelay;
@@ -472,17 +473,27 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     return k == ViewerText || k == ViewerImage || k == ViewerPDF;
 }
 
+- (BOOL)canShow:(NSString *)path { return path.length && [self canShowInPanel:path]; }
+
+// A file the panel can't show goes to the main window — unless this is the launch-time restore,
+// which opens only what the panel shows itself and quietly skips the rest.
+- (void)bounceElsewhere:(NSString *)path {
+    if (_restoring) return;
+    if (self.onOpenElsewhere) self.onOpenElsewhere(path);
+}
+
 - (void)openFile:(NSString *)path {
     if (!path.length) return;
     // The main window's unsaved copy is the current one; showing the file from disk here would
-    // present older text as if it were the file, and saving over it would lose their edits.
-    if (self.hasUnsavedEditsElsewhere && self.hasUnsavedEditsElsewhere(path)) {
+    // present older text as if it were the file, and saving over it would lose their edits. On the
+    // launch-time restore there is nothing open in the main window yet, so this is skipped.
+    if (!_restoring && self.hasUnsavedEditsElsewhere && self.hasUnsavedEditsElsewhere(path)) {
         [self flash:FTL(@"Open with unsaved changes in the main window; opened there instead")];
-        if (self.onOpenElsewhere) self.onOpenElsewhere(path);
+        [self bounceElsewhere:path];
         return;
     }
     if (![self canShowInPanel:path]) {
-        if (self.onOpenElsewhere) self.onOpenElsewhere(path);
+        [self bounceElsewhere:path];
         return;
     }
     // Already open: show that tab rather than a second copy of the same file.
@@ -493,8 +504,8 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
         // It passed canShowInPanel: but couldn't be built — an image or PDF that won't decode, or a
         // locked PDF. The text path already handed those to the main window; this covers the media
         // ones, so the click isn't silently dropped.
-        if (self.onOpenElsewhere && (FKGuessKind(path) == ViewerImage || FKGuessKind(path) == ViewerPDF))
-            self.onOpenElsewhere(path);
+        if (FKGuessKind(path) == ViewerImage || FKGuessKind(path) == ViewerPDF)
+            [self bounceElsewhere:path];
         return;
     }
     [_docs addObject:d];
@@ -512,7 +523,7 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     NSString *err = nil;
     NSData *data = FKLoadTextAllowingNUL(path, &enc, NO, &err);
     if (!data) {
-        if (self.onOpenElsewhere) self.onOpenElsewhere(path);
+        [self bounceElsewhere:path];
         return nil;
     }
     FloatDoc *d = [FloatDoc new];
@@ -639,6 +650,31 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     [_tabBar reload];
     _tabBar.hidden = _docs.count == 0;
     [self layoutContent];
+    [self persistTabs];
+}
+
+// The open files and which one is on show, kept so closing the panel (or quitting) and coming back
+// restores them rather than leaving the reader to pick each one out of the tree again. Not written
+// while reopening them, so a half-restored list never overwrites the saved one.
+- (void)persistTabs {
+    if (_restoring) return;
+    [ud() setObject:self.openPaths forKey:@"floatOpenTabs"];
+    [ud() setInteger:_active ? (NSInteger)[_docs indexOfObject:_active] : -1 forKey:@"floatActiveTab"];
+}
+
+- (void)restoreTabs {
+    NSArray<NSString *> *paths = [ud() stringArrayForKey:@"floatOpenTabs"];
+    if (!paths.count) return;
+    NSInteger active = [ud() objectForKey:@"floatActiveTab"] ? [ud() integerForKey:@"floatActiveTab"] : -1;
+    NSString *activePath = (active >= 0 && active < (NSInteger)paths.count) ? paths[(NSUInteger)active] : nil;
+    _restoring = YES;
+    for (NSString *p in paths)
+        if ([NSFileManager.defaultManager fileExistsAtPath:p]) [self openFile:p];
+    _restoring = NO;
+    // Land on the tab that was active last, if it is still among those that opened.
+    FloatDoc *d = activePath ? [self docForPath:activePath] : nil;
+    if (d) [self activateDoc:d];      // reloadTabs within writes the pruned list back out
+    else [self persistTabs];          // some files were gone: save what actually opened
 }
 
 - (void)selectTab:(NSInteger)i {
@@ -873,7 +909,7 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 - (void)followLink:(NSString *)path anchor:(NSString *)anchor {
     if (!path.length) return;
     if (![self canShowInPanel:path]) {
-        if (self.onOpenElsewhere) self.onOpenElsewhere(path);
+        [self bounceElsewhere:path];
         return;
     }
     if ([self docForPath:path]) { [self openFile:path]; return; }      // already open: go there

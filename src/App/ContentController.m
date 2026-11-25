@@ -2436,7 +2436,23 @@ static NSString *suggestedName(TextEditorView *ed, NSString *fallback) {
     if (d.untitled) { add(FTL(@"Save…"), @selector(menuSave:)); return m; }
     add(FTL(@"Show in Finder"), @selector(menuReveal:));
     add(FTL(@"Copy Path"), @selector(menuCopyPath:));
+    // Only when the panel can show this file itself: moving a video or an archive into it would
+    // just bounce straight back to the window the tab is already in.
+    if (d.path && _canOpenInFloat && _canOpenInFloat(d.path)) {
+        [m addItem:NSMenuItem.separatorItem];
+        add(FTL(@"Move to Floating Workspace"), @selector(menuMoveToFloat:));
+    }
     return m;
+}
+
+// Save first (the panel reads the file from disk and refuses one the window is still editing), then
+// hand it over and close the tab here — the file is now in the panel, lossless.
+- (void)menuMoveToFloat:(NSMenuItem *)s {
+    Doc *d = s.representedObject;
+    if (!d.path || !_openInFloat) return;
+    if (docDirty(d) && ![self saveDoc:d]) return;
+    _openInFloat(d.path);
+    [self closeDoc:d ask:NO];
 }
 
 - (void)menuClose:(NSMenuItem *)s { [self closeDoc:s.representedObject ask:YES]; }

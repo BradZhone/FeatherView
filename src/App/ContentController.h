@@ -30,6 +30,10 @@ typedef NS_ENUM(NSInteger, AutoSaveMode) {
 @property (nonatomic, copy) void (^onActivate)(NSString *path);// active tab changed
 // Tests set this to answer save/discard prompts without a modal alert.
 @property (nonatomic, copy) NSModalResponse (^alertHandler)(NSAlert *alert);
+// "Move to Floating Workspace" on a tab: canOpenInFloat answers whether the panel can show that
+// file, so the item only appears when it can; openInFloat hands it over and brings the panel up.
+@property (nonatomic, copy) BOOL (^canOpenInFloat)(NSString *path);
+@property (nonatomic, copy) void (^openInFloat)(NSString *path);
 
 // preview: reuse the single preview tab (single click). focus: move keyboard focus to the viewer.
 - (void)openPath:(NSString *)path preview:(BOOL)preview focus:(BOOL)focus;

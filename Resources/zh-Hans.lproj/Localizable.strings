@@ -185,6 +185,8 @@
 "Floating Workspace Folder" = "浮窗工作区文件夹";
 "Floating Workspace (%@ unavailable)" = "浮窗工作区（%@ 不可用）";
 "Floating Workspace" = "浮窗工作区";
+"Open in Floating Workspace" = "在浮窗工作区中打开";
+"Move to Floating Workspace" = "移到浮窗工作区";
 "Folder" = "文件夹";
 "folder" = "文件夹";
 "Follow Links Here" = "就地跳转";

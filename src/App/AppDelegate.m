@@ -147,6 +147,9 @@ static const CGFloat kSidebarW = 260;
         AppDelegate *me = weakSelf;
         [me->_content checkExternalChanges];
     };
+    // Its tabs from the last session, now that its callbacks are in place. Done here rather than in
+    // the panel's own init so a restored file the panel can't show still has somewhere to go.
+    [_float restoreTabs];
     return _float;
 }
 
@@ -508,6 +511,16 @@ static const CGFloat kSidebarW = 260;
         if (p) [me->_tree revealPath:p];
         if (p && me->_launched && !me->_win.isVisible) { [me mainWindowWillReappear]; [me->_win makeKeyAndOrderFront:nil]; }
         [me updateTitle];
+    };
+    _content.canOpenInFloat = ^BOOL(NSString *p) {
+        AppDelegate *me = weakSelf;
+        return me ? [me.floatPanel canShow:p] : NO;
+    };
+    _content.openInFloat = ^(NSString *p) {
+        AppDelegate *me = weakSelf;
+        if (!me) return;
+        [me.floatPanel openFile:p];
+        [me.floatPanel show];
     };
     _search.onOpen = ^(SearchHit *hit, BOOL focusEditor) {
         AppDelegate *me = weakSelf;

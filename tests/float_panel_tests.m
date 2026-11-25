@@ -736,6 +736,55 @@ static void tabs(NSString *dir) {
     FTSettings.shared.autoSaveMode = was;
 }
 
+// The open tabs survive the app quitting: a fresh panel reopens them, on the tab that was active,
+// and leaves behind any file that is no longer there.
+static void tabsRestore(NSString *dir) {
+    NSInteger was = FTSettings.shared.autoSaveMode;
+    FTSettings.shared.autoSaveMode = AutoSaveOff;
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    [ud removeObjectForKey:@"floatOpenTabs"];
+    [ud removeObjectForKey:@"floatActiveTab"];
+
+    NSString *a = [dir stringByAppendingPathComponent:@"one.md"];
+    NSString *b = [dir stringByAppendingPathComponent:@"two.md"];
+    NSString *gone = [dir stringByAppendingPathComponent:@"vanishing.md"];
+    [@"# vanishing\n" writeToFile:gone atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    FloatPanel *first = newPanel();
+    first.folder = dir;
+    [first show];
+    spin(0.2);
+    [first openFile:a];  spin(0.2);
+    [first openFile:gone];  spin(0.2);
+    [first openFile:b];  spin(0.2);
+    [first selectTab:0];  spin(0.2);      // leave the first tab active
+    CHECK([first.openPath isEqualToString:a], "the active tab is the one we chose");
+    [first hide];
+
+    // The file that was open is removed before the "next launch" reads the list back.
+    [NSFileManager.defaultManager removeItemAtPath:gone error:nil];
+
+    FloatPanel *second = newPanel();      // stands in for the next launch
+    second.folder = dir;
+    [second restoreTabs];
+    spin(0.3);
+    CHECK(second.tabCount == 2, "the open tabs come back, minus the missing file (%lu)", (unsigned long)second.tabCount);
+    CHECK([second.openPaths containsObject:a] && [second.openPaths containsObject:b], "both surviving files reopened");
+    CHECK(![second.openPaths containsObject:gone], "the deleted file is not reopened");
+    CHECK([second.openPath isEqualToString:a], "on the tab that was active last (%s)", second.openPath.lastPathComponent.UTF8String);
+
+    // An empty session restores to nothing rather than reopening a stale list.
+    while (second.tabCount) { [second closeTab:0]; spin(0.1); }
+    FloatPanel *third = newPanel();
+    [third restoreTabs];
+    spin(0.2);
+    CHECK(third.tabCount == 0, "with no tabs saved, a launch opens none");
+
+    [ud removeObjectForKey:@"floatOpenTabs"];
+    [ud removeObjectForKey:@"floatActiveTab"];
+    FTSettings.shared.autoSaveMode = was;
+}
+
 // Auto-save, on the same setting as the main window. A file changed on disk behind the panel's
 // back is never overwritten silently.
 static void autoSave(NSString *dir) {
@@ -1152,6 +1201,34 @@ static void settingsSection(NSString *a, NSString *b) {
     [w.window close];
 }
 
+// Right-click in the main window → "Move to Floating Workspace". The panel answers whether it can
+// show a file (so the item is offered only when it can), and opening one brings the panel up.
+static void moveIntoPanel(NSString *dir) {
+    FloatPanel *fp = newPanel();
+    fp.folder = dir;
+
+    NSString *md = [dir stringByAppendingPathComponent:@"one.md"];
+    NSString *mov = [dir stringByAppendingPathComponent:@"clip.mov"];
+    const uint8_t movBytes[] = {0,0,0,0x14,'f','t','y','p','q','t',' ',' '};
+    [[NSData dataWithBytes:movBytes length:sizeof movBytes] writeToFile:mov atomically:YES];
+
+    CHECK([fp canShow:md], "the panel can show a markdown file");
+    CHECK(![fp canShow:mov], "but not a video it has no viewer for");
+    CHECK(![fp canShow:nil], "and nil is never showable");
+
+    // The content controller's wiring: it only offers the move when canShow says yes, and opening
+    // brings the panel up — the two blocks the app connects to the panel.
+    __block NSString *opened = nil;
+    BOOL (^canOpen)(NSString *) = ^BOOL(NSString *p) { return [fp canShow:p]; };
+    void (^openIt)(NSString *) = ^(NSString *p) { opened = p; [fp openFile:p]; [fp show]; };
+    CHECK(canOpen(md) && !canOpen(mov), "the window would offer the move for the note, not the video");
+    openIt(md);
+    spin(0.3);
+    CHECK([opened isEqualToString:md] && [fp.openPath isEqualToString:md], "the note opens in the panel");
+    CHECK(fp.visible, "and the panel is shown so the move is visible");
+    [fp hide];
+}
+
 static void builtLazily(void) {
     AppDelegate *app = [AppDelegate new];
     CHECK(app->_float == nil, "no panel exists until something asks for one");
@@ -1180,6 +1257,7 @@ static void builtLazily(void) {
 // before and after.
 static NSString *const kOurKeys[] = {@"floatFolder", @"floatFolders", @"floatSidebarVisible",
                                      @"floatTreeWidth", @"floatHidesWhenInactive", @"floatShortcut", @"floatShowsPreview",
+                                     @"floatOpenTabs", @"floatActiveTab",
                                      @"NSWindow Frame FeatherFloat",
                                      @"NSWindow Frame FeatherFloatPersistence"};
 
@@ -1210,6 +1288,8 @@ int main(void) {
             editThenPreview(a);
             mainWindowCommandsAreOff(a);
             tabs(a);
+            tabsRestore(a);
+            moveIntoPanel(a);
             autoSave(a);
             controlsFitTheirStrip(a);
             folderList(a, b);

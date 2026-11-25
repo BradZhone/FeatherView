@@ -258,7 +258,9 @@ static __weak NSResponder *gFocusOverride;
                             item(FTL(@"Move to Trash"), @selector(trashItem:), nil, 0),
                             NSMenuItem.separatorItem,
                             item(FTL(@"Show in Finder"), @selector(revealInFinder:), nil, 0),
-                            item(FTL(@"Copy Path"), @selector(copyItemPath:), nil, 0)]) { i.tag = kContextTag; [m addItem:i]; }
+                            item(FTL(@"Copy Path"), @selector(copyItemPath:), nil, 0),
+                            NSMenuItem.separatorItem,
+                            item(FTL(@"Open in Floating Workspace"), @selector(openInFloatPanel:), nil, 0)]) { i.tag = kContextTag; [m addItem:i]; }
     m.delegate = self;
     return m;
 }
@@ -427,6 +429,16 @@ static __weak NSResponder *gFocusOverride;
         return targets.count > 0;
     }
     if (a == @selector(revealInFinder:)) return targets.count > 0;
+    // A folder sets the panel's workspace; a file opens in it. Enabled when the selection has a
+    // folder, or a file the panel can show itself (not an archive or a video, which it can't).
+    if (a == @selector(openInFloatPanel:)) {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        for (NSString *p in targets) {
+            BOOL dir = NO;
+            if ([fm fileExistsAtPath:p isDirectory:&dir] && (dir || [self.floatPanel canShow:p])) return YES;
+        }
+        return NO;
+    }
     if (a == @selector(setAutoSave:)) { mi.state = mi.tag == _content.autoSaveMode ? NSControlStateValueOn : NSControlStateValueOff; return YES; }
     if (a == @selector(setAppearanceMode:)) {
         mi.state = mi.tag == [NSUserDefaults.standardUserDefaults integerForKey:@"appearance"] ? NSControlStateValueOn : NSControlStateValueOff;
@@ -507,6 +519,21 @@ static __weak NSResponder *gFocusOverride;
     for (NSString *p in [self targetPathsFrom:s]) [urls addObject:[NSURL fileURLWithPath:p]];
     if (urls.count) [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:urls];
 }
+// Send the right-clicked tree items to the floating workspace: a folder becomes its workspace, a
+// file opens as a tab in it. The panel comes up so the move is visible.
+- (void)openInFloatPanel:(id)s {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    FloatPanel *fp = self.floatPanel;
+    BOOL any = NO;
+    for (NSString *p in [self targetPathsFrom:s]) {
+        BOOL dir = NO;
+        if (![fm fileExistsAtPath:p isDirectory:&dir]) continue;
+        if (dir) { [fp addFolder:p]; any = YES; }
+        else if ([fp canShow:p]) { [fp openFile:p]; any = YES; }
+    }
+    if (any) [fp show];
+}
+
 - (void)copyItemPath:(id)s {
     NSArray *paths = [self targetPathsFrom:s];
     if (!paths.count) return;
