@@ -148,6 +148,7 @@ static NSString *const kDefaultFrameName = @"FeatherFloat";
     BOOL _shortcutRelinquished;
     NSString *_frameName;
     BOOL _restoring;      // reopening last session's tabs: open from disk, never bounce elsewhere
+    NSInteger _modalDepth; // a sheet or alert of ours is up: don't let hide-on-blur take it down
 }
 
 @synthesize autoSaveDelay = _autoSaveDelay;
@@ -386,24 +387,24 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
         if (p.length) [self addFolder:p];
         return;
     }
-    // "Add Folder…" comes from the header pull-down, whose action fires while AppKit is still
-    // tearing the menu's tracking down. A sheet begun inside that unwind never appears — the reader
-    // sees nothing happen. Letting the menu finish first (next main-loop turn) is what shows it.
     NSOpenPanel *p = [NSOpenPanel openPanel];
     p.canChooseDirectories = YES;
     p.canChooseFiles = NO;
     p.prompt = FTL(@"Choose");
     p.message = FTL(@"The folder the floating workspace shows");
     p.directoryURL = [NSURL fileURLWithPath:_folder ?: NSHomeDirectory()];
+    // The sheet is about to take the key window from the panel. Hold off hide-on-blur so the panel
+    // stays put underneath it rather than being pulled away the instant the sheet opens.
+    _modalDepth++;
     __weak FloatPanel *weak = self;
+    // "Add Folder…" comes from the header pull-down, whose action fires while AppKit is still
+    // tearing the menu's tracking down. A sheet begun inside that unwind never appears — so it waits
+    // for the menu to finish (the next main-loop turn).
     dispatch_async(dispatch_get_main_queue(), ^{
         FloatPanel *me = weak;
         if (!me) return;
-        // The panel must be in front for a sheet to attach to it; a hotkey-shown panel over
-        // another app can lose that by the time this runs.
-        [NSApp activateIgnoringOtherApps:YES];
-        [me->_panel makeKeyAndOrderFront:nil];
         [p beginSheetModalForWindow:me->_panel completionHandler:^(NSModalResponse r) {
+            me->_modalDepth--;
             if (r == NSModalResponseOK) [me addFolder:p.URL.path];
         }];
     });
@@ -825,7 +826,11 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     [a addButtonWithTitle:FTL(@"Save")];
     [a addButtonWithTitle:FTL(@"Discard")];
     [a addButtonWithTitle:FTL(@"Cancel")];
+    // The alert takes key from the panel; without this, hide-on-blur would close the panel out from
+    // under the question the reader is still answering.
+    _modalDepth++;
     NSModalResponse r = _alertHandler ? _alertHandler(a) : [a runModal];
+    _modalDepth--;
     if (r == NSAlertFirstButtonReturn) return [self saveDoc:doc announce:YES];
     return r == NSAlertSecondButtonReturn;        // discard: let it go; cancel: stop
 }
@@ -1042,11 +1047,14 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     if (front && ![front isEqual:NSRunningApplication.currentApplication]) _cameFrom = front;
 
     [_panel setFrameUsingName:_frameName];
-    // The panel can only take real key presses while this app is the active one, so showing it
-    // activates. Ordering it in regardless puts it over the frontmost app's windows.
+    // Order the panel onto the space the reader is looking at *before* activating. The panel joins
+    // every space, so ordered in first it lands on the current one; activating only then keeps the
+    // app here rather than switching to the space FeatherView's main window is on — which is what
+    // made the panel seem to drift between desktops. The panel can only take real key presses while
+    // the app is active, so activation still has to happen.
+    [_panel orderFrontRegardless];
     [NSApp activateIgnoringOtherApps:YES];
     [_panel makeKeyAndOrderFront:nil];
-    [_panel orderFrontRegardless];
     if (_tree.rootPath) [_tree refreshInBackground];
     if (self.sidebarVisible) [_panel makeFirstResponder:_outline];
 }
@@ -1072,6 +1080,10 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 
 - (void)windowDidResignKey:(NSNotification *)n {
     [self flushAutoSave];               // switching away from the panel, as in the main window
+    // A sheet or alert of the panel's own (the folder picker, a save prompt) takes the key window
+    // from it. With hide-on-blur on, hiding here would pull that very dialog's host out from under
+    // it — the picker would flash and vanish, which is exactly what looked like "nothing happens".
+    if (_modalDepth > 0) return;
     if (self.hidesWhenInactive && _panel.isVisible) [self hide];
 }
 

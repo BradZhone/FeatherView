@@ -785,6 +785,46 @@ static void tabsRestore(NSString *dir) {
     FTSettings.shared.autoSaveMode = was;
 }
 
+// With hide-on-blur on, the panel must not take itself down when its own sheet or alert takes the
+// key window — that is what made the folder picker flash and vanish. The save prompt stands in for
+// the picker (a real NSOpenPanel can't run headless); both go through the same modal guard.
+static void staysUpForItsOwnDialogs(NSString *dir) {
+    NSInteger wasAuto = FTSettings.shared.autoSaveMode;
+    BOOL wasHide = FTSettings.shared.floatHidesWhenInactive;
+    FTSettings.shared.autoSaveMode = AutoSaveOff;
+    FTSettings.shared.floatHidesWhenInactive = YES;
+
+    FloatPanel *fp = newPanel();
+    fp.folder = dir;
+    [fp show];
+    spin(0.2);
+    fp.showsPreview = NO;
+    NSString *note = [dir stringByAppendingPathComponent:@"one.md"];
+    [fp openFile:note];
+    spin(0.3);
+    TextEditorView *ed = findView(fp, TextEditorView.class);
+    [(id<NSTextInputClient>)ed insertText:@"x" replacementRange:NSMakeRange(NSNotFound, 0)];
+    CHECK(fp.dirty, "the tab has unsaved work for the prompt to ask about");
+
+    // The alert fires from closeTab. While it is up, the panel loses key — mimic that — and must
+    // stay visible rather than hide itself and pull the alert's host away.
+    __block BOOL visibleWhileAsked = NO;
+    __weak FloatPanel *weakFp = fp;
+    fp.alertHandler = ^NSModalResponse(NSAlert *a) {
+        FloatPanel *me = weakFp;
+        [NSNotificationCenter.defaultCenter postNotificationName:NSWindowDidResignKeyNotification object:me.panel];
+        visibleWhileAsked = me.visible;
+        return NSAlertSecondButtonReturn;        // discard, so nothing else blocks
+    };
+    [fp closeTab:0];
+    spin(0.2);
+    CHECK(visibleWhileAsked, "the panel stays up while its own alert is answered");
+
+    FTSettings.shared.autoSaveMode = wasAuto;
+    FTSettings.shared.floatHidesWhenInactive = wasHide;
+    [fp hide];
+}
+
 // Auto-save, on the same setting as the main window. A file changed on disk behind the panel's
 // back is never overwritten silently.
 static void autoSave(NSString *dir) {
@@ -1309,6 +1349,7 @@ int main(void) {
             tabs(a);
             tabsRestore(a);
             moveIntoPanel(a);
+            staysUpForItsOwnDialogs(a);
             autoSave(a);
             controlsFitTheirStrip(a);
             folderList(a, b);
