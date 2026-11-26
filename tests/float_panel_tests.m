@@ -1318,6 +1318,15 @@ static void treeFileOps(NSString *unused) {
     CHECK([fm fileExistsAtPath:made], "new file is created on disk");
     CHECK([fp.openPath isEqualToString:made], "and opens in the panel (%s)", fp.openPath.lastPathComponent.UTF8String);
 
+    // ⌘N makes a new file too — the panel claims it before the main menu would.
+    nextName = @"viaKey.md";
+    NSEvent *cmdN = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand
+                                    timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:fp.panel.windowNumber
+                                      context:nil characters:@"n" charactersIgnoringModifiers:@"n" isARepeat:NO keyCode:45];
+    CHECK([fp.panel performKeyEquivalent:cmdN], "the panel claims ⌘N");
+    spin(0.3);
+    CHECK([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"viaKey.md"]], "⌘N creates a new file in the folder");
+
     // New folder.
     nextName = @"sub";
     [fp floatNewFolder:nil];
@@ -1326,6 +1335,8 @@ static void treeFileOps(NSString *unused) {
     CHECK([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"sub"] isDirectory:&isDir] && isDir, "new folder is created");
 
     // Rename the open file; its tab follows to the new path rather than dangling.
+    [fp openFile:made];        // make its tab active again (⌘N opened another above)
+    spin(0.2);
     [fp.tree revealPath:made];
     spin(0.1);
     nextName = @"renamed.md";

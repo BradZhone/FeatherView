@@ -686,7 +686,10 @@ static void markdownLists(void) {
     // Indentation is kept; an empty item leaves the list; a non-list line and a non-Markdown file
     // get the ordinary newline.
     ed = editor(@"  - a|", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"  - a\n  - |", "nested bullets keep their indent");
-    ed = editor(@"- |", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"|", "Enter on an empty item leaves the list");
+    // An empty item still carries the marker on (Esc, not Enter, is how you drop it).
+    ed = editor(@"- |", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"- \n- |", "Enter on an empty bullet continues it");
+    ed = rawEditor(@"- [ ] ", @"a.md");  [ed insertNewline:nil];
+    CHECK([text(ed) isEqualToString:@"- [ ] \n- [ ] "], "Enter on an empty task box continues it (%s)", text(ed).UTF8String);
     ed = editor(@"hello|", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"hello\n|", "a plain line is untouched");
     ed = editor(@"- item|", @"a.c");  [ed insertNewline:nil];  SHOWS(ed, @"- item\n|", "a non-Markdown file is untouched");
 }

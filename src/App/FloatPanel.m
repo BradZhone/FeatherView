@@ -32,6 +32,8 @@ static const NSInteger kTreeMenuTag = 0x5107;    // a context-menu item stamped 
 @property (nonatomic, copy) void (^onSaveAll)(void);
 @property (nonatomic, copy) void (^onNextTab)(void);
 @property (nonatomic, copy) void (^onPreviousTab)(void);
+@property (nonatomic, copy) void (^onNewFile)(void);
+@property (nonatomic, copy) void (^onNewFolder)(void);
 @end
 
 @implementation FloatPanelWindow
@@ -54,6 +56,7 @@ static const NSInteger kTreeMenuTag = 0x5107;    // a context-menu item stamped 
         if ([k isEqualToString:@"w"]) { if (_onCloseTab) _onCloseTab(); return YES; }
         if ([k isEqualToString:@"["]) { if (_onBack) _onBack(); return YES; }
         if ([k isEqualToString:@"]"]) { if (_onForward) _onForward(); return YES; }
+        if ([k isEqualToString:@"n"]) { if (_onNewFile) _onNewFile(); return YES; }     // a new file in the folder
     }
     if (f == (NSEventModifierFlagCommand | NSEventModifierFlagOption) && [k isEqualToString:@"s"]) {
         if (_onSaveAll) _onSaveAll();
@@ -63,6 +66,7 @@ static const NSInteger kTreeMenuTag = 0x5107;    // a context-menu item stamped 
         if ([k isEqualToString:@"v"]) { if (_onTogglePreview) _onTogglePreview(); return YES; }
         if ([k isEqualToString:@"]"]) { if (_onNextTab) _onNextTab(); return YES; }
         if ([k isEqualToString:@"["]) { if (_onPreviousTab) _onPreviousTab(); return YES; }
+        if ([k isEqualToString:@"n"]) { if (_onNewFolder) _onNewFolder(); return YES; }   // ⇧⌘N: a new folder
     }
     // ⌃⇥ between tabs, as the main window has.
     if (f == NSEventModifierFlagControl && e.keyCode == 48) { if (_onNextTab) _onNextTab(); return YES; }
@@ -211,6 +215,8 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     _panel.onSaveAll = ^{ [weakSelf saveAll]; };
     _panel.onNextTab = ^{ [weakSelf selectNextTab]; };
     _panel.onPreviousTab = ^{ [weakSelf selectPreviousTab]; };
+    _panel.onNewFile = ^{ [weakSelf floatNewFile:nil]; };
+    _panel.onNewFolder = ^{ [weakSelf floatNewFolder:nil]; };
     // Its own frame across launches, which is all the position and size persistence needed.
     if (![_panel setFrameUsingName:_frameName]) [_panel center];
     _panel.frameAutosaveName = _frameName;

@@ -345,38 +345,26 @@ static BOOL opens(uint8_t c) { return c == '(' || c == '[' || c == '{'; }
     NSString *indent = [line substringToIndex:ind];
     NSString *rest = [line substringFromIndex:ind];
 
-    NSCharacterSet *ws = NSCharacterSet.whitespaceCharacterSet;
+    // Enter always carries the marker on; an empty item is not treated as "leave the list" (Esc is
+    // how the reader drops a marker they did not want). So a bare "- [ ]" continues to another box.
     NSString *marker = nil;           // the next line's marker, without the indent
-    BOOL empty = NO;                  // the current item is only a marker: Enter leaves the list
     unichar m = rest.length ? [rest characterAtIndex:0] : 0;
     if ((m == '-' || m == '*' || m == '+') && rest.length >= 2 && [rest characterAtIndex:1] == ' ') {
         NSString *after = [rest substringFromIndex:2];
         BOOL task = after.length >= 3 && [after characterAtIndex:0] == '[' && [after characterAtIndex:2] == ']'
                  && (after.length == 3 || [after characterAtIndex:3] == ' ');
-        NSString *body = task ? (after.length > 3 ? [after substringFromIndex:4] : @"") : after;
-        empty = [body stringByTrimmingCharactersInSet:ws].length == 0;
         marker = task ? [NSString stringWithFormat:@"%C [ ] ", m] : [NSString stringWithFormat:@"%C ", m];
     } else if (m >= '0' && m <= '9') {
         NSUInteger d = 0;
         while (d < rest.length && [rest characterAtIndex:d] >= '0' && [rest characterAtIndex:d] <= '9') d++;
         unichar delim = d < rest.length ? [rest characterAtIndex:d] : 0;
         if ((delim != '.' && delim != ')') || (d + 1 < rest.length && [rest characterAtIndex:d + 1] != ' ')) return NO;
-        NSString *body = rest.length > d + 2 ? [rest substringFromIndex:d + 2] : @"";
-        empty = [body stringByTrimmingCharactersInSet:ws].length == 0;
         marker = [NSString stringWithFormat:@"%ld%C ", (long)([rest substringToIndex:d].integerValue + 1), delim];
     } else {
         return NO;
     }
 
     _listContinuation = NSMakeRange(NSNotFound, 0);
-    if (empty) {
-        [self editCursors:^NSRange(Sel sel, NSString **t, NSInteger *a, NSInteger *c) {
-            *t = @""; *a = 0; *c = 0;
-            return NSMakeRange(ls, le - ls);
-        } kind:GroupOther];
-        _coalesceBroken = YES;
-        return YES;
-    }
     NSString *insert = [NSString stringWithFormat:@"%@%@%@", self.newline, indent, marker];
     [self editCursors:^NSRange(Sel sel, NSString **t, NSInteger *a, NSInteger *c) {
         *t = insert;
