@@ -418,6 +418,32 @@ static BOOL mergeInto(EditBatch *p, EditBatch *b) {
     self.scrollY = MAX(0, [self yForLine:line] - self.bounds.size.height / 3);
 }
 
+// Flip the task box on a 0-based source line: skip the indent and the list marker, then the
+// "[ ]" / "[x]" right after it, and swap the one byte between the brackets. One undoable edit.
+- (BOOL)toggleTaskOnLine:(NSUInteger)line {
+    if (line >= _buf.lineCount) return NO;
+    NSUInteger ls = [_buf lineStart:line], le = [_buf lineEnd:line], i = ls;
+    while (i < le && ([_buf byteAt:i] == ' ' || [_buf byteAt:i] == '\t')) i++;
+    uint8_t m = i < le ? [_buf byteAt:i] : 0;
+    if (m == '-' || m == '*' || m == '+') {
+        i++;
+    } else if (m >= '0' && m <= '9') {
+        while (i < le && [_buf byteAt:i] >= '0' && [_buf byteAt:i] <= '9') i++;
+        if (i >= le || ([_buf byteAt:i] != '.' && [_buf byteAt:i] != ')')) return NO;
+        i++;
+    } else {
+        return NO;
+    }
+    if (i >= le || [_buf byteAt:i] != ' ') return NO;            // a space must follow the marker
+    i++;
+    if (i + 3 > le) return NO;                                   // room for "[x]"
+    if ([_buf byteAt:i] != '[' || [_buf byteAt:i + 2] != ']') return NO;
+    uint8_t state = [_buf byteAt:i + 1];
+    if (state != ' ' && state != 'x' && state != 'X') return NO;
+    [self replaceRange:NSMakeRange(i + 1, 1) withString:state == ' ' ? @"x" : @" " kind:GroupOther];
+    return YES;
+}
+
 // The bytes as they go to disk: UTF-8 as is, other encodings converted (UTF-16 with its BOM, in its byte order).
 - (NSData *)encodedContents:(NSString **)error {
     if (_encoding == NSUTF8StringEncoding) return nil;          // written straight from the buffer

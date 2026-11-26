@@ -11,6 +11,8 @@
 #import "FTTabDrag.h"
 #import "TabBarView.h"
 #import "MarkupView.h"
+#import "MarkdownRender.h"
+#import "Markdown.h"
 #import "Localization.h"
 #include <signal.h>
 
@@ -689,6 +691,59 @@ static void markdownLists(void) {
     ed = editor(@"- item|", @"a.c");  [ed insertNewline:nil];  SHOWS(ed, @"- item\n|", "a non-Markdown file is untouched");
 }
 
+// Non-white pixels when the image is drawn over white: the empty box used to composite to nothing.
+static long checkboxInk(NSImage *img) {
+    NSInteger W = 30, H = 28, inked = 0;
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:W pixelsHigh:H
+        bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+    NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:gc];
+    [NSColor.whiteColor setFill]; NSRectFill(NSMakeRect(0, 0, W, H));
+    [img drawInRect:NSMakeRect(0, 0, img.size.width, img.size.height)];
+    [NSGraphicsContext restoreGraphicsState];
+    for (NSInteger y = 0; y < H; y++) for (NSInteger x = 0; x < W; x++) {
+        NSColor *px = [[rep colorAtX:x y:y] colorUsingColorSpace:NSColorSpace.genericRGBColorSpace];
+        if (px.redComponent < 0.97 || px.greenComponent < 0.97 || px.blueComponent < 0.97) inked++;
+    }
+    return inked;
+}
+
+// Task checkboxes: both states draw (the empty one composited to nothing before), each is a link to
+// its source line, and toggling that line flips the box as one undoable edit.
+static void markdownTaskBoxes(void) {
+    NSAttributedString *s = [[MarkdownRenderer new] render:MDParse(@"- [ ] todo\n- [x] done\n")];
+    NSMutableArray<NSNumber *> *inks = [NSMutableArray array];
+    NSMutableArray<NSString *> *links = [NSMutableArray array];
+    for (NSUInteger i = 0; i < s.length; ) {
+        NSRange eff;
+        NSTextAttachment *att = [s attribute:NSAttachmentAttributeName atIndex:i effectiveRange:&eff];
+        if (att) {
+            [inks addObject:@(checkboxInk(att.image))];
+            id link = [s attribute:NSLinkAttributeName atIndex:i effectiveRange:NULL];
+            [links addObject:([link isKindOfClass:NSURL.class] ? [link absoluteString] : [link description]) ?: @""];
+        }
+        i = NSMaxRange(eff);
+    }
+    CHECK(inks.count == 2, "two checkboxes rendered (%lu)", (unsigned long)inks.count);
+    if (inks.count == 2) {
+        CHECK(inks[0].longValue > 0, "the empty box actually draws (%ld px)", inks[0].longValue);
+        CHECK(inks[1].longValue > 0, "the checked box draws too (%ld px)", inks[1].longValue);
+        CHECK([links[0] isEqualToString:@"x-feather-task:0"], "the first box links to its line (%s)", links[0].UTF8String);
+        CHECK([links[1] isEqualToString:@"x-feather-task:1"], "the second box links to its line (%s)", links[1].UTF8String);
+    }
+
+    TextEditorView *ed = rawEditor(@"- [ ] a\n- [x] b\n", @"t.md");
+    CHECK([ed toggleTaskOnLine:0], "line 0 has a task box");
+    CHECK([text(ed) isEqualToString:@"- [x] a\n- [x] b\n"], "unchecked → checked (%s)", text(ed).UTF8String);
+    [ed toggleTaskOnLine:1];
+    CHECK([text(ed) isEqualToString:@"- [x] a\n- [ ] b\n"], "checked → unchecked (%s)", text(ed).UTF8String);
+    [ed undo:nil];
+    CHECK([text(ed) isEqualToString:@"- [x] a\n- [x] b\n"], "each toggle is its own undo step (%s)", text(ed).UTF8String);
+    CHECK(![rawEditor(@"just text\n", @"t.md") toggleTaskOnLine:0], "a plain line has no box to toggle");
+    CHECK([rawEditor(@"2) [ ] x\n", @"t.md") toggleTaskOnLine:0], "an ordered task box toggles too");
+}
+
 #pragma mark Drawing, wrapping, scale
 
 static void drawing(void) {
@@ -857,6 +912,7 @@ int main(void) {
             lineCommands();
             typingAids();
             markdownLists();
+            markdownTaskBoxes();
             drawing();
             folding();
             expandSelection();

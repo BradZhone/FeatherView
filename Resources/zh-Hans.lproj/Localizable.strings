@@ -251,6 +251,7 @@
 "None" = "无";
 "Not a Jupyter notebook (no cells)" = "不是 Jupyter 格式（没有 cells）";
 "not done" = "未完成";
+"Toggle this task" = "切换此任务";
 "Not enough disk space" = "磁盘空间不足";
 "Not permitted (macOS refused the change)" = "没有权限更改（macOS 拒绝了）";
 "Now: " = "现在：";

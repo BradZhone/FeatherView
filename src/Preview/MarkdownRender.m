@@ -223,7 +223,7 @@ static NSString *extForLang(NSString *lang) {
     for (MDBlock *item in b.children) {
         [self mark:item.line];
         NSAttributedString *marker;
-        if (item.task >= 0) marker = [self checkbox:item.task == 1];
+        if (item.task >= 0) marker = [self checkbox:item.task == 1 line:item.line];
         else {
             NSString *m = b.ordered ? [NSString stringWithFormat:@"%ld.", (long)num] : bullets[MIN(c.depth, 2)];
             marker = [[NSAttributedString alloc] initWithString:m attributes:@{

@@ -34,7 +34,7 @@
 @interface MarkdownRenderer (Inline)
 - (void)inlines:(NSArray<MDInline *> *)a attrs:(NSDictionary *)base into:(NSMutableAttributedString *)o;
 - (NSAttributedString *)imageFor:(NSString *)src alt:(NSString *)alt width:(NSString *)w height:(NSString *)h attrs:(NSDictionary *)attrs;
-- (NSAttributedString *)checkbox:(BOOL)done;
+- (NSAttributedString *)checkbox:(BOOL)done line:(NSUInteger)line;
 @end
 
 @interface MarkdownRenderer (Blocks)

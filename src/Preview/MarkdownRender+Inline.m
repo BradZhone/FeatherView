@@ -212,16 +212,30 @@ static NSImage *decode(CGImageSourceRef src, CGFloat maxPx) {
     return s;
 }
 
-- (NSAttributedString *)checkbox:(BOOL)done {
-    NSImageSymbolConfiguration *cfg = [[NSImageSymbolConfiguration configurationWithPointSize:13 weight:NSFontWeightRegular]
-        configurationByApplyingConfiguration:[NSImageSymbolConfiguration configurationWithPaletteColors:
-            @[done ? NSColor.controlAccentColor : NSColor.secondaryLabelColor]]];
-    NSImage *img = [[NSImage imageWithSystemSymbolName:done ? @"checkmark.square.fill" : @"square"
+- (NSAttributedString *)checkbox:(BOOL)done line:(NSUInteger)line {
+    NSColor *color = done ? NSColor.controlAccentColor : NSColor.secondaryLabelColor;
+    NSImageSymbolConfiguration *cfg = [NSImageSymbolConfiguration configurationWithPointSize:13 weight:NSFontWeightRegular];
+    NSImage *base = [[NSImage imageWithSystemSymbolName:done ? @"checkmark.square.fill" : @"square"
                                 accessibilityDescription:done ? FTL(@"done") : FTL(@"not done")] imageWithSymbolConfiguration:cfg];
+    NSSize sz = base.size;
+    // The plain "square" symbol composites to nothing under a palette colour, so the empty box never
+    // showed. Overlaying the colour only where the glyph has ink (source-atop) tints both states
+    // reliably and bakes an opaque image.
+    NSImage *img = [NSImage imageWithSize:sz flipped:NO drawingHandler:^BOOL(NSRect r) {
+        [base drawInRect:r];
+        [color set];
+        NSRectFillUsingOperation(r, NSCompositingOperationSourceAtop);
+        return YES;
+    }];
     NSTextAttachment *att = [NSTextAttachment new];
     att.image = img;
-    att.bounds = NSMakeRect(0, -2, img.size.width, img.size.height);
-    return [NSAttributedString attributedStringWithAttachment:att];
+    att.bounds = NSMakeRect(0, -2, sz.width, sz.height);
+    NSMutableAttributedString *s = [[NSAttributedString attributedStringWithAttachment:att] mutableCopy];
+    // Clicking toggles it: a link the preview turns into an edit of the box on this source line.
+    [s addAttribute:NSLinkAttributeName value:[NSString stringWithFormat:@"x-feather-task:%lu", (unsigned long)line]
+              range:NSMakeRange(0, s.length)];
+    [s addAttribute:NSToolTipAttributeName value:FTL(@"Toggle this task") range:NSMakeRange(0, s.length)];
+    return s;
 }
 
 @end

@@ -75,6 +75,9 @@
 // per-document state (cursors, undo, folds, wrap, caches) reset. NO when the view has unsaved
 // edits, which must never be dropped. Saves rebuilding the viewer when a link is followed.
 - (BOOL)loadData:(NSData *)data path:(NSString *)path encoding:(NSStringEncoding)encoding;
+// Flips a Markdown task box ("- [ ]" ↔ "- [x]") on a 0-based source line, as one undoable edit.
+// For the preview's clickable checkboxes. NO when that line holds no task box.
+- (BOOL)toggleTaskOnLine:(NSUInteger)line;
 @end
 
 @interface TextEditorView (Search)

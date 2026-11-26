@@ -313,6 +313,14 @@ static NSString *absolute(NSString *p) {
 }
 
 - (void)followHref:(NSString *)href {
+    // A clicked checkbox: flip its box in the source and re-render at once, so the preview updates
+    // without waiting for the debounced live render.
+    NSString *taskPrefix = @"x-feather-task:";
+    if ([href hasPrefix:taskPrefix]) {
+        NSUInteger line = (NSUInteger)[[href substringFromIndex:taskPrefix.length] integerValue];
+        if ([_editor toggleTaskOnLine:line]) [self refreshNow]; else NSBeep();
+        return;
+    }
     NSURL *u = [NSURL URLWithString:href];
     NSString *scheme = u.scheme.lowercaseString;
     if ([@[@"http", @"https", @"mailto"] containsObject:scheme ?: @""]) { [NSWorkspace.sharedWorkspace openURL:u]; return; }
