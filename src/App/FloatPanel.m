@@ -10,12 +10,14 @@
 #import "ImageViewer.h"
 #import "PDFViewer.h"
 #import "TabBarView.h"
+#import "FileOps.h"
 #import "ContentController.h"      // AutoSaveMode, shared with the main window
 
 static const CGFloat kTreeW = 200;        // the sidebar's width inside the panel
 static const CGFloat kHeaderH = 28;
 static const CGFloat kTabH = 26;      // the panel's strip, a little tighter than the window's
 static NSString *const kDefaultFrameName = @"FeatherFloat";
+static const NSInteger kTreeMenuTag = 0x5107;    // a context-menu item stamped with its clicked paths
 
 // Esc and ⌘B have to work while the tree has the keyboard, so the panel takes them before the
 // responder chain: an NSOutlineView swallows Esc, and nothing in the panel is in a menu yet.
@@ -130,6 +132,7 @@ static NSString *const kDefaultFrameName = @"FeatherFloat";
     NSTextField *_placeholder;
     NSScrollView *_treeScroll;
     FileOutlineView *_outline;
+    NSMenu *_treeMenu;
     NSButton *_sidebarButton;
     NSPopUpButton *_folderPopup;
     NSButton *_chooseButton;
@@ -257,6 +260,7 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     _outline.rowHeight = 20;
     _treeScroll.documentView = _outline;
     [col setWidth:_treeScroll.contentSize.width];
+    _outline.menu = [self buildTreeMenu];
     [_sidebar addSubview:_treeScroll];
 
     _content = [[FloatBackdrop alloc] initWithFrame:NSMakeRect(_treeWidth + 1, 0, b.size.width - _treeWidth - 1, b.size.height)];
@@ -422,6 +426,14 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 
 // Item 0 is the pull-down's title; everything below is rebuilt each time it opens.
 - (void)menuNeedsUpdate:(NSMenu *)menu {
+    if (menu == _treeMenu) {
+        // Stamp every item with the right-clicked paths (the root when the click missed a row), the
+        // way the main window's tree menu does.
+        NSArray<NSString *> *targets = _tree.clickedPaths;
+        if (!targets.count && _tree.rootPath) targets = @[_tree.rootPath];
+        for (NSMenuItem *i in menu.itemArray) i.representedObject = targets;
+        return;
+    }
     if (menu != _folderPopup.menu) return;
     while (menu.numberOfItems > 0) [menu removeItemAtIndex:0];
     NSMenuItem *title = [[NSMenuItem alloc] initWithTitle:self.folderTitle action:NULL keyEquivalent:@""];
@@ -463,6 +475,211 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 
 - (void)revealFolder:(id)sender {
     if (_folder.length) [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:_folder]]];
+}
+
+#pragma mark Tree file operations
+
+// The same actions the main window's tree offers, so the panel's tree is not a read-only list:
+// create, rename, trash, and the two that only point elsewhere. New file / folder also answer
+// ⌥⌘N-less here — there is no menu bar reaching the panel — so they live only in this menu.
+- (NSMenu *)buildTreeMenu {
+    _treeMenu = [[NSMenu alloc] initWithTitle:@""];
+    _treeMenu.delegate = self;
+    struct { NSString *title; SEL action; } items[] = {
+        {FTL(@"New File…"), @selector(floatNewFile:)},
+        {FTL(@"New Folder…"), @selector(floatNewFolder:)},
+        {nil, NULL},
+        {FTL(@"Rename…"), @selector(renameItem:)},
+        {FTL(@"Move to Trash"), @selector(trashItem:)},
+        {nil, NULL},
+        {FTL(@"Show in Finder"), @selector(floatRevealItem:)},
+        {FTL(@"Copy Path"), @selector(floatCopyItemPath:)},
+    };
+    for (size_t i = 0; i < sizeof items / sizeof *items; i++) {
+        if (!items[i].title) { [_treeMenu addItem:NSMenuItem.separatorItem]; continue; }
+        NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:items[i].title action:items[i].action keyEquivalent:@""];
+        mi.target = self;
+        mi.tag = kTreeMenuTag;
+        [_treeMenu addItem:mi];
+    }
+    return _treeMenu;
+}
+
+// A context-menu item carries its clicked paths; the keyboard (Return, ⌘⌫) carries none, so those
+// fall back to the tree's selection.
+- (NSArray<NSString *> *)treeTargets:(id)sender {
+    if ([sender isKindOfClass:NSMenuItem.class] && [sender tag] == kTreeMenuTag)
+        return [sender representedObject] ?: @[];
+    return _tree.selectedPaths;
+}
+- (NSString *)treeTarget:(id)sender { return [self treeTargets:sender].firstObject; }
+
+// The folder new items go into: the target when it is a folder, else its parent; clamped to the root.
+- (NSString *)directoryForNewItem:(id)sender {
+    NSString *t = [self treeTarget:sender] ?: _tree.rootPath;
+    if (!_tree.rootPath || !FOPathIsWithin(t, _tree.rootPath)) t = _tree.rootPath;
+    if (!t) return nil;
+    BOOL dir = NO;
+    [NSFileManager.defaultManager fileExistsAtPath:t isDirectory:&dir];
+    return dir ? t : t.stringByDeletingLastPathComponent;
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)mi {
+    SEL a = mi.action;
+    NSArray<NSString *> *targets = [self treeTargets:mi];
+    NSString *first = targets.firstObject;
+    if (a == @selector(floatNewFile:) || a == @selector(floatNewFolder:)) return _tree.rootPath != nil;
+    if (a == @selector(renameItem:)) return first.length && ![first isEqualToString:_tree.rootPath];
+    if (a == @selector(trashItem:)) {
+        NSUInteger n = [self trashableTreeTargets:targets].count;
+        mi.title = n > 1 ? [NSString stringWithFormat:FTL(@"Move %lu Items to Trash"), (unsigned long)n] : FTL(@"Move to Trash");
+        return n > 0;
+    }
+    if (a == @selector(floatRevealItem:) || a == @selector(floatCopyItemPath:)) return targets.count > 0;
+    return YES;
+}
+
+// A sheet on the panel with a text field, the base name preselected. Modal-guarded so hide-on-blur
+// does not pull the panel out from under its own sheet.
+- (void)promptName:(NSString *)title initial:(NSString *)initial button:(NSString *)button
+              done:(void (^)(NSString *name))done {
+    if (_namePrompt) {
+        NSString *name = _namePrompt(title, initial);
+        if (!name.length) return;
+        NSString *err = FOValidateName(name);
+        if (err) { [self flash:err]; return; }
+        done(name);
+        return;
+    }
+    NSAlert *a = [NSAlert new];
+    a.messageText = title;
+    [a addButtonWithTitle:button];
+    [a addButtonWithTitle:FTL(@"Cancel")];
+    NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 280, 24)];
+    tf.stringValue = initial;
+    a.accessoryView = tf;
+    a.window.initialFirstResponder = tf;
+    _modalDepth++;
+    __weak FloatPanel *weak = self;
+    [a beginSheetModalForWindow:_panel completionHandler:^(NSModalResponse r) {
+        FloatPanel *me = weak;
+        if (me) me->_modalDepth--;
+        if (r != NSAlertFirstButtonReturn) return;
+        NSString *name = [tf.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSString *err = FOValidateName(name);
+        if (err) { [me flash:err]; return; }
+        done(name);
+    }];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSText *ed = tf.currentEditor;
+        NSString *ext = initial.pathExtension;
+        NSUInteger len = ext.length && initial.length > ext.length + 1 ? initial.length - ext.length - 1 : initial.length;
+        ed.selectedRange = NSMakeRange(0, len);
+    });
+}
+
+- (void)floatNewFile:(id)sender { [self createTreeItem:sender directory:NO]; }
+- (void)floatNewFolder:(id)sender { [self createTreeItem:sender directory:YES]; }
+
+- (void)createTreeItem:(id)sender directory:(BOOL)isDir {
+    NSString *dir = [self directoryForNewItem:sender];
+    if (!dir) return;
+    NSString *title = [NSString stringWithFormat:FTL(@"New %2$@ in “%1$@”"), dir.lastPathComponent, isDir ? FTL(@"Folder") : FTL(@"File")];
+    __weak FloatPanel *weak = self;
+    [self promptName:title initial:isDir ? FTL(@"New Folder") : FTL(@"Untitled.txt") button:FTL(@"Create") done:^(NSString *name) {
+        FloatPanel *me = weak;
+        NSString *p = [dir stringByAppendingPathComponent:name];
+        NSString *err = FOCreate(p, isDir);
+        if (err) { [me flash:err]; return; }
+        [me->_tree reloadAndReveal:p];
+        if (!isDir && [me canShowInPanel:p]) [me openFile:p];      // a new note opens for editing
+    }];
+}
+
+// Return in the tree, or "Rename…". Any open tab under the old path follows to the new one rather
+// than being left pointing at a file that no longer exists.
+- (void)renameItem:(id)sender {
+    NSString *from = [self treeTarget:sender];
+    if (!from.length || [from isEqualToString:_tree.rootPath]) return;
+    __weak FloatPanel *weak = self;
+    [self promptName:FTL(@"Rename") initial:from.lastPathComponent button:FTL(@"Rename") done:^(NSString *name) {
+        FloatPanel *me = weak;
+        NSString *to = [from.stringByDeletingLastPathComponent stringByAppendingPathComponent:name];
+        NSString *err = FORename(from, to);
+        if (err) { [me flash:err]; return; }
+        [me retargetDocsFrom:from to:to];
+        [me->_tree reloadAndReveal:to];
+    }];
+}
+
+// After a rename or move: point every tab that was under `from` at its place under `to`.
+- (void)retargetDocsFrom:(NSString *)from to:(NSString *)to {
+    for (FloatDoc *d in _docs) {
+        if (!d.path) continue;
+        NSString *np = nil;
+        if ([d.path isEqualToString:from]) np = to;
+        else if (FOPathIsWithin(d.path, from))
+            np = [to stringByAppendingString:[d.path substringFromIndex:from.length]];
+        if (!np) continue;
+        d.path = np;
+        [d.editor setDocumentPath:np];
+        d.markup.path = np;
+    }
+    [self reloadTabs];
+    [self docChanged:_active];
+}
+
+// Without the root, and without items already inside another selected folder (it takes them along).
+- (NSArray<NSString *> *)trashableTreeTargets:(NSArray<NSString *> *)paths {
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *p in paths) {
+        if ([p isEqualToString:_tree.rootPath] || [out containsObject:p]) continue;
+        BOOL covered = NO;
+        for (NSString *q in paths)
+            if (![q isEqualToString:p] && ![q isEqualToString:_tree.rootPath] && FOPathIsWithin(p, q)) { covered = YES; break; }
+        if (!covered) [out addObject:p];
+    }
+    return out;
+}
+
+// ⌘⌫ in the tree, or "Move to Trash". Tabs under a trashed path are closed first (asking about
+// unsaved work); cancelling there trashes nothing, as in the main window.
+- (void)trashItem:(id)sender {
+    NSArray<NSString *> *paths = [self trashableTreeTargets:[self treeTargets:sender]];
+    if (!paths.count) return;
+    for (NSString *p in paths) if (![self closeTabsWithin:p]) return;
+    NSMutableArray *errors = [NSMutableArray array];
+    for (NSString *p in paths) {
+        NSString *err = _trashHandler ? _trashHandler(p) : FOTrash(p);
+        if (err) [errors addObject:paths.count > 1 ? [NSString stringWithFormat:@"%@: %@", p.lastPathComponent, err] : err];
+    }
+    [_tree reloadAndReveal:_active.path ?: paths.firstObject.stringByDeletingLastPathComponent];
+    if (errors.count) [self flash:[errors componentsJoinedByString:@"  "]];
+}
+
+// Close every tab at or under `path`, asking about unsaved work. NO if the reader cancelled.
+- (BOOL)closeTabsWithin:(NSString *)path {
+    for (FloatDoc *d in _docs.copy) {
+        if (!d.path || !(([d.path isEqualToString:path]) || FOPathIsWithin(d.path, path))) continue;
+        NSInteger i = (NSInteger)[_docs indexOfObject:d];
+        if (d.editor.isDirty && ![self confirmUnsavedDoc:d]) return NO;
+        d.editor = nil;     // already asked; closeTab: must not ask again
+        [self closeTab:i];
+    }
+    return YES;
+}
+
+- (void)floatRevealItem:(id)sender {
+    NSMutableArray<NSURL *> *urls = [NSMutableArray array];
+    for (NSString *p in [self treeTargets:sender]) [urls addObject:[NSURL fileURLWithPath:p]];
+    if (urls.count) [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:urls];
+}
+
+- (void)floatCopyItemPath:(id)sender {
+    NSArray<NSString *> *paths = [self treeTargets:sender];
+    if (!paths.count) return;
+    [NSPasteboard.generalPasteboard clearContents];
+    [NSPasteboard.generalPasteboard setString:[paths componentsJoinedByString:@"\n"] forType:NSPasteboardTypeString];
 }
 
 #pragma mark Showing a file in the panel

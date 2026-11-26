@@ -15,6 +15,14 @@
 #import "SettingsWindow.h"
 #import "ShortcutField.h"
 
+// The tree's own action methods are internal to the panel; the test drives them directly.
+@interface FloatPanel (TreeOpsTesting)
+- (void)floatNewFile:(id)sender;
+- (void)floatNewFolder:(id)sender;
+- (void)renameItem:(id)sender;
+- (void)trashItem:(id)sender;
+@end
+
 static int failures = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
 
@@ -1288,6 +1296,63 @@ static void moveIntoPanel(NSString *dir) {
     [fp hide];
 }
 
+// The panel's tree is not a read-only list: new file / folder, rename (with the open tab following),
+// and move to trash (closing the tab). The name prompt and the trash are stubbed so nothing pops a
+// sheet or touches the real Trash.
+static void treeFileOps(NSString *unused) {
+    NSString *dir = makeFolder(@"treeops", @[@"keep.md"]);
+    FloatPanel *fp = newPanel();
+    fp.folder = dir;
+    __block NSString *nextName = nil;
+    fp.namePrompt = ^NSString *(NSString *t, NSString *init) { return nextName; };
+    fp.trashHandler = ^NSString *(NSString *p) { [NSFileManager.defaultManager removeItemAtPath:p error:nil]; return nil; };
+    [fp show];
+    spin(0.3);
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    // New file, into the root, opened for editing.
+    nextName = @"made.md";
+    [fp floatNewFile:nil];
+    spin(0.3);
+    NSString *made = [dir stringByAppendingPathComponent:@"made.md"];
+    CHECK([fm fileExistsAtPath:made], "new file is created on disk");
+    CHECK([fp.openPath isEqualToString:made], "and opens in the panel (%s)", fp.openPath.lastPathComponent.UTF8String);
+
+    // New folder.
+    nextName = @"sub";
+    [fp floatNewFolder:nil];
+    spin(0.3);
+    BOOL isDir = NO;
+    CHECK([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"sub"] isDirectory:&isDir] && isDir, "new folder is created");
+
+    // Rename the open file; its tab follows to the new path rather than dangling.
+    [fp.tree revealPath:made];
+    spin(0.1);
+    nextName = @"renamed.md";
+    [fp renameItem:nil];
+    spin(0.3);
+    NSString *renamed = [dir stringByAppendingPathComponent:@"renamed.md"];
+    CHECK([fm fileExistsAtPath:renamed] && ![fm fileExistsAtPath:made], "rename moves the file");
+    CHECK([fp.openPath isEqualToString:renamed], "the open tab follows the rename (%s)", fp.openPath.lastPathComponent.UTF8String);
+
+    // Trash it; the file goes and its tab closes.
+    [fp.tree revealPath:renamed];
+    spin(0.1);
+    [fp trashItem:nil];
+    spin(0.3);
+    CHECK(![fm fileExistsAtPath:renamed], "trash removes the file");
+    CHECK(![fp.openPaths containsObject:renamed], "and closes its tab");
+
+    // The root cannot be renamed or trashed.
+    [fp.tree revealPath:dir];        // selecting the root selects nothing within it
+    NSMenuItem *rename = [[NSMenuItem alloc] initWithTitle:@"" action:@selector(renameItem:) keyEquivalent:@""];
+    rename.tag = 0x5107; rename.representedObject = @[dir];
+    CHECK(![(id<NSMenuItemValidation>)fp validateMenuItem:rename], "the workspace root is not renameable");
+
+    [fp hide];
+    [fm removeItemAtPath:dir error:nil];
+}
+
 static void builtLazily(void) {
     AppDelegate *app = [AppDelegate new];
     CHECK(app->_float == nil, "no panel exists until something asks for one");
@@ -1356,6 +1421,7 @@ int main(void) {
             globalShortcut(a);
             menuItemDoesNotClaimTheShortcut();
             settingsSection(a, b);
+            treeFileOps(a);
             builtLazily();
         } @catch (NSException *e) {
             CHECK(NO, "uncaught %s: %s", e.name.UTF8String, e.reason.UTF8String);
