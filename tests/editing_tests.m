@@ -634,6 +634,61 @@ static void guidesAndWhitespace(void) {
     CHECK(ink(floor(x0 + 4 * cw) + 0.5, 4 + lh / 2) < 0.05, "no guide on a line without indentation (%.2f)", ink(floor(x0 + 4 * cw) + 0.5, 4 + lh / 2));
 }
 
+#pragma mark Markdown list continuation
+
+// An editor on raw text (no [ ] | markup parsing, so task boxes survive), caret at the end.
+static TextEditorView *rawEditor(NSString *content, NSString *name) {
+    PieceTable *pt = [[PieceTable alloc] initWithData:[content dataUsingEncoding:NSUTF8StringEncoding]];
+    TextEditorView *ed = [[TextEditorView alloc] initWithFrame:NSMakeRect(0, 0, 700, 500) buffer:pt
+                                                          path:[@"/tmp" stringByAppendingPathComponent:name]
+                                                      encoding:NSUTF8StringEncoding];
+    ed.pasteboard = pb;
+    ed.wordWrap = NO;
+    win.contentView = ed;
+    [win makeFirstResponder:ed];
+    Sel s = SelMake(pt.length, pt.length);
+    [ed setCursors:&s count:1 primary:0];
+    return ed;
+}
+
+// Enter on a Markdown list line carries the marker to the next line; Esc right after takes it back.
+static void markdownLists(void) {
+    // A dash carries over, and Esc removes just the carried marker, leaving a blank line.
+    TextEditorView *ed = editor(@"- item|", @"a.md");
+    [ed insertNewline:nil];
+    SHOWS(ed, @"- item\n- |", "a dash carries to the next line");
+    [ed cancelOperation:nil];
+    SHOWS(ed, @"- item\n|", "Esc takes the carried marker back");
+
+    // Esc only cancels while nothing has changed since: once text is typed it collapses selections.
+    ed = editor(@"- a|", @"a.md");
+    [ed insertNewline:nil];
+    type(ed, @"b");
+    [ed cancelOperation:nil];
+    SHOWS(ed, @"- a\n- b|", "Esc after typing leaves the line alone");
+
+    // The other bullets, and a task box that always starts unchecked on the new line.
+    ed = editor(@"* x|", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"* x\n* |", "star carries over");
+    ed = editor(@"+ y|", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"+ y\n+ |", "plus carries over");
+    ed = rawEditor(@"- [ ] todo", @"a.md");
+    [ed insertNewline:nil];
+    CHECK([text(ed) isEqualToString:@"- [ ] todo\n- [ ] "], "a task box carries over (%s)", text(ed).UTF8String);
+    ed = rawEditor(@"- [x] done", @"a.md");
+    [ed insertNewline:nil];
+    CHECK([text(ed) isEqualToString:@"- [x] done\n- [ ] "], "the new task box is unchecked (%s)", text(ed).UTF8String);
+
+    // Ordered lists count up, with either delimiter.
+    ed = editor(@"1. first|", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"1. first\n2. |", "an ordered list counts up");
+    ed = editor(@"3) a|", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"3) a\n4) |", "and with a paren");
+
+    // Indentation is kept; an empty item leaves the list; a non-list line and a non-Markdown file
+    // get the ordinary newline.
+    ed = editor(@"  - a|", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"  - a\n  - |", "nested bullets keep their indent");
+    ed = editor(@"- |", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"|", "Enter on an empty item leaves the list");
+    ed = editor(@"hello|", @"a.md");  [ed insertNewline:nil];  SHOWS(ed, @"hello\n|", "a plain line is untouched");
+    ed = editor(@"- item|", @"a.c");  [ed insertNewline:nil];  SHOWS(ed, @"- item\n|", "a non-Markdown file is untouched");
+}
+
 #pragma mark Drawing, wrapping, scale
 
 static void drawing(void) {
@@ -801,6 +856,7 @@ int main(void) {
             clipboard();
             lineCommands();
             typingAids();
+            markdownLists();
             drawing();
             folding();
             expandSelection();

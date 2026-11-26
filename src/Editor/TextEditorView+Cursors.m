@@ -579,6 +579,7 @@ static NSUInteger cursorOverlapping(const Sel *c, NSUInteger n, NSRange r) {
 
 // Esc: back to one cursor, then drop the selection.
 - (void)cancelOperation:(id)s {
+    if ([self cancelListContinuation]) return;      // take back a marker Enter just carried over
     if (_extra.length) { [self rememberCursors]; [self dropExtraCursors]; _coalesceBroken = YES; [self notifyChange]; return; }
     if (self.selection.length) [self moveCaretTo:_caret extend:NO];
 }

@@ -84,6 +84,11 @@ typedef struct { NSUInteger location, removed, inserted; } BatchEdit;
     NSMutableData *_extra;
     NSMutableArray<NSData *> *_cursorHistory;          // earlier cursor sets, for ⌘U (Sel[] + primary index)
     NSMutableIndexSet *_autoClosed;                    // closing brackets / quotes typed by auto-close
+    // Markdown: the list marker Enter just carried to the new line, so Esc right after can take it
+    // back. _listContinuation.location == NSNotFound means nothing is pending; _listMarker is what was
+    // inserted, checked against the buffer before removing it.
+    NSRange _listContinuation;
+    NSString *_listMarker;
     NSPasteboard *_pasteboard;
     BOOL _columnDrag, _ignoreDrag;                     // ⇧⌥ drag: column selection; a ⌥ click removed a cursor
     NSPoint _columnFrom;                               // x in the text, y = row
@@ -229,6 +234,8 @@ typedef NSUInteger (^CaretMove)(Sel *s);                   // new caret of one c
 @interface TextEditorView (Assist)
 - (BOOL)autoPairInsert:(NSString *)s;                     // handled typing of a bracket or quote
 - (BOOL)autoPairBackspace;
+- (BOOL)continueMarkdownList;                             // Enter carried a list marker to the new line
+- (BOOL)cancelListContinuation;                           // Esc took that marker back
 - (void)shiftAutoClosed:(EditList *)edits;
 - (void)updateBracketPair;
 - (NSString *)highlightedWord:(BOOL *)wholeWord;          // what other occurrences are marked for

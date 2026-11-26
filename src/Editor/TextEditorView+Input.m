@@ -312,6 +312,7 @@ static BOOL anySelection(TextEditorView *v) {
 // Enter keeps the line's indentation, adds a level after an opening bracket (or a Python colon), and
 // puts a closing bracket right after the caret on a line of its own.
 - (void)insertNewline:(id)s {
+    if ([self continueMarkdownList]) return;            // a Markdown list marker carries to the new line
     NSString *nl = self.newline, *unit = _indentUnit;
     BOOL colon = [@[@"py", @"pyi", @"pyw"] containsObject:_path.pathExtension.lowercaseString];
     [self editCursors:^NSRange(Sel sel, NSString **t, NSInteger *a, NSInteger *c) {

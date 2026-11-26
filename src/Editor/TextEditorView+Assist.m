@@ -326,4 +326,84 @@ static BOOL opens(uint8_t c) { return c == '(' || c == '[' || c == '{'; }
     return [self stringIn:w];
 }
 
+#pragma mark Markdown list continuation
+
+// Enter on a Markdown list line carries the marker to the next line: "- ", "* ", "+ ", a task box
+// "- [ ] " (always unchecked on the new line), or the next number of an ordered list. On an item with
+// no content it leaves the list instead, clearing the marker. Only a single caret at the end of the
+// line; anything else falls through to the ordinary newline. Returns YES when it handled the Enter.
+- (BOOL)continueMarkdownList {
+    if (![_hl.modeName isEqualToString:@"markdown"]) return NO;
+    if (_extra.length || self.selection.length) return NO;
+    NSUInteger at = _caret, L = [_buf lineForOffset:at];
+    NSUInteger ls = [_buf lineStart:L], le = [_buf lineEnd:L];
+    if (at != le) return NO;
+    NSString *line = [self stringIn:NSMakeRange(ls, le - ls)];
+
+    NSUInteger ind = 0;
+    while (ind < line.length) { unichar c = [line characterAtIndex:ind]; if (c != ' ' && c != '\t') break; ind++; }
+    NSString *indent = [line substringToIndex:ind];
+    NSString *rest = [line substringFromIndex:ind];
+
+    NSCharacterSet *ws = NSCharacterSet.whitespaceCharacterSet;
+    NSString *marker = nil;           // the next line's marker, without the indent
+    BOOL empty = NO;                  // the current item is only a marker: Enter leaves the list
+    unichar m = rest.length ? [rest characterAtIndex:0] : 0;
+    if ((m == '-' || m == '*' || m == '+') && rest.length >= 2 && [rest characterAtIndex:1] == ' ') {
+        NSString *after = [rest substringFromIndex:2];
+        BOOL task = after.length >= 3 && [after characterAtIndex:0] == '[' && [after characterAtIndex:2] == ']'
+                 && (after.length == 3 || [after characterAtIndex:3] == ' ');
+        NSString *body = task ? (after.length > 3 ? [after substringFromIndex:4] : @"") : after;
+        empty = [body stringByTrimmingCharactersInSet:ws].length == 0;
+        marker = task ? [NSString stringWithFormat:@"%C [ ] ", m] : [NSString stringWithFormat:@"%C ", m];
+    } else if (m >= '0' && m <= '9') {
+        NSUInteger d = 0;
+        while (d < rest.length && [rest characterAtIndex:d] >= '0' && [rest characterAtIndex:d] <= '9') d++;
+        unichar delim = d < rest.length ? [rest characterAtIndex:d] : 0;
+        if ((delim != '.' && delim != ')') || (d + 1 < rest.length && [rest characterAtIndex:d + 1] != ' ')) return NO;
+        NSString *body = rest.length > d + 2 ? [rest substringFromIndex:d + 2] : @"";
+        empty = [body stringByTrimmingCharactersInSet:ws].length == 0;
+        marker = [NSString stringWithFormat:@"%ld%C ", (long)([rest substringToIndex:d].integerValue + 1), delim];
+    } else {
+        return NO;
+    }
+
+    _listContinuation = NSMakeRange(NSNotFound, 0);
+    if (empty) {
+        [self editCursors:^NSRange(Sel sel, NSString **t, NSInteger *a, NSInteger *c) {
+            *t = @""; *a = 0; *c = 0;
+            return NSMakeRange(ls, le - ls);
+        } kind:GroupOther];
+        _coalesceBroken = YES;
+        return YES;
+    }
+    NSString *insert = [NSString stringWithFormat:@"%@%@%@", self.newline, indent, marker];
+    [self editCursors:^NSRange(Sel sel, NSString **t, NSInteger *a, NSInteger *c) {
+        *t = insert;
+        NSInteger caret = (NSInteger)[insert lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        *a = caret; *c = caret;
+        return SelRange(sel);
+    } kind:GroupOther];
+    _coalesceBroken = YES;
+    NSUInteger mb = [marker lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    if (_caret >= mb) { _listContinuation = NSMakeRange(_caret - mb, mb); _listMarker = [marker copy]; }
+    return YES;
+}
+
+// Esc straight after the marker was carried over removes just that marker, leaving a blank line —
+// only while nothing has moved or changed since, so a later Esc still collapses the selection.
+- (BOOL)cancelListContinuation {
+    NSRange r = _listContinuation;
+    _listContinuation = NSMakeRange(NSNotFound, 0);
+    if (!r.length || r.location == NSNotFound || NSMaxRange(r) > _buf.length) return NO;
+    if (_extra.length || self.selection.length || _caret != NSMaxRange(r)) return NO;
+    if (![[self stringIn:r] isEqualToString:_listMarker]) return NO;
+    [self editCursors:^NSRange(Sel sel, NSString **t, NSInteger *a, NSInteger *c) {
+        *t = @""; *a = 0; *c = 0;
+        return r;
+    } kind:GroupOther];
+    _coalesceBroken = YES;
+    return YES;
+}
+
 @end
