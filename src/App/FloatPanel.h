@@ -33,6 +33,10 @@
 @property (nonatomic, copy) NSString *(^namePrompt)(NSString *title, NSString *initial);
 // Stands in for moving a file to the Trash, so a test need not touch the real one. For tests.
 @property (nonatomic, copy) NSString *(^trashHandler)(NSString *path);
+// Answers "save this draft where?" without a panel; nil uses the real NSSavePanel. For tests.
+@property (nonatomic, copy) NSString *(^savePathChooser)(NSString *suggestedName);
+// A new empty draft tab, like the main window's ⌘N: saved to a real path only on ⌘S.
+- (void)newUntitled;
 
 // Files the panel can't show itself (images, PDFs, binaries) go to the main window, as does a file
 // the main window already has unsaved edits in — its copy is the current one, not the disk's.

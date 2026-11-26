@@ -119,6 +119,9 @@ static const NSInteger kTreeMenuTag = 0x5107;    // a context-menu item stamped 
 // An image or PDF has no editor: it shows a read-only view instead of editor + container.
 @property (nonatomic, strong) NSView *mediaView;
 @property (nonatomic, copy) NSString *mediaInfo;       // what the media view puts in the status bar
+// A ⌘N draft: path is a backup file, title is "Untitled-N", and ⌘S asks where to put it for real.
+@property (nonatomic) BOOL untitled;
+@property (nonatomic, copy) NSString *title;
 @end
 
 @implementation FloatDoc
@@ -127,6 +130,13 @@ static const NSInteger kTreeMenuTag = 0x5107;    // a context-menu item stamped 
     return self;
 }
 @end
+
+// Unsaved for the tab dot and close prompt: a draft counts the moment it has any text (its backup is
+// current, but it has never been saved anywhere the reader chose), a real file when the editor is.
+static BOOL floatDocDirty(FloatDoc *d) {
+    if (d.untitled) return d.editor.contentLength > 0;
+    return d.editor.isDirty;
+}
 
 @implementation FloatPanel {
     FloatPanelWindow *_panel;
@@ -215,7 +225,7 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     _panel.onSaveAll = ^{ [weakSelf saveAll]; };
     _panel.onNextTab = ^{ [weakSelf selectNextTab]; };
     _panel.onPreviousTab = ^{ [weakSelf selectPreviousTab]; };
-    _panel.onNewFile = ^{ [weakSelf floatNewFile:nil]; };
+    _panel.onNewFile = ^{ [weakSelf newUntitled]; };          // ⌘N: a draft, like the main window
     _panel.onNewFolder = ^{ [weakSelf floatNewFolder:nil]; };
     // Its own frame across launches, which is all the position and size persistence needed.
     if (![_panel setFrameUsingName:_frameName]) [_panel center];
@@ -690,18 +700,19 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 
 #pragma mark Showing a file in the panel
 
-- (NSString *)openPath { return _active.path; }
-- (BOOL)dirty { for (FloatDoc *d in _docs) if (d.editor.isDirty) return YES; return NO; }
+- (NSString *)openPath { return _active.untitled ? nil : _active.path; }
+- (BOOL)dirty { for (FloatDoc *d in _docs) if (floatDocDirty(d)) return YES; return NO; }
 - (NSUInteger)tabCount { return _docs.count; }
 - (NSArray<NSString *> *)openPaths {
     NSMutableArray *out = [NSMutableArray array];
-    for (FloatDoc *d in _docs) if (d.path) [out addObject:d.path];
+    for (FloatDoc *d in _docs) if (d.path && !d.untitled) [out addObject:d.path];
     return out;
 }
 
+// For dedup when opening a user file; a draft's path is a private backup, never matched here.
 - (FloatDoc *)docForPath:(NSString *)path {
     NSString *p = path.stringByStandardizingPath;
-    for (FloatDoc *d in _docs) if ([d.path.stringByStandardizingPath isEqualToString:p]) return d;
+    for (FloatDoc *d in _docs) if (!d.untitled && [d.path.stringByStandardizingPath isEqualToString:p]) return d;
     return nil;
 }
 
@@ -830,6 +841,7 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     if (!d) return;
     // Leaving a tab is a focus change, which both auto-save modes write out on.
     if (_active != d && _active.editor.isDirty && self.autoSaveMode != AutoSaveOff) [self autoSaveDoc:_active];
+    if (_active != d && _active.untitled && _active.editor.isDirty) [_active.editor save:NULL];   // stage the draft we leave
     if (_active != d) {
         [_active.markup removeFromSuperview];
         [_active.mediaView removeFromSuperview];
@@ -879,10 +891,10 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     NSMutableArray<TabItem *> *items = [NSMutableArray array];
     for (FloatDoc *d in _docs) {
         TabItem *t = [TabItem new];
-        t.title = d.path.lastPathComponent ?: @"";
-        t.dirty = d.editor.isDirty;
-        t.toolTip = d.path.stringByAbbreviatingWithTildeInPath;
-        t.missing = d.path.length && ![NSFileManager.defaultManager fileExistsAtPath:d.path];
+        t.title = d.untitled ? (d.title ?: @"") : (d.path.lastPathComponent ?: @"");
+        t.dirty = floatDocDirty(d);
+        t.toolTip = d.untitled ? FTL(@"New document (⌘S to choose where to save)") : d.path.stringByAbbreviatingWithTildeInPath;
+        t.missing = !d.untitled && d.path.length && ![NSFileManager.defaultManager fileExistsAtPath:d.path];
         [items addObject:t];
     }
     _tabBar.items = items;
@@ -898,23 +910,63 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 // while reopening them, so a half-restored list never overwrites the saved one.
 - (void)persistTabs {
     if (_restoring) return;
-    [ud() setObject:self.openPaths forKey:@"floatOpenTabs"];
+    // Every tab, drafts included: a draft's backup path stands in for it and is recognised on the
+    // way back. The active index is over this same all-tabs list.
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    for (FloatDoc *d in _docs) if (d.path) [paths addObject:d.path];
+    [ud() setObject:paths forKey:@"floatOpenTabs"];
     [ud() setInteger:_active ? (NSInteger)[_docs indexOfObject:_active] : -1 forKey:@"floatActiveTab"];
+}
+
+- (BOOL)isUntitledBackup:(NSString *)path {
+    return [path.stringByStandardizingPath hasPrefix:self.untitledDir.stringByStandardizingPath];
+}
+
+- (FloatDoc *)docByPath:(NSString *)path {
+    NSString *p = path.stringByStandardizingPath;
+    for (FloatDoc *d in _docs) if ([d.path.stringByStandardizingPath isEqualToString:p]) return d;
+    return nil;
 }
 
 - (void)restoreTabs {
     NSArray<NSString *> *paths = [ud() stringArrayForKey:@"floatOpenTabs"];
+    [self pruneUntitledOrphans:paths];        // crash leftovers that no tab references
     if (!paths.count) return;
     NSInteger active = [ud() objectForKey:@"floatActiveTab"] ? [ud() integerForKey:@"floatActiveTab"] : -1;
     NSString *activePath = (active >= 0 && active < (NSInteger)paths.count) ? paths[(NSUInteger)active] : nil;
     _restoring = YES;
-    for (NSString *p in paths)
-        if ([NSFileManager.defaultManager fileExistsAtPath:p]) [self openFile:p];
+    for (NSString *p in paths) {
+        if (![NSFileManager.defaultManager fileExistsAtPath:p]) continue;
+        if ([self isUntitledBackup:p]) [self restoreUntitledFrom:p];      // a draft, not a user file
+        else [self openFile:p];
+    }
     _restoring = NO;
-    // Land on the tab that was active last, if it is still among those that opened.
-    FloatDoc *d = activePath ? [self docForPath:activePath] : nil;
+    FloatDoc *d = activePath ? [self docByPath:activePath] : nil;
     if (d) [self activateDoc:d];      // reloadTabs within writes the pruned list back out
     else [self persistTabs];          // some files were gone: save what actually opened
+}
+
+// Reopen a draft from its backup file, with a fresh title. Its text and backup path carry over, so
+// ⌘S still asks where to save and the box stays "unsaved" until it does.
+- (void)restoreUntitledFrom:(NSString *)backup {
+    FloatDoc *d = [self buildDocFor:backup];
+    if (!d) return;
+    d.untitled = YES;
+    d.title = self.nextUntitledTitle;
+    [_docs addObject:d];
+}
+
+// Delete any backup in the drafts folder that no restored tab points at.
+- (void)pruneUntitledOrphans:(NSArray<NSString *> *)keep {
+    NSString *dir = self.untitledDir;
+    NSArray *files = [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil];
+    if (!files.count) return;
+    NSMutableSet *kept = [NSMutableSet set];
+    for (NSString *p in keep) [kept addObject:p.stringByStandardizingPath];
+    for (NSString *f in files) {
+        NSString *full = [dir stringByAppendingPathComponent:f].stringByStandardizingPath;
+        if (![kept containsObject:full]) [NSFileManager.defaultManager removeItemAtPath:full error:nil];
+    }
 }
 
 - (void)selectTab:(NSInteger)i {
@@ -926,9 +978,10 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 - (void)closeTab:(NSInteger)i {
     if (i < 0 || i >= (NSInteger)_docs.count) return;
     FloatDoc *d = _docs[(NSUInteger)i];
-    if (d.editor.isDirty && ![self confirmUnsavedDoc:d]) return;
+    if (floatDocDirty(d) && ![self confirmUnsavedDoc:d]) return;
     [d.markup removeFromSuperview];
     [d.mediaView removeFromSuperview];
+    if (d.untitled && d.path.length) [NSFileManager.defaultManager removeItemAtPath:d.path error:nil];   // drop its backup
     [_docs removeObjectAtIndex:(NSUInteger)i];
     if (_active == d) {
         _active = nil;
@@ -995,8 +1048,9 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     if (d && d == _active && d.mediaView) {
         _status.stringValue = [NSString stringWithFormat:@"%@   %@", d.path.lastPathComponent ?: @"", d.mediaInfo ?: @""];
     } else if (d && d == _active) {
-        _status.stringValue = [NSString stringWithFormat:@"%@%@   %@", d.editor.isDirty ? @"● " : @"",
-                               d.path.lastPathComponent ?: @"", d.editor.statusText];
+        NSString *name = d.untitled ? (d.title ?: @"") : (d.path.lastPathComponent ?: @"");
+        _status.stringValue = [NSString stringWithFormat:@"%@%@   %@", floatDocDirty(d) ? @"● " : @"",
+                               name, d.editor.statusText];
     } else if (!_active) {
         _status.stringValue = @"";
     }
@@ -1010,12 +1064,13 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
         // showed the text as it was when the file was opened.
         [d.markup textChanged];
         [self scheduleAutoSave];
+        if (d.untitled) [self scheduleUntitledBackup];     // keep the draft's backup current
     }
     if (d && d.editor && d.editor.editCount != d.savedEditCount) [self scheduleAutoSave];
     // A tab's dirty dot lives in the strip, so the strip is redrawn on every change.
     if (d && d.editor) {
         NSUInteger i = [_docs indexOfObject:d];
-        if (i != NSNotFound && i < _tabBar.items.count && _tabBar.items[i].dirty != d.editor.isDirty) [self reloadTabs];
+        if (i != NSNotFound && i < _tabBar.items.count && _tabBar.items[i].dirty != floatDocDirty(d)) [self reloadTabs];
     }
     [self updateFolderTitle];
 }
@@ -1036,17 +1091,19 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 // the main window keeps a dirty tab. Quitting is where the reader has to decide, which is what
 // this answers for.
 - (BOOL)confirmUnsavedBeforeClosing {
-    for (FloatDoc *d in _docs.copy) if (d.editor.isDirty && ![self confirmUnsavedDoc:d]) return NO;
+    for (FloatDoc *d in _docs.copy) if (floatDocDirty(d) && ![self confirmUnsavedDoc:d]) return NO;
     return YES;
 }
 
 - (BOOL)confirmUnsavedDoc:(FloatDoc *)doc {
-    if (!doc.editor.isDirty) return YES;
+    if (!floatDocDirty(doc)) return YES;
     NSAlert *a = [NSAlert new];
-    a.messageText = [NSString stringWithFormat:FTL(@"Save “%@” in the floating workspace?"),
-                     doc.path.lastPathComponent ?: @""];
-    a.informativeText = FTL(@"Its changes are lost if you don’t save them.");
-    [a addButtonWithTitle:FTL(@"Save")];
+    a.messageText = doc.untitled
+        ? [NSString stringWithFormat:FTL(@"Save “%@”?"), doc.title ?: @""]
+        : [NSString stringWithFormat:FTL(@"Save “%@” in the floating workspace?"), doc.path.lastPathComponent ?: @""];
+    a.informativeText = doc.untitled ? FTL(@"This document has never been saved. Its contents will be lost if you don’t save it.")
+                                     : FTL(@"Its changes are lost if you don’t save them.");
+    [a addButtonWithTitle:doc.untitled ? FTL(@"Save…") : FTL(@"Save")];
     [a addButtonWithTitle:FTL(@"Discard")];
     [a addButtonWithTitle:FTL(@"Cancel")];
     // The alert takes key from the panel; without this, hide-on-blur would close the panel out from
@@ -1054,11 +1111,11 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     _modalDepth++;
     NSModalResponse r = _alertHandler ? _alertHandler(a) : [a runModal];
     _modalDepth--;
-    if (r == NSAlertFirstButtonReturn) return [self saveDoc:doc announce:YES];
+    if (r == NSAlertFirstButtonReturn) return doc.untitled ? [self saveUntitledDoc:doc] : [self saveDoc:doc announce:YES];
     return r == NSAlertSecondButtonReturn;        // discard: let it go; cancel: stop
 }
 
-- (BOOL)save { return [self saveDoc:_active announce:YES]; }
+- (BOOL)save { return _active.untitled ? [self saveUntitledDoc:_active] : [self saveDoc:_active announce:YES]; }
 
 - (BOOL)saveDoc:(FloatDoc *)d announce:(BOOL)announce {
     if (!d.editor.isDirty) return YES;
@@ -1079,8 +1136,139 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 
 - (BOOL)saveAll {
     BOOL ok = YES;
-    for (FloatDoc *d in _docs.copy) if (![self saveDoc:d announce:YES]) ok = NO;
+    for (FloatDoc *d in _docs.copy) if (!d.untitled && ![self saveDoc:d announce:YES]) ok = NO;   // drafts: ⌘S each
     return ok;
+}
+
+#pragma mark Untitled drafts
+
+// Per app identity, kept apart from the main window's own "Untitled" folder so neither adopts the
+// other's backups. A draft's text lives here until the reader saves it somewhere real.
+- (NSString *)untitledDir {
+    NSString *support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+    NSString *folder = [bid isEqualToString:@"local.feather.editor"] ? @"Feather" : [@"Feather-" stringByAppendingString:bid ?: NSProcessInfo.processInfo.processName];
+    return [[support stringByAppendingPathComponent:folder] stringByAppendingPathComponent:@"FloatUntitled"];
+}
+
+- (NSString *)nextUntitledTitle {
+    NSMutableSet *used = [NSMutableSet set];
+    for (FloatDoc *d in _docs) if (d.untitled && d.title) [used addObject:d.title];
+    NSUInteger n = 1;
+    while ([used containsObject:[NSString stringWithFormat:FTL(@"Untitled-%lu"), (unsigned long)n]]) n++;
+    return [NSString stringWithFormat:FTL(@"Untitled-%lu"), (unsigned long)n];
+}
+
+// ⌘N: an empty editable tab whose text is staged in a backup file, written to a real location only
+// on ⌘S. No folder is needed — a draft belongs to the panel, not to whatever folder it is showing.
+- (void)newUntitled {
+    NSString *dir = self.untitledDir;
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *path = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.txt", NSUUID.UUID.UUIDString]];
+    if (![NSData.data writeToFile:path atomically:NO]) { NSBeep(); return; }
+    FloatDoc *d = [self buildDocFor:path];
+    if (!d) { [NSFileManager.defaultManager removeItemAtPath:path error:nil]; return; }
+    d.untitled = YES;
+    d.title = self.nextUntitledTitle;
+    [_docs addObject:d];
+    [self activateDoc:d];
+    [self reloadTabs];
+    if (_panel.isVisible) [_panel makeFirstResponder:d.markup.focusView];   // ready to type
+}
+
+// Save As: pick a real path, write the text there, and the tab becomes that file (losing its draft
+// backup). A dedicated file kind gains its preview.
+- (BOOL)saveUntitledDoc:(FloatDoc *)d {
+    if (!d.editor) return NO;
+    NSString *suggested = [self suggestedNameFor:d];
+    NSString *dest = [self askSavePath:suggested].stringByStandardizingPath;
+    if (!dest.length) return NO;
+    NSString *backup = d.path;
+    BOOL existed = [NSFileManager.defaultManager fileExistsAtPath:dest];
+    if (!existed) [NSFileManager.defaultManager createFileAtPath:dest contents:nil attributes:@{NSFilePosixPermissions: @0644}];
+    [d.editor setDocumentPath:dest];
+    NSString *err = nil;
+    if (![d.editor save:&err]) {
+        [d.editor setDocumentPath:backup];
+        if (!existed) [NSFileManager.defaultManager removeItemAtPath:dest error:nil];
+        [self flash:[NSString stringWithFormat:FTL(@"Couldn’t save: %@"), err ?: FTL(@"Unknown error")]];
+        return NO;
+    }
+    if (backup.length) [NSFileManager.defaultManager removeItemAtPath:backup error:nil];
+    d.path = dest;
+    d.untitled = NO;
+    d.title = nil;
+    d.savedEditCount = d.editor.editCount;
+    d.diskStamp = [NSFileManager.defaultManager attributesOfItemAtPath:dest error:nil][NSFileModificationDate];
+    // A markup file only gets its container built for the right kind at open time; a draft was plain
+    // text. Rebuild the tab against its real path so ".md" gains a preview.
+    if (FKMarkupKind(dest) != FKMarkupKind(backup ?: @"")) [self rebuildDoc:d];
+    else { d.markup.path = dest; [self docChanged:d]; [self reloadTabs]; }
+    if (_tree.rootPath) [_tree revealPath:dest];
+    if (self.onSaved) self.onSaved(dest);
+    return YES;
+}
+
+// The first non-blank line, cleaned for a file name — the same courtesy the main window offers.
+- (NSString *)suggestedNameFor:(FloatDoc *)d {
+    NSData *data = d.editor.contentData;
+    NSString *text = [[NSString alloc] initWithBytes:data.bytes length:MIN(data.length, (NSUInteger)400) encoding:NSUTF8StringEncoding] ?: @"";
+    NSString *first = @"";
+    for (NSString *l in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSString *t = [l stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" \t#>*-/"]];
+        if (t.length) { first = t; break; }
+    }
+    for (NSString *bad in @[@"/", @":", @"\\"]) first = [first stringByReplacingOccurrencesOfString:bad withString:@" "];
+    if (first.length > 40) first = [first substringToIndex:[first rangeOfComposedCharacterSequenceAtIndex:40].location];
+    first = [first stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    return [(first.length ? first : (d.title ?: @"Untitled")) stringByAppendingPathExtension:@"txt"];
+}
+
+- (NSString *)askSavePath:(NSString *)name {
+    NSString *dir = _tree.rootPath ?: NSHomeDirectory();
+    if (_savePathChooser) return _savePathChooser(name);
+    NSSavePanel *p = [NSSavePanel savePanel];
+    p.directoryURL = [NSURL fileURLWithPath:dir];
+    p.nameFieldStringValue = name;
+    p.canCreateDirectories = YES;
+    p.allowsOtherFileTypes = YES;
+    p.extensionHidden = NO;
+    p.message = FTL(@"Choose where to save. The extension sets the syntax highlighting, for example .md, .py or .json.");
+    _modalDepth++;
+    NSModalResponse r = [p runModal];
+    _modalDepth--;
+    return r == NSModalResponseOK ? p.URL.path : nil;
+}
+
+// Rebuild a tab's editor/markup against its current path (after a draft is saved to a typed name, so
+// the kind, highlighting and preview match the new extension). Keeps the tab in place.
+- (void)rebuildDoc:(FloatDoc *)d {
+    BOOL wasActive = (d == _active);
+    NSUInteger idx = [_docs indexOfObject:d];
+    if (idx == NSNotFound) return;
+    FloatDoc *fresh = [self buildDocFor:d.path];
+    if (!fresh) { d.markup.path = d.path; [self docChanged:d]; [self reloadTabs]; return; }
+    [d.markup removeFromSuperview];
+    [d.mediaView removeFromSuperview];
+    _docs[idx] = fresh;
+    if (wasActive) { _active = nil; [self activateDoc:fresh]; }
+    [self reloadTabs];
+}
+
+// Keep a draft's backup current, debounced, independent of the auto-save setting (a draft must never
+// be lost even with auto-save off).
+- (void)scheduleUntitledBackup {
+    __weak FloatPanel *weak = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [weak backupUntitledDrafts];
+    });
+}
+
+- (void)backupUntitledDrafts {
+    for (FloatDoc *d in _docs.copy) {
+        if (!d.untitled || !d.editor.isDirty || !d.path.length) continue;
+        [d.editor save:NULL];     // writes to the backup path; leaves it "has text" = unsaved to the reader
+    }
 }
 
 #pragma mark Auto-save
@@ -1106,7 +1294,7 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     NSTimeInterval delay = MAX(0.2, _autoSaveDelay > 0 ? _autoSaveDelay : 1.0);
     BOOL more = NO;
     for (FloatDoc *d in _docs.copy) {
-        if (!d.editor.isDirty) continue;
+        if (d.untitled || !d.editor.isDirty) continue;     // drafts back up on their own, never auto-save to a user file
         if (now - d.lastEditAt < delay - 0.01) { more = YES; continue; }   // still typing
         [self autoSaveDoc:d];
     }
@@ -1114,9 +1302,10 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
 }
 
 // Silent: a problem goes to the status line and the file stays unsaved, as in the main window.
-// Never prompts, so nothing blocks while the reader is typing in another app.
+// Never prompts, so nothing blocks while the reader is typing in another app. Drafts are excluded:
+// their only destination is the backup until the reader runs ⌘S.
 - (void)autoSaveDoc:(FloatDoc *)d {
-    if (!d.editor.isDirty || !d.path.length) return;
+    if (d.untitled || !d.editor.isDirty || !d.path.length) return;
     if (![NSFileManager.defaultManager fileExistsAtPath:d.path]) {
         [self flash:FTL(@"The file was deleted; not auto-saved (⌘S recreates it)")];
         return;
@@ -1137,8 +1326,10 @@ static NSUserDefaults *ud(void) { return NSUserDefaults.standardUserDefaults; }
     return mt && [mt compare:d.diskStamp] == NSOrderedDescending;
 }
 
-// Switching tabs, windows or apps is a focus change: both auto-save modes write out then.
+// Switching tabs, windows or apps is a focus change: both auto-save modes write out then. Drafts are
+// backed up regardless, so hiding the panel never loses one.
 - (void)flushAutoSave {
+    [self backupUntitledDrafts];
     if (self.autoSaveMode == AutoSaveOff) return;
     [_autoSaveTimer invalidate];
     _autoSaveTimer = nil;

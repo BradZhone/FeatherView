@@ -1318,15 +1318,6 @@ static void treeFileOps(NSString *unused) {
     CHECK([fm fileExistsAtPath:made], "new file is created on disk");
     CHECK([fp.openPath isEqualToString:made], "and opens in the panel (%s)", fp.openPath.lastPathComponent.UTF8String);
 
-    // ⌘N makes a new file too — the panel claims it before the main menu would.
-    nextName = @"viaKey.md";
-    NSEvent *cmdN = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand
-                                    timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:fp.panel.windowNumber
-                                      context:nil characters:@"n" charactersIgnoringModifiers:@"n" isARepeat:NO keyCode:45];
-    CHECK([fp.panel performKeyEquivalent:cmdN], "the panel claims ⌘N");
-    spin(0.3);
-    CHECK([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"viaKey.md"]], "⌘N creates a new file in the folder");
-
     // New folder.
     nextName = @"sub";
     [fp floatNewFolder:nil];
@@ -1335,8 +1326,6 @@ static void treeFileOps(NSString *unused) {
     CHECK([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"sub"] isDirectory:&isDir] && isDir, "new folder is created");
 
     // Rename the open file; its tab follows to the new path rather than dangling.
-    [fp openFile:made];        // make its tab active again (⌘N opened another above)
-    spin(0.2);
     [fp.tree revealPath:made];
     spin(0.1);
     nextName = @"renamed.md";
@@ -1362,6 +1351,80 @@ static void treeFileOps(NSString *unused) {
 
     [fp hide];
     [fm removeItemAtPath:dir error:nil];
+}
+
+// ⌘N makes a draft (like the main window), not a file: it only hits disk when the reader saves it,
+// and it survives the app quitting until then.
+static void untitledDrafts(NSString *dir) {
+    NSInteger wasAuto = FTSettings.shared.autoSaveMode;
+    FTSettings.shared.autoSaveMode = AutoSaveOff;
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    [ud removeObjectForKey:@"floatOpenTabs"];
+    [ud removeObjectForKey:@"floatActiveTab"];
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    FloatPanel *fp = newPanel();
+    fp.folder = dir;
+    [fp show];
+    spin(0.2);
+
+    // ⌘N: a draft tab, nothing on disk, titled Untitled-1, with no real path yet.
+    NSEvent *cmdN = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand
+                                    timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:fp.panel.windowNumber
+                                      context:nil characters:@"n" charactersIgnoringModifiers:@"n" isARepeat:NO keyCode:45];
+    CHECK([fp.panel performKeyEquivalent:cmdN], "the panel claims ⌘N");
+    spin(0.2);
+    CHECK(fp.tabCount == 1, "⌘N opens a tab (%lu)", (unsigned long)fp.tabCount);
+    CHECK(fp.openPath == nil, "a draft has no file path yet");
+    TabBarView *strip = findView(fp, TabBarView.class);
+    CHECK([strip.items.firstObject.title isEqualToString:@"Untitled-1"], "titled Untitled-1 (%s)", strip.items.firstObject.title.UTF8String);
+    CHECK(!fp.dirty, "an empty draft is not yet unsaved");
+
+    TextEditorView *ed = findView(fp, TextEditorView.class);
+    [(id<NSTextInputClient>)ed insertText:@"draft body\n" replacementRange:NSMakeRange(NSNotFound, 0)];
+    spin(0.1);
+    CHECK(fp.dirty, "a draft with text counts as unsaved");
+
+    // ⌘S routes through the save panel (stubbed): the draft becomes a real file, the backup is gone.
+    NSString *dest = [dir stringByAppendingPathComponent:@"saved-draft.md"];
+    __block NSUInteger asked = 0;
+    fp.savePathChooser = ^NSString *(NSString *name) { asked++; return dest; };
+    CHECK([fp save], "saving the draft succeeds");
+    spin(0.2);
+    CHECK(asked == 1, "it asked where to save (%lu)", (unsigned long)asked);
+    CHECK([fm fileExistsAtPath:dest], "the file is written where chosen");
+    CHECK([[NSString stringWithContentsOfFile:dest encoding:NSUTF8StringEncoding error:nil] containsString:@"draft body"], "with the draft's text");
+    CHECK([fp.openPath isEqualToString:dest], "and the tab is now that file (%s)", fp.openPath.lastPathComponent.UTF8String);
+    CHECK(!fp.dirty, "no longer unsaved once written");
+
+    // A second draft with text, left open, comes back after the app quits.
+    [fp.panel performKeyEquivalent:cmdN];
+    spin(0.2);
+    TextEditorView *ed2 = findView(fp, TextEditorView.class);
+    [(id<NSTextInputClient>)ed2 insertText:@"survive me" replacementRange:NSMakeRange(NSNotFound, 0)];
+    spin(0.1);
+    [fp hide];                 // flushes the draft's backup and persists the tab list
+    spin(0.1);
+
+    FloatPanel *next = newPanel();        // stands in for the next launch
+    next.folder = dir;
+    [next restoreTabs];
+    spin(0.3);
+    BOOL foundDraft = NO;
+    for (NSInteger i = 0; i < (NSInteger)next.tabCount; i++) {
+        [next selectTab:i];
+        TextEditorView *e = findView(next, TextEditorView.class);
+        if ([[[NSString alloc] initWithData:e.contentData encoding:NSUTF8StringEncoding] containsString:@"survive me"]) foundDraft = YES;
+    }
+    CHECK(foundDraft, "the unsaved draft is staged and reopens next launch");
+
+    // Clean up the drafts folder and the file we saved.
+    while (next.tabCount) { next.alertHandler = ^NSModalResponse(NSAlert *a){ return NSAlertSecondButtonReturn; }; [next closeTab:0]; spin(0.05); }
+    [fm removeItemAtPath:dest error:nil];
+    [ud removeObjectForKey:@"floatOpenTabs"];
+    [ud removeObjectForKey:@"floatActiveTab"];
+    [fp hide];
+    FTSettings.shared.autoSaveMode = wasAuto;
 }
 
 static void builtLazily(void) {
@@ -1409,31 +1472,37 @@ int main(void) {
         clearOurDefaults();
         NSString *a = makeFolder(@"notes", @[@"one.md", @"two.md", @"three.md"]);
         NSString *b = makeFolder(@"other", @[@"x.md", @"y.md"]);
+        // Run one test by name while iterating, so an already-shipped feature's window-opening test
+        // is not paid for again: FLOAT_ONLY=untitledDrafts ./build/float_panel_tests. Unset = all.
+        const char *onlyC = getenv("FLOAT_ONLY");
+        NSString *only = onlyC ? @(onlyC) : nil;
+        #define RUN(fn, call) do { if (!only || [@#fn isEqualToString:only]) call; } while (0)
         @try {
-            showAndHide(a);
-            keysInThePanel(a);
-            dividerGoesWithTheSidebar(a);
-            persistence(a, b);
-            hidesWhenInactive(a);
-            openingAFile(a);
-            showsFilesInPanel(a);
-            followsLinksInPanel(a);
-            unsavedInPanel(a);
-            mediaInPanel(a);
-            editThenPreview(a);
-            mainWindowCommandsAreOff(a);
-            tabs(a);
-            tabsRestore(a);
-            moveIntoPanel(a);
-            staysUpForItsOwnDialogs(a);
-            autoSave(a);
-            controlsFitTheirStrip(a);
-            folderList(a, b);
-            globalShortcut(a);
-            menuItemDoesNotClaimTheShortcut();
-            settingsSection(a, b);
-            treeFileOps(a);
-            builtLazily();
+            RUN(showAndHide, showAndHide(a));
+            RUN(keysInThePanel, keysInThePanel(a));
+            RUN(dividerGoesWithTheSidebar, dividerGoesWithTheSidebar(a));
+            RUN(persistence, persistence(a, b));
+            RUN(hidesWhenInactive, hidesWhenInactive(a));
+            RUN(openingAFile, openingAFile(a));
+            RUN(showsFilesInPanel, showsFilesInPanel(a));
+            RUN(followsLinksInPanel, followsLinksInPanel(a));
+            RUN(unsavedInPanel, unsavedInPanel(a));
+            RUN(mediaInPanel, mediaInPanel(a));
+            RUN(editThenPreview, editThenPreview(a));
+            RUN(mainWindowCommandsAreOff, mainWindowCommandsAreOff(a));
+            RUN(tabs, tabs(a));
+            RUN(tabsRestore, tabsRestore(a));
+            RUN(moveIntoPanel, moveIntoPanel(a));
+            RUN(staysUpForItsOwnDialogs, staysUpForItsOwnDialogs(a));
+            RUN(autoSave, autoSave(a));
+            RUN(controlsFitTheirStrip, controlsFitTheirStrip(a));
+            RUN(folderList, folderList(a, b));
+            RUN(globalShortcut, globalShortcut(a));
+            RUN(menuItemDoesNotClaimTheShortcut, menuItemDoesNotClaimTheShortcut());
+            RUN(settingsSection, settingsSection(a, b));
+            RUN(treeFileOps, treeFileOps(a));
+            RUN(untitledDrafts, untitledDrafts(a));
+            RUN(builtLazily, builtLazily());
         } @catch (NSException *e) {
             CHECK(NO, "uncaught %s: %s", e.name.UTF8String, e.reason.UTF8String);
         } @finally {
